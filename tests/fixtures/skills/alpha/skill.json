@@ -1,0 +1,10 @@
+{
+  "name": "alpha",
+  "version": "1.0.0",
+  "summary": "Fixture alpha summary.",
+  "summary_pt": "Resumo da fixture alpha.",
+  "profile": { "recommended": "on-demand", "supported": ["on-demand", "user", "project"] },
+  "environments": ["claude-code", "codex"],
+  "requires": [],
+  "workspace": { "shared": ["state.json"], "local": ["logs/"] }
+}

@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "novarc-harness-doctor/state.schema.json",
+  "title": "novarc-harness-doctor state",
+  "description": "Single source of truth for one harness review. The board is rendered from it; scores are computed by render-board.mjs and must never be written by hand.",
+  "type": "object",
+  "required": ["schemaVersion", "skillVersion", "mode", "scopes", "environment", "startedAt", "rounds", "layers", "inventory", "items", "log"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "skillVersion": { "type": "string" },
+    "mode": { "enum": ["guided", "doctor"] },
+    "language": { "enum": ["en", "pt"], "description": "Language of the board chrome; item texts are written by the agent in the user's language." },
+    "scopes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/scope" }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["agent", "os"],
+      "additionalProperties": false,
+      "properties": {
+        "agent": { "enum": ["claude-code", "codex", "traycer", "other"] },
+        "os": { "enum": ["windows", "macos", "linux"] },
+        "board": { "type": "string", "description": "Where the board is shown, e.g. 'traycer artifact', 'claude artifact', 'local file'." }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Folder name only; never an absolute path in shared files." },
+        "isCode": { "type": "boolean" },
+        "defaultBranch": { "type": "string" },
+        "behindRemote": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "lastRun": { "type": "string", "format": "date-time" },
+    "rounds": {
+      "type": "array",
+      "description": "One entry per round and scope. Only status 'done' counts toward the score.",
+      "items": {
+        "type": "object",
+        "required": ["round", "scope", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "round": { "$ref": "#/$defs/round" },
+          "scope": { "$ref": "#/$defs/scope" },
+          "status": { "enum": ["pending", "done", "skipped", "not-applicable"] },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "description": "What enters a session, in load order. Drawn as the layers diagram.",
+      "items": {
+        "type": "object",
+        "required": ["scope", "name", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "scope": { "$ref": "#/$defs/scope" },
+          "name": { "type": "string" },
+          "kind": { "enum": ["instructions", "settings", "permissions", "hooks", "skills", "plugins", "mcp", "memory", "docs", "clis", "other"] },
+          "path": { "type": "string", "description": "Display path with the home dir shown as ~ and the project as ./" },
+          "tokens": { "type": "integer", "minimum": 0, "description": "Approximate tokens this layer adds to every session." },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "inventory": {
+      "type": "array",
+      "description": "Everything found, including what is fine. Every entry carries an opinion.",
+      "items": {
+        "type": "object",
+        "required": ["id", "scope", "category", "name", "verdict", "opinion"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "scope": { "$ref": "#/$defs/scope" },
+          "category": { "type": "string" },
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "detail": { "type": "string" },
+          "verdict": { "enum": ["fine", "attention", "problem"] },
+          "opinion": { "type": "string" },
+          "itemId": { "type": "string", "description": "The item raised from this entry, if any." }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "scope", "round", "severity", "class", "title", "finding", "proposal", "opinion", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z]{1,3}-?[0-9]{1,3}$" },
+          "scope": { "$ref": "#/$defs/scope" },
+          "round": { "$ref": "#/$defs/round" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "class": { "enum": ["reversible", "additive", "translate-agent", "translate-human", "permission", "secret", "delete", "install", "gate", "external", "none"] },
+          "title": { "type": "string" },
+          "finding": { "type": "string" },
+          "evidence": { "type": "string", "description": "Counts, file:line, commit ids. Never secret values or transcript text." },
+          "proposal": { "type": "string" },
+          "opinion": { "type": "string" },
+          "status": { "enum": ["open", "queued", "in-progress", "fixed", "accepted", "failed", "ok", "wontfix-not-applicable"] },
+          "decision": { "type": "string" },
+          "verified": { "type": "string", "description": "What was checked after the change." },
+          "notVerified": { "type": "string", "description": "What could not be checked." },
+          "backup": { "type": "string" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "leads": {
+      "type": "array",
+      "description": "Unconfirmed leads: things worth checking that could not be confirmed from an official source in this run.",
+      "items": {
+        "type": "object",
+        "required": ["title", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "title": { "type": "string" },
+          "source": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "description": "Written by render-board.mjs only.",
+      "additionalProperties": false,
+      "properties": {
+        "user": { "$ref": "#/$defs/score" },
+        "project": { "$ref": "#/$defs/score" }
+      }
+    },
+    "log": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["at", "text"],
+        "additionalProperties": false,
+        "properties": {
+          "at": { "type": "string", "format": "date-time" },
+          "itemId": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "scope": { "enum": ["user", "project"] },
+    "round": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current": { "type": ["number", "null"] },
+        "baseline": { "type": ["number", "null"] },
+        "previous": { "type": ["number", "null"] },
+        "grade": { "type": ["string", "null"] },
+        "roundsCounted": { "type": "integer" },
+        "roundsTotal": { "type": "integer" },
+        "computedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

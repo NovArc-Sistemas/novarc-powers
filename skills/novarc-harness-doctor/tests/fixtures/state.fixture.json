@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "skillVersion": "0.1.0",
+  "mode": "doctor",
+  "scopes": ["user", "project"],
+  "environment": { "agent": "claude-code", "os": "linux", "board": "local file" },
+  "project": { "name": "fixture-shop", "isCode": true, "defaultBranch": "main", "behindRemote": 0 },
+  "startedAt": "2026-01-10T09:00:00Z",
+  "lastRun": "2026-01-10T11:30:00Z",
+  "rounds": [
+    { "round": 1, "scope": "user", "status": "done" },
+    { "round": 2, "scope": "user", "status": "done" },
+    { "round": 3, "scope": "user", "status": "not-applicable", "note": "Documentation is a project round." },
+    { "round": 4, "scope": "user", "status": "skipped", "note": "User asked to leave gates for later." },
+    { "round": 5, "scope": "user", "status": "pending" },
+    { "round": 6, "scope": "user", "status": "pending" },
+    { "round": 7, "scope": "user", "status": "pending" },
+    { "round": 8, "scope": "user", "status": "pending" },
+    { "round": 1, "scope": "project", "status": "done" },
+    { "round": 2, "scope": "project", "status": "done" },
+    { "round": 3, "scope": "project", "status": "done" },
+    { "round": 4, "scope": "project", "status": "done" },
+    { "round": 5, "scope": "project", "status": "skipped" },
+    { "round": 6, "scope": "project", "status": "not-applicable" },
+    { "round": 7, "scope": "project", "status": "pending" },
+    { "round": 8, "scope": "project", "status": "done" }
+  ],
+  "layers": [
+    { "scope": "user", "name": "CLAUDE.md", "kind": "instructions", "path": "~/.claude/CLAUDE.md", "tokens": 1800 },
+    { "scope": "user", "name": "settings.json", "kind": "settings", "path": "~/.claude/settings.json", "tokens": 0 },
+    { "scope": "user", "name": "Skills index", "kind": "skills", "tokens": 650, "note": "Descriptions of 12 skills." },
+    { "scope": "project", "name": "CLAUDE.md", "kind": "instructions", "path": "./CLAUDE.md", "tokens": 900 },
+    { "scope": "project", "name": "docs/architecture.md", "kind": "docs", "path": "./docs/architecture.md", "tokens": 2400, "note": "Imported from CLAUDE.md." }
+  ],
+  "inventory": [
+    { "id": "INV-1", "scope": "user", "category": "instructions", "name": "CLAUDE.md", "path": "~/.claude/CLAUDE.md", "detail": "7.2 KB, 1 broken import", "verdict": "problem", "opinion": "The broken import drops a whole rule set silently.", "itemId": "U-1" },
+    { "id": "INV-2", "scope": "user", "category": "permissions", "name": "deny rules", "detail": "4 rules", "verdict": "fine", "opinion": "Narrow and tested with the argument moved." },
+    { "id": "INV-3", "scope": "project", "category": "docs", "name": "README.md", "path": "./README.md", "detail": "en, 3 KB", "verdict": "fine", "opinion": "Current; commands in it run." },
+    { "id": "INV-4", "scope": "project", "category": "docs", "name": "docs/guia.md", "path": "./docs/guia.md", "detail": "pt, 5 KB", "verdict": "attention", "opinion": "Agent-facing and not in English.", "itemId": "P-2" }
+  ],
+  "items": [
+    { "id": "U-1", "scope": "user", "round": 1, "severity": "critical", "class": "secret", "title": "Token inline in helper script", "finding": "A GitHub token sits in a helper script.", "evidence": "scripts/helper.sh:3, masked ghp_…40", "proposal": "Move to the keychain and rotate.", "opinion": "Rotate today.", "status": "open" },
+    { "id": "U-2", "scope": "user", "round": 1, "severity": "low", "class": "permission", "title": "Unused ask rule", "finding": "An ask rule names a tool that is gone.", "proposal": "Remove the rule.", "opinion": "Harmless clutter.", "status": "fixed", "verified": "Settings re-read; rule absent.", "updatedAt": "2026-01-10T10:00:00Z" },
+    { "id": "U-3", "scope": "user", "round": 2, "severity": "high", "class": "reversible", "title": "Broken import in CLAUDE.md", "finding": "One @import does not resolve.", "proposal": "Point it at the real file.", "opinion": "User wants to keep the old path for now.", "status": "accepted", "decision": "Keep as is until the mirror is rebuilt." },
+    { "id": "U-4", "scope": "user", "round": 2, "severity": "medium", "class": "translate-agent", "title": "Rules file in Portuguese", "finding": "An agent-facing rules file is not in English.", "proposal": "Translate; draft is ready.", "opinion": "Worth it, fewer tokens.", "status": "queued" },
+    { "id": "U-5", "scope": "user", "round": 2, "severity": "low", "class": "additive", "title": "Rule without a reason", "finding": "A rule states what but not why.", "proposal": "Add the reason.", "opinion": "Small win.", "status": "in-progress" },
+    { "id": "U-6", "scope": "user", "round": 4, "severity": "high", "class": "gate", "title": "Stop hook points at a moved script", "finding": "The Stop hook command path does not exist.", "proposal": "Fix the path.", "opinion": "The user believes this gate runs.", "status": "open" },
+    { "id": "P-1", "scope": "project", "round": 1, "severity": "medium", "class": "additive", "title": ".env.local not ignored", "finding": "A local env file is not in .gitignore.", "proposal": "Add it.", "opinion": "Already fine: it is ignored by a parent rule.", "status": "ok" },
+    { "id": "P-2", "scope": "project", "round": 3, "severity": "medium", "class": "translate-agent", "title": "Agent doc in Portuguese", "finding": "docs/guia.md is agent-facing and not in English.", "proposal": "Translate.", "opinion": "Do it.", "status": "failed", "notVerified": "Translation draft did not build." },
+    { "id": "P-3", "scope": "project", "round": 3, "severity": "low", "class": "none", "title": "Orphaned changelog", "finding": "CHANGELOG.old is not linked.", "proposal": "Archive it.", "opinion": "Not an agent doc.", "status": "wontfix-not-applicable" },
+    { "id": "P-4", "scope": "project", "round": 4, "severity": "high", "class": "gate", "title": "No pre-push check", "finding": "Failing tests reached the default branch 4 times.", "evidence": "4 sessions, commits abc1234..def5678", "proposal": "Add a pre-push hook running the fast checks.", "opinion": "Cheap and it would have caught all four.", "status": "fixed" },
+    { "id": "P-5", "scope": "project", "round": 8, "severity": "critical", "class": "external", "title": "Hook runs a package at @latest", "finding": "A hook runs an npm package at @latest.", "proposal": "Pin the version.", "opinion": "User accepts the risk for now.", "status": "accepted" },
+    { "id": "P-6", "scope": "project", "round": 5, "severity": "medium", "class": "delete", "title": "Stale worktrees", "finding": "Three worktrees from old branches.", "proposal": "Remove them.", "opinion": "User's call.", "status": "open" }
+  ],
+  "leads": [
+    { "title": "A newer release may change the hook event names", "source": "https://example.invalid/changelog", "note": "Could not confirm in this run." }
+  ],
+  "scores": {
+    "project": { "previous": 72 }
+  },
+  "log": [
+    { "at": "2026-01-10T10:00:00Z", "itemId": "U-2", "text": "Removed unused ask rule; settings re-read." },
+    { "at": "2026-01-10T11:00:00Z", "itemId": "P-4", "text": "Pre-push hook added; ran it once, it blocked a failing test." }
+  ]
+}

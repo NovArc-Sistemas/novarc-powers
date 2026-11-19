@@ -1,0 +1,155 @@
+{
+  "$comment": "Good practices round 2, 4 and 6 install when missing. `check` says how to tell whether it is present; `install` is the text or change to propose; `class` follows doctor-policy.md. A practice that conflicts with something the user configured on purpose is raised, not installed.",
+  "practices": [
+    {
+      "id": "agent-files-in-english",
+      "scope": [
+        "user",
+        "project"
+      ],
+      "round": 2,
+      "class": "additive",
+      "title": "Files written for agents are in English",
+      "why": "Fewer tokens than the same text in most other languages, and it matches the language of agent tooling and skill descriptions.",
+      "check": "The user-level instruction file states which language agent-facing files use; agent-facing files are in English (discover.mjs reports a language per doc).",
+      "install": "Files written for agents (instruction files, rules, skills, specs, plans, memory) are in English: fewer tokens, and it matches the tooling. Talk to the user in their language.",
+      "followUp": "Translate existing agent-facing files (class translate-agent, queued in doctor mode, drafted in <ws>/drafts/)."
+    },
+    {
+      "id": "skills-index",
+      "scope": [
+        "user"
+      ],
+      "round": 6,
+      "class": "additive",
+      "title": "A short skills index in the instruction file",
+      "why": "Skills only help when the agent reaches for them; an index that says when to use each one makes them fire without being named.",
+      "check": "The user-level instruction file has a skills section that matches what is installed.",
+      "install": "See round 6, 'Skills index'. Generated from the installed skills, at most about ten lines."
+    },
+    {
+      "id": "knowledge-graph-instruction",
+      "scope": [
+        "project"
+      ],
+      "round": 6,
+      "class": "additive",
+      "title": "The agent is told to query the knowledge graph",
+      "why": "A graph that is built and never queried costs build time and gives nothing.",
+      "check": "graphify-out/ exists and an instruction file tells the agent when to query it.",
+      "install": "See round 6, 'Model instruction'."
+    },
+    {
+      "id": "verify-before-done",
+      "scope": [
+        "user"
+      ],
+      "round": 2,
+      "class": "additive",
+      "title": "Fresh evidence before claiming done",
+      "why": "The most common agent failure is reporting success from what should have happened.",
+      "check": "An instruction or an installed skill requires running the check before saying the work is done.",
+      "install": "Before saying work is done, run the check that proves it (tests, build, the command, a re-read of the file) in this turn and report what it showed, including what you could not check."
+    },
+    {
+      "id": "cli-over-mcp",
+      "scope": [
+        "user",
+        "project"
+      ],
+      "round": 7,
+      "class": "additive",
+      "title": "Prefer an official CLI over an MCP server for the same service",
+      "why": "A CLI costs nothing until used; an MCP server adds its tool definitions to every session.",
+      "check": "For every MCP server whose service has an official CLI, the CLI is installed and logged in, and an instruction file says to prefer it.",
+      "install": "See round 7, \"CLI-first instruction\". Generated from the CLIs actually installed."
+    },
+    {
+      "id": "mcp-at-project-level",
+      "scope": [
+        "user",
+        "project"
+      ],
+      "round": 7,
+      "class": "reversible",
+      "title": "MCP servers at project level unless needed everywhere",
+      "why": "A user-level server loads its tool definitions into every session of every project; most are needed by one or two projects.",
+      "check": "Every user-level MCP server is used in nearly every conversation regardless of project; the rest live in the projects that need them.",
+      "install": "See round 7, \"MCP policy\". Present the options per server; never move one without the user's choice."
+    },
+    {
+      "id": "never-commit-unasked",
+      "scope": [
+        "user"
+      ],
+      "round": 1,
+      "class": "additive",
+      "title": "No commit, push, PR or merge without an explicit ask",
+      "why": "Outward-facing and hard to undo; agents otherwise treat them as the natural end of a task.",
+      "check": "An instruction or permission rule covers commit, push, PR and merge.",
+      "install": "Never commit, push, open a pull request or merge unless the user asked for that step in this session. Never force-push or rewrite published history."
+    },
+    {
+      "id": "branch-per-session",
+      "scope": [
+        "user",
+        "project"
+      ],
+      "round": 4,
+      "class": "additive",
+      "title": "One branch and worktree per concurrent session",
+      "why": "Two sessions in one working directory overwrite each other's changes and commit each other's work.",
+      "check": "An instruction covers branch naming and worktrees for parallel sessions, or the project defines its own protocol.",
+      "install": "Each concurrent session works on its own branch in its own worktree, named <type>/<task-slug>-<YYYYMMDD>. Check the current branch before every commit."
+    },
+    {
+      "id": "test-hooks-in-fixture",
+      "scope": [
+        "user"
+      ],
+      "round": 4,
+      "class": "additive",
+      "title": "Test hooks and gates in a throwaway repo",
+      "why": "Testing a gate by mutating the working repo (reset, probe commits) destroys work.",
+      "check": "An instruction says how to test git hooks.",
+      "install": "Never test a git hook or gate by mutating the working repo. Use a throwaway `git init` fixture in a temp dir."
+    },
+    {
+      "id": "secret-hygiene",
+      "scope": [
+        "user",
+        "project"
+      ],
+      "round": 1,
+      "class": "additive",
+      "title": "Secrets never printed, never committed",
+      "why": "Anything printed reaches the transcript; anything committed reaches every clone.",
+      "check": "An instruction covers masking secrets in output; the project ignores .env* and key files; ideally a pre-commit secret scan exists.",
+      "install": "Never print a secret, token or key, even partially beyond the first 4 characters. Never add credential files to git."
+    },
+    {
+      "id": "docs-index",
+      "scope": [
+        "project"
+      ],
+      "round": 3,
+      "class": "additive",
+      "title": "A docs index the instruction file points to",
+      "why": "With more than about ten docs, the agent cannot tell which one answers the question without reading them all.",
+      "check": "A file lists each doc with what it answers and when to read it, and an instruction file points to it.",
+      "install": "One line per doc: path, the question it answers, when to read it. Point to it from the project instruction file."
+    },
+    {
+      "id": "update-notify-not-auto",
+      "scope": [
+        "user"
+      ],
+      "round": 8,
+      "class": "reversible",
+      "title": "Third-party instructions update on notice, not silently",
+      "why": "An auto-updating plugin or skill from someone else's branch runs their next push in your sessions with your permissions.",
+      "check": "Marketplaces and skill sources are pinned or set to notify.",
+      "install": "Pin the version, or switch the source to notify-then-update."
+    }
+  ]
+}

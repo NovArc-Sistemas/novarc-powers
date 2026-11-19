@@ -1,0 +1,476 @@
+{
+  "$comment": "Every entry was checked against its source on verifiedAt. Before proposing an install, open `source` and read the current instructions there; `install` is a snapshot, not the authority. Entries older than 90 days are re-checked before use. `signals` drive recommendations in round 7; `overlapsWith` drives the stacking warning. verifiedAt null means the entry describes the tool but the install command was not checked; read the source first. `auth` gives the login and status commands the skill walks the user through (status is run by the user or with their ok, never by the probes). `replacesMcp` lists MCP server names (matched case-insensitively as substrings) that this CLI can replace.",
+  "tools": [
+    {
+      "id": "superpowers",
+      "kind": "plugin",
+      "level": "user",
+      "bin": null,
+      "summary": "Methodology layer of skills (brainstorm, plan, debug, verify) that the agent triggers on its own via a session-start injection.",
+      "why": "Gives the agent a default way of working without the user asking for it each time.",
+      "source": "https://github.com/obra/superpowers",
+      "license": "MIT",
+      "verifiedAt": "2026-11-19",
+      "install": {
+        "claude-code": [
+          "/plugin install superpowers@claude-plugins-official"
+        ],
+        "codex": [
+          "In Codex run /plugins, search 'superpowers', choose Install Plugin"
+        ],
+        "other": "See the per-agent sections of the source README."
+      },
+      "verify": "A new session shows the using-superpowers bootstrap at the top; asking to build something triggers the brainstorming skill.",
+      "measure": null,
+      "signals": [],
+      "overlapsWith": [],
+      "notes": "Installed separately per agent. Pair with the skills index of round 6."
+    },
+    {
+      "id": "rtk",
+      "kind": "cli",
+      "level": "user",
+      "bin": "rtk",
+      "versionArgs": [
+        "--version"
+      ],
+      "verifyArgs": [
+        "gain",
+        "--help"
+      ],
+      "summary": "Rust CLI proxy that filters common dev command output before it reaches the model.",
+      "why": "Cuts tokens spent on test, git, build and search output.",
+      "source": "https://github.com/rtk-ai/rtk",
+      "license": "Apache-2.0 + BUSL-1.1 (dual; read the Editions and licence section)",
+      "verifiedAt": "2026-11-19",
+      "install": {
+        "windows": [
+          "winget install rtk-ai.rtk"
+        ],
+        "macos": [
+          "brew install rtk"
+        ],
+        "linux": [
+          "brew install rtk",
+          "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh"
+        ],
+        "hook": [
+          "rtk init -g"
+        ]
+      },
+      "verify": "`rtk gain --help` succeeds. An unrelated program also named rtk exists; if `rtk gain` fails, the wrong binary is first on PATH.",
+      "measure": "rtk gain",
+      "signals": [],
+      "overlapsWith": [
+        "caveman"
+      ],
+      "notes": "`rtk init -g` registers a command-rewrite hook in the agent's settings; back settings up first."
+    },
+    {
+      "id": "caveman",
+      "kind": "cli",
+      "level": "user",
+      "bin": "caveman",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Skill plus local proxy: shorter agent answers, compressed tool output, a few other token savers, each with its own switch.",
+      "why": "Fewer output and input tokens per session.",
+      "source": "https://github.com/JuliusBrussee/caveman",
+      "license": "Apache-2.0",
+      "verifiedAt": "2026-11-19",
+      "install": {
+        "any": [
+          "npx @caveman-ai/cli@latest"
+        ],
+        "requires": "Node.js 22.13+"
+      },
+      "verify": "`caveman status` lists what is on and which agents it reaches.",
+      "measure": "caveman stats",
+      "uninstall": "npx -y github:JuliusBrussee/caveman -- --uninstall",
+      "signals": [],
+      "overlapsWith": [
+        "rtk",
+        "output-style-concise"
+      ],
+      "notes": "The installer finds and configures every agent on the machine at once; list what it changed. Its 'Read less' part overlaps rtk; its 'Say less' part overlaps a concise output style. Pick per part, not per tool."
+    },
+    {
+      "id": "ponytail",
+      "kind": "plugin",
+      "level": "user",
+      "bin": null,
+      "summary": "Skill that makes the agent reuse what exists and write only what the task needs, without cutting validation, security or tests; adds review and audit commands.",
+      "why": "Less code and fewer tokens per change, with a cost band in Claude Code.",
+      "source": "https://github.com/DietrichGebert/ponytail",
+      "license": "MIT",
+      "verifiedAt": "2026-11-19",
+      "install": {
+        "claude-code": [
+          "/plugin marketplace add DietrichGebert/ponytail",
+          "/plugin install ponytail@ponytail"
+        ],
+        "codex": [
+          "codex plugin marketplace add DietrichGebert/ponytail",
+          "codex plugin add ponytail@ponytail",
+          "Then open /hooks in Codex and trust its two lifecycle hooks"
+        ],
+        "other": "See INSTALL.md in the source."
+      },
+      "verify": "A new session shows the ponytail mode line; `/ponytail` reports the current level.",
+      "measure": "The ponytail band and board (Claude Code).",
+      "signals": [],
+      "overlapsWith": [],
+      "notes": "Upstream warns to install only from DietrichGebert/ponytail or @dietrichgebert/ponytail on npm."
+    },
+    {
+      "id": "graphify",
+      "kind": "python-cli",
+      "level": "project",
+      "bin": "graphify",
+      "versionArgs": [
+        "--help"
+      ],
+      "summary": "Builds a queryable knowledge graph of a codebase (local AST parsing, no vector store) and registers a /graphify skill.",
+      "why": "The agent answers architecture and dependency questions from the graph instead of reading many files.",
+      "source": "https://github.com/Graphify-Labs/graphify",
+      "license": "Apache-2.0",
+      "verifiedAt": "2026-11-19",
+      "install": {
+        "any": [
+          "uv tool install graphifyy",
+          "graphify install"
+        ],
+        "alt": [
+          "pipx install graphifyy"
+        ]
+      },
+      "verify": "`graphify --help` lists commands; after a build, `graphify-out/graph.json` exists.",
+      "measure": null,
+      "signals": [
+        {
+          "type": "file",
+          "value": "package.json"
+        },
+        {
+          "type": "file",
+          "value": "pyproject.toml"
+        },
+        {
+          "type": "file",
+          "value": "go.mod"
+        },
+        {
+          "type": "file",
+          "value": "Cargo.toml"
+        },
+        {
+          "type": "file",
+          "value": "pom.xml"
+        },
+        {
+          "type": "dir",
+          "value": "src"
+        }
+      ],
+      "overlapsWith": [],
+      "notes": "The PyPI package is `graphifyy` (two y). `graphify` on PyPI is a different package. Old links point to safishamsi/graphify, which redirects."
+    },
+    {
+      "id": "gh",
+      "kind": "cli",
+      "level": "user",
+      "bin": "gh",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "GitHub CLI.",
+      "why": "PRs, issues, Actions and API reads without a GitHub MCP server in context.",
+      "source": "https://cli.github.com/",
+      "license": "MIT",
+      "verifiedAt": null,
+      "install": {
+        "windows": [
+          "winget install GitHub.cli"
+        ],
+        "macos": [
+          "brew install gh"
+        ],
+        "linux": [
+          "See https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+        ]
+      },
+      "verify": "Run `gh auth status` by hand; it exits 0 when logged in. Probes never run auth commands.",
+      "signals": [
+        {
+          "type": "remote",
+          "value": "github.com"
+        },
+        {
+          "type": "dir",
+          "value": ".github"
+        },
+        {
+          "type": "mcp",
+          "value": "github"
+        }
+      ],
+      "overlapsWith": [
+        "mcp:github"
+      ],
+      "notes": "Not verified against the source yet: read the source before proposing the install command.",
+      "auth": {
+        "login": "gh auth login",
+        "status": "gh auth status",
+        "storage": "OS keychain by default"
+      },
+      "replacesMcp": [
+        "github"
+      ]
+    },
+    {
+      "id": "supabase",
+      "kind": "cli",
+      "level": "user",
+      "bin": "supabase",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Supabase CLI: migrations, local stack, edge functions, linked-project queries.",
+      "why": "Keeps the migration ledger in the repo consistent; MCP write tools can desynchronise it.",
+      "source": "https://supabase.com/docs/guides/local-development/cli/getting-started",
+      "license": "MIT",
+      "verifiedAt": null,
+      "install": {
+        "windows": [
+          "scoop install supabase"
+        ],
+        "macos": [
+          "brew install supabase/tap/supabase"
+        ],
+        "any": [
+          "npx supabase --help"
+        ]
+      },
+      "verify": "`supabase --version` prints a version.",
+      "signals": [
+        {
+          "type": "dir",
+          "value": "supabase"
+        },
+        {
+          "type": "dep",
+          "value": "@supabase/supabase-js"
+        },
+        {
+          "type": "mcp",
+          "value": "supabase"
+        }
+      ],
+      "overlapsWith": [
+        "mcp:supabase"
+      ],
+      "notes": "Not verified against the source yet: read the source before proposing the install command.",
+      "auth": {
+        "login": "supabase login",
+        "status": "supabase projects list",
+        "perProject": "supabase link --project-ref <ref>",
+        "storage": "OS keychain when available"
+      },
+      "replacesMcp": [
+        "supabase"
+      ]
+    },
+    {
+      "id": "vercel",
+      "kind": "cli",
+      "level": "user",
+      "bin": "vercel",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Vercel CLI.",
+      "why": "Deploys, env vars and logs from the terminal.",
+      "source": "https://vercel.com/docs/cli",
+      "license": "Apache-2.0",
+      "verifiedAt": null,
+      "install": {
+        "any": [
+          "npm i -g vercel"
+        ]
+      },
+      "verify": "`vercel --version` prints a version.",
+      "signals": [
+        {
+          "type": "file",
+          "value": "vercel.json"
+        },
+        {
+          "type": "dir",
+          "value": ".vercel"
+        },
+        {
+          "type": "mcp",
+          "value": "vercel"
+        }
+      ],
+      "overlapsWith": [
+        "mcp:vercel"
+      ],
+      "notes": "Not verified against the source yet: read the source before proposing the install command.",
+      "auth": {
+        "login": "vercel login",
+        "status": "vercel whoami",
+        "perProject": "vercel link"
+      },
+      "replacesMcp": [
+        "vercel"
+      ]
+    },
+    {
+      "id": "railway",
+      "kind": "cli",
+      "level": "user",
+      "bin": "railway",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Railway CLI.",
+      "why": "Deploys, logs and variables from the terminal.",
+      "source": "https://docs.railway.com/guides/cli",
+      "license": "MIT",
+      "verifiedAt": null,
+      "install": {
+        "any": [
+          "npm i -g @railway/cli"
+        ],
+        "macos": [
+          "brew install railway"
+        ]
+      },
+      "verify": "`railway --version` prints a version.",
+      "signals": [
+        {
+          "type": "file",
+          "value": "railway.json"
+        },
+        {
+          "type": "file",
+          "value": "railway.toml"
+        },
+        {
+          "type": "mcp",
+          "value": "railway"
+        }
+      ],
+      "overlapsWith": [],
+      "notes": "Not verified against the source yet: read the source before proposing the install command.",
+      "auth": {
+        "login": "railway login",
+        "status": "railway whoami",
+        "perProject": "railway link"
+      },
+      "replacesMcp": [
+        "railway"
+      ]
+    },
+    {
+      "id": "docker",
+      "kind": "cli",
+      "level": "user",
+      "bin": "docker",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Docker CLI.",
+      "why": "Build and run the project's containers locally.",
+      "source": "https://docs.docker.com/get-started/get-docker/",
+      "license": "Apache-2.0 (CLI)",
+      "verifiedAt": null,
+      "install": {
+        "any": [
+          "See source; Docker Desktop on Windows and macOS"
+        ]
+      },
+      "verify": "`docker --version` prints a version.",
+      "signals": [
+        {
+          "type": "file",
+          "value": "Dockerfile"
+        },
+        {
+          "type": "file",
+          "value": "docker-compose.yml"
+        },
+        {
+          "type": "file",
+          "value": "compose.yaml"
+        }
+      ],
+      "overlapsWith": [],
+      "notes": "Not verified against the source yet: read the source before proposing the install command.",
+      "auth": {
+        "login": "docker login (only for private registries)",
+        "status": "docker info"
+      }
+    },
+    {
+      "id": "ripgrep",
+      "kind": "cli",
+      "level": "user",
+      "bin": "rg",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "Fast recursive search.",
+      "why": "Agents and their search tools rely on it; much faster than grep on large repos.",
+      "source": "https://github.com/BurntSushi/ripgrep",
+      "license": "MIT OR Unlicense",
+      "verifiedAt": null,
+      "install": {
+        "windows": [
+          "winget install BurntSushi.ripgrep.MSVC"
+        ],
+        "macos": [
+          "brew install ripgrep"
+        ],
+        "linux": [
+          "apt install ripgrep"
+        ]
+      },
+      "verify": "`rg --version` prints a version.",
+      "signals": [],
+      "overlapsWith": [],
+      "notes": "Not verified against the source yet: read the source before proposing the install command."
+    },
+    {
+      "id": "jq",
+      "kind": "cli",
+      "level": "user",
+      "bin": "jq",
+      "versionArgs": [
+        "--version"
+      ],
+      "summary": "JSON processor.",
+      "why": "Lets the agent pull one field out of a large JSON response instead of reading all of it.",
+      "source": "https://jqlang.org/download/",
+      "license": "MIT",
+      "verifiedAt": null,
+      "install": {
+        "windows": [
+          "winget install jqlang.jq"
+        ],
+        "macos": [
+          "brew install jq"
+        ],
+        "linux": [
+          "apt install jq"
+        ]
+      },
+      "verify": "`jq --version` prints a version.",
+      "signals": [],
+      "overlapsWith": [],
+      "notes": "Not verified against the source yet: read the source before proposing the install command."
+    }
+  ]
+}

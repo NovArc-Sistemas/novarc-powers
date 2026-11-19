@@ -1,0 +1,42 @@
+name: Bug
+description: Algo não funcionou como deveria / Something did not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Não cole tokens, transcripts inteiros nem caminhos com seu nome de usuário.
+        Do not paste tokens, full transcripts or paths containing your user name.
+  - type: input
+    id: skill
+    attributes:
+      label: Skill ou comando / Skill or command
+      placeholder: novarc-harness-doctor, npx novarc-powers update...
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agente / Agent
+      options: [Claude Code, Codex, Traycer, Outro / Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Sistema / OS
+      options: [macOS, Windows, Linux]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versão / Version
+      placeholder: "npx novarc-powers --version"
+  - type: textarea
+    id: what
+    attributes:
+      label: O que aconteceu / What happened
+      description: O que você pediu, o que esperava e o que aconteceu. / What you asked, what you expected, what happened.
+    validations:
+      required: true

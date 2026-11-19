@@ -1,0 +1,10 @@
+{
+  "name": "gamma",
+  "version": "1.0.0",
+  "summary": "Fixture gamma summary.",
+  "summary_pt": "Resumo da fixture gamma.",
+  "profile": { "recommended": "project", "supported": ["on-demand", "user", "project"] },
+  "environments": ["claude-code", "codex"],
+  "requires": [],
+  "workspace": { "shared": ["state.json"], "local": ["board.html"] }
+}

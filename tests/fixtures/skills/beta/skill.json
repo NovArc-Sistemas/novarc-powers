@@ -1,0 +1,10 @@
+{
+  "name": "beta",
+  "version": "1.0.0",
+  "summary": "Fixture beta summary.",
+  "summary_pt": "Resumo da fixture beta.",
+  "profile": { "recommended": "user", "supported": ["user", "project"] },
+  "environments": ["claude-code", "codex"],
+  "requires": [],
+  "workspace": { "shared": ["state.json"], "local": ["cache-data/"] }
+}

@@ -1,0 +1,334 @@
+{
+  "schemaVersion": 1,
+  "skillVersion": "0.1.0",
+  "mode": "guided",
+  "language": "pt",
+  "scopes": [
+    "user",
+    "project"
+  ],
+  "environment": {
+    "agent": "claude-code",
+    "os": "windows",
+    "board": "claude artifact"
+  },
+  "project": {
+    "name": "acme-shop",
+    "isCode": true,
+    "defaultBranch": "main",
+    "behindRemote": 0
+  },
+  "startedAt": "2026-11-19T14:00:00Z",
+  "lastRun": "2026-11-19T15:10:00Z",
+  "rounds": [
+    {
+      "round": 1,
+      "scope": "user",
+      "status": "done"
+    },
+    {
+      "round": 1,
+      "scope": "project",
+      "status": "done"
+    },
+    {
+      "round": 2,
+      "scope": "user",
+      "status": "done"
+    },
+    {
+      "round": 2,
+      "scope": "project",
+      "status": "done"
+    },
+    {
+      "round": 3,
+      "scope": "user",
+      "status": "not-applicable"
+    },
+    {
+      "round": 3,
+      "scope": "project",
+      "status": "done"
+    },
+    {
+      "round": 4,
+      "scope": "user",
+      "status": "pending"
+    },
+    {
+      "round": 4,
+      "scope": "project",
+      "status": "done"
+    },
+    {
+      "round": 5,
+      "scope": "user",
+      "status": "pending"
+    },
+    {
+      "round": 5,
+      "scope": "project",
+      "status": "pending"
+    },
+    {
+      "round": 6,
+      "scope": "user",
+      "status": "done"
+    },
+    {
+      "round": 6,
+      "scope": "project",
+      "status": "done"
+    },
+    {
+      "round": 7,
+      "scope": "user",
+      "status": "done"
+    },
+    {
+      "round": 7,
+      "scope": "project",
+      "status": "skipped",
+      "note": "Você pediu para deixar os CLIs para a próxima execução."
+    },
+    {
+      "round": 8,
+      "scope": "user",
+      "status": "pending"
+    },
+    {
+      "round": 8,
+      "scope": "project",
+      "status": "pending"
+    }
+  ],
+  "layers": [
+    {
+      "scope": "user",
+      "name": "CLAUDE.md",
+      "kind": "instructions",
+      "path": "~/.claude/CLAUDE.md",
+      "tokens": 2100
+    },
+    {
+      "scope": "user",
+      "name": "settings.json",
+      "kind": "permissions",
+      "path": "~/.claude/settings.json",
+      "note": "41 allow, 6 deny"
+    },
+    {
+      "scope": "user",
+      "name": "Plugins",
+      "kind": "plugins",
+      "tokens": 3400,
+      "note": "4 ativos"
+    },
+    {
+      "scope": "user",
+      "name": "Servidores MCP",
+      "kind": "mcp",
+      "tokens": 5200,
+      "note": "3 servidores no nível do usuário"
+    },
+    {
+      "scope": "project",
+      "name": "CLAUDE.md",
+      "kind": "instructions",
+      "path": "./CLAUDE.md",
+      "tokens": 3900
+    },
+    {
+      "scope": "project",
+      "name": "docs/",
+      "kind": "docs",
+      "path": "./docs",
+      "note": "23 arquivos, 4 carregados por instrução"
+    },
+    {
+      "scope": "project",
+      "name": "graphify-out/",
+      "kind": "other",
+      "path": "./graphify-out",
+      "note": "12 dias atrás da main"
+    }
+  ],
+  "inventory": [
+    {
+      "id": "U-INV-1",
+      "scope": "user",
+      "category": "Instruções",
+      "name": "CLAUDE.md",
+      "path": "~/.claude/CLAUDE.md",
+      "verdict": "attention",
+      "opinion": "Claro e curto, mas escrito em português.",
+      "itemId": "U3"
+    },
+    {
+      "id": "U-INV-2",
+      "scope": "user",
+      "category": "Permissões",
+      "name": "deny: git push --force",
+      "verdict": "problem",
+      "opinion": "Só bloqueia quando a flag vem logo depois do push.",
+      "itemId": "U1"
+    },
+    {
+      "id": "U-INV-3",
+      "scope": "user",
+      "category": "CLIs",
+      "name": "gh 2.83.0",
+      "verdict": "fine",
+      "opinion": "Instalado e logado; as instruções já preferem o CLI ao servidor MCP do GitHub."
+    },
+    {
+      "id": "P-INV-1",
+      "scope": "project",
+      "category": "Docs",
+      "name": "docs/setup.md",
+      "path": "./docs/setup.md",
+      "verdict": "problem",
+      "opinion": "Dois dos cinco comandos não existem mais.",
+      "itemId": "P2"
+    },
+    {
+      "id": "P-INV-2",
+      "scope": "project",
+      "category": "Gates",
+      "name": "pre-commit: lint-staged",
+      "verdict": "fine",
+      "opinion": "Rápido (menos de 2 s nos últimos commits) e bloqueia quando falha."
+    }
+  ],
+  "items": [
+    {
+      "id": "U1",
+      "scope": "user",
+      "round": 1,
+      "severity": "critical",
+      "class": "permission",
+      "title": "Regra que bloqueia force-push é contornável",
+      "finding": "A regra de deny só pega `git push --force` como prefixo.",
+      "evidence": "settings.json deny[2]",
+      "proposal": "Trocar por um hook PreToolUse que bloqueia --force e -f em qualquer posição de um git push.",
+      "opinion": "Vale: hoje a regra dá uma falsa sensação de segurança.",
+      "status": "fixed",
+      "decision": "Aprovado.",
+      "verified": "O hook bloqueia `git push origin main --force` num repo de teste.",
+      "notVerified": "A segunda conta não foi checada; ela não carrega este settings.",
+      "backup": "backups/2026-11-19T14-20-00Z/"
+    },
+    {
+      "id": "U2",
+      "scope": "user",
+      "round": 6,
+      "severity": "medium",
+      "class": "install",
+      "title": "Sem camada de metodologia",
+      "finding": "Nenhuma skill de planejamento, depuração ou verificação dispara sozinha.",
+      "proposal": "Instalar o superpowers e o índice de skills no CLAUDE.md.",
+      "opinion": "A mudança de maior efeito na qualidade do dia a dia.",
+      "status": "queued"
+    },
+    {
+      "id": "U3",
+      "scope": "user",
+      "round": 2,
+      "severity": "medium",
+      "class": "translate-agent",
+      "title": "Arquivo de instruções em português",
+      "finding": "O CLAUDE.md está em português.",
+      "evidence": "~2.100 tokens; ~1.650 estimados em inglês",
+      "proposal": "Traduzir mantendo comandos e frases citadas idênticos.",
+      "opinion": "Cerca de 20% menos tokens em toda sessão.",
+      "status": "open"
+    },
+    {
+      "id": "U4",
+      "scope": "user",
+      "round": 7,
+      "severity": "low",
+      "class": "install",
+      "title": "rtk não instalado",
+      "finding": "A saída de testes e do git chega ao modelo sem filtro.",
+      "proposal": "Instalar o rtk e registrar o hook.",
+      "opinion": "Risco baixo, fácil de medir com `rtk gain`.",
+      "status": "accepted",
+      "decision": "Você prefere testar o caveman primeiro."
+    },
+    {
+      "id": "P1",
+      "scope": "project",
+      "round": 4,
+      "severity": "high",
+      "class": "gate",
+      "title": "Migrations editadas depois de aplicadas",
+      "finding": "Três sessões editaram uma migration que já estava na main.",
+      "evidence": "transcript-signals: 3 sessões; commits a1b2c3d, d4e5f6a",
+      "proposal": "Checagem de pre-commit que recusa mudanças em migrations presentes na origin/main.",
+      "opinion": "Barato e no alvo exato.",
+      "status": "open"
+    },
+    {
+      "id": "P2",
+      "scope": "project",
+      "round": 3,
+      "severity": "medium",
+      "class": "reversible",
+      "title": "Doc de setup desatualizado",
+      "finding": "docs/setup.md cita dois scripts que foram removidos.",
+      "proposal": "Corrigir só os dois comandos.",
+      "opinion": "O agente segue esse doc ao pé da letra.",
+      "status": "fixed",
+      "verified": "Os dois comandos rodam.",
+      "backup": "backups/2026-11-19T14-40-00Z/"
+    },
+    {
+      "id": "P3",
+      "scope": "project",
+      "round": 6,
+      "severity": "high",
+      "class": "reversible",
+      "title": "Hook de atualização do grafo falha em silêncio",
+      "finding": "O hook de post-commit chama um caminho que não existe mais; o grafo tem 12 dias.",
+      "proposal": "Apontar o hook para o binário instalado e rodar em segundo plano.",
+      "opinion": "Desatualizado, o grafo engana mais do que ajuda.",
+      "status": "in-progress"
+    },
+    {
+      "id": "P4",
+      "scope": "project",
+      "round": 2,
+      "severity": "low",
+      "class": "none",
+      "title": "AGENTS.md espelha o CLAUDE.md",
+      "finding": "Mesmo conteúdo, sem contradição.",
+      "proposal": "Nada.",
+      "opinion": "Está bom assim.",
+      "status": "ok"
+    }
+  ],
+  "leads": [
+    {
+      "title": "Um ajuste para limitar as definições de ferramentas MCP por sessão",
+      "source": "Visto numa entrada de changelog; ainda não está na documentação."
+    }
+  ],
+  "log": [
+    {
+      "at": "2026-11-19T14:05:00Z",
+      "text": "Descoberta feita: 2 pastas de configuração, 1 projeto, 41 docs."
+    },
+    {
+      "at": "2026-11-19T14:20:00Z",
+      "itemId": "U1",
+      "text": "Corrigido e verificado num repo de teste. Segunda conta não checada."
+    },
+    {
+      "at": "2026-11-19T14:40:00Z",
+      "itemId": "P2",
+      "text": "Dois comandos corrigidos; os dois rodam."
+    }
+  ]
+}

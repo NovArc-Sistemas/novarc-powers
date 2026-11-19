@@ -1,0 +1,25 @@
+name: Ideia de skill / Skill idea
+description: Proponha uma skill nova / Propose a new skill
+labels: [skill-idea]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Que tarefa ela resolve? / What task does it solve?
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Com que frequência seria usada? / How often would it be used?
+      description: Define o perfil de instalação. / Decides the install profile.
+      options:
+        - Poucas vezes por mês / A few times a month (on-demand)
+        - Em todo projeto, todo dia / Every project, every day (user)
+        - Num projeto, pelo time todo / In one project, by the whole team (project)
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: Como você faz isso hoje? / How do you do it today?

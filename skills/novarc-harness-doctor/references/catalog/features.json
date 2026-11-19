@@ -1,0 +1,122 @@
+{
+  "$comment": "Opt-in and hidden features of agent tools. Features change every release: every entry is a lead to confirm in this run, never a fact to apply from memory. `confirm` says how; `preconditions` must all hold before proposing it; `howToEnable` is what was observed on `observedIn`. `recommend`: enable = turn on when the preconditions hold; consider = present with the trade-off; avoid = mention only. Entries confirmed from official docs carry `docs`; entries seen only in a binary carry `docs: null` and must be presented as experimental.",
+  "features": [
+    {
+      "id": "claude-code-mode",
+      "tool": "claude-code",
+      "name": "Code Mode",
+      "what": "The agent writes a short JavaScript program that calls several tools in one step and returns only what is needed, instead of one tool call per turn. Fewer round trips and less tool output in context.",
+      "howToEnable": "Environment variable CLAUDE_CODE_EXPERIMENTAL_CODE_MODE in the `env` block of the user settings. The accepted value is not documented; read the current docs or the CLI's own messages before choosing one, and confirm the startup state afterwards.",
+      "observedIn": "Claude Code 2.1.328 binary (2026-11-19): the variable exists, is read at startup, and the CLI warns on stderr when the opt-in is refused. The settings reference mentions \"a Code Mode session\" but, in the part read, not how to enable it.",
+      "preconditions": [
+        "Claude Code version that ships the variable (search the docs or the changelog; earlier review found 2.1.323+).",
+        "Interactive terminal sessions: refused in background, non-interactive and some host-app sessions.",
+        "OpenTelemetry export not enabled (it blocks Code Mode).",
+        "Not disabled by managed (admin) settings.",
+        "A model the feature supports."
+      ],
+      "confirm": "After setting it, start a new interactive session and check that no 'Code Mode' refusal warning is printed; ask the agent whether a code-execution tool is available. If refused, the warning names the reason (model, otel, admin, compliance...).",
+      "risk": "Experimental: behaviour can change between releases. Reversible by removing the variable.",
+      "class": "reversible",
+      "recommend": "enable",
+      "docs": null
+    },
+    {
+      "id": "claude-mcp-env-allowlist",
+      "tool": "claude-code",
+      "name": "Minimal environment for local MCP servers",
+      "what": "Local MCP servers start with a minimal environment instead of inheriting every variable of the user's shell, so a token in the shell does not leak to every server.",
+      "howToEnable": "CLAUDE_CODE_MCP_ALLOWLIST_ENV=1 in the `env` block of the user settings.",
+      "observedIn": "Earlier harness review (2026-11); not found in the part of the settings reference read on 2026-11-19. Confirm in the current docs before proposing.",
+      "preconditions": [
+        "Each local MCP server that needs a variable declares it in its own `env`."
+      ],
+      "confirm": "Restart, run /mcp, check every server connects. A server that fails needs its variables declared.",
+      "risk": "A server that relied on an inherited variable stops working until its env is declared.",
+      "class": "reversible",
+      "recommend": "enable",
+      "docs": null
+    },
+    {
+      "id": "claude-subagent-cache-ttl",
+      "tool": "claude-code",
+      "name": "1-hour prompt cache for subagents",
+      "what": "Keeps subagent prompt caches for 1 hour instead of 5 minutes.",
+      "howToEnable": "\"subagentPromptCacheTtl\": \"1h\" in settings.",
+      "observedIn": "Claude Code settings reference, checked 2026-11-19: values \"5m\" or \"1h\", unset by default.",
+      "preconditions": [
+        "The user runs subagents often."
+      ],
+      "confirm": "Compare usage over a few days.",
+      "risk": "Cache writes may cost more on some plans.",
+      "class": "reversible",
+      "recommend": "consider",
+      "docs": "https://code.claude.com/docs/en/settings-reference"
+    },
+    {
+      "id": "claude-sandbox",
+      "tool": "claude-code",
+      "name": "Bash sandbox",
+      "what": "Isolates filesystem and network access of shell commands.",
+      "howToEnable": "sandbox.enabled = true in a settings file such as ~/.claude/settings.json.",
+      "observedIn": "Claude Code sandboxing docs, checked 2026-11-19: off by default; runs on macOS, Linux and WSL2; on native Windows commands run unsandboxed.",
+      "preconditions": [
+        "macOS, Linux or WSL2. Not supported on native Windows."
+      ],
+      "confirm": "A command that writes outside the project is blocked.",
+      "risk": "Commands that need network or other paths need explicit allowances.",
+      "class": "permission",
+      "recommend": "consider",
+      "docs": "https://code.claude.com/docs/en/sandboxing"
+    },
+    {
+      "id": "claude-agent-teams",
+      "tool": "claude-code",
+      "name": "Agent teams",
+      "what": "A lead session spawns teammates that share a task list and message each other.",
+      "howToEnable": "\"env\": { \"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS\": \"1\" } in settings.json, or the same variable in the environment.",
+      "observedIn": "Claude Code agent teams docs, checked 2026-11-19: experimental, disabled by default.",
+      "preconditions": [
+        "Interactive terminal.",
+        "The user does not already orchestrate agents another way."
+      ],
+      "confirm": "Ask the agent to start a team.",
+      "risk": "Experimental; costs more tokens; overlaps host apps that orchestrate agents.",
+      "class": "reversible",
+      "recommend": "consider",
+      "docs": "https://code.claude.com/docs/en/agent-teams"
+    },
+    {
+      "id": "codex-code-mode",
+      "tool": "codex",
+      "name": "Codex code mode",
+      "what": "Same idea as Claude Code's Code Mode, for Codex.",
+      "howToEnable": "`[features] code_mode = true` in ~/.codex/config.toml, when the installed version lists it as stable.",
+      "observedIn": "Codex 0.170 binary (2026-11): present, marked under development.",
+      "preconditions": [
+        "`codex features list` (or the docs) shows it as stable or beta, not under development."
+      ],
+      "confirm": "`codex features list` shows it enabled; a session can run a multi-tool script.",
+      "risk": "Codex's own maturity table says not to use features under development.",
+      "class": "reversible",
+      "recommend": "enable",
+      "docs": null
+    },
+    {
+      "id": "codex-review-profile",
+      "tool": "codex",
+      "name": "A lean profile for non-interactive runs",
+      "what": "A separate config profile with fewer MCP servers and plugins for `codex exec` runs (reviews, scripts), so they start faster.",
+      "howToEnable": "A profile in config.toml, selected with --profile.",
+      "observedIn": "Earlier harness review (2026-11); the Codex config docs URL now redirects to a missing page, so this was not re-checked on 2026-11-19.",
+      "preconditions": [
+        "The user runs `codex exec` from scripts or skills."
+      ],
+      "confirm": "Time `codex exec` with and without the profile.",
+      "risk": "None beyond maintaining a second profile.",
+      "class": "additive",
+      "recommend": "consider",
+      "docs": null
+    }
+  ]
+}

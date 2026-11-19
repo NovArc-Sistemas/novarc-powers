@@ -1,0 +1,48 @@
+{
+  "name": "novarc-powers",
+  "version": "0.1.0",
+  "description": "Installer for the NovArc Powers collection of agent skills (Claude Code, Codex and AGENTS.md-compatible tools).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NovArc-Sistemas/novarc-powers.git"
+  },
+  "homepage": "https://github.com/NovArc-Sistemas/novarc-powers#readme",
+  "bugs": {
+    "url": "https://github.com/NovArc-Sistemas/novarc-powers/issues"
+  },
+  "keywords": [
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "agents-md",
+    "skills",
+    "installer"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "novarc-powers": "bin/novarc-powers.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    "skills",
+    "!skills/*/tests",
+    "catalog.json",
+    "README*",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "validate": "node scripts/validate.mjs",
+    "catalog": "node scripts/build-catalog.mjs"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.9.0",
+    "picocolors": "^1.1.1"
+  }
+}
