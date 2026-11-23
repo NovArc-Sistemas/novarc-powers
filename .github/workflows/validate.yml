@@ -1,9 +1,11 @@
 name: validate
 
+# Every branch is tested on push, so a branch is known good on the three systems before it
+# reaches main. Pull requests from forks are tested too.
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
