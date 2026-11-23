@@ -113,7 +113,40 @@
           "verified": { "type": "string", "description": "What was checked after the change." },
           "notVerified": { "type": "string", "description": "What could not be checked." },
           "backup": { "type": "string" },
-          "updatedAt": { "type": "string", "format": "date-time" }
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "origin": { "enum": ["active", "project-optional", "plugin", "example"], "description": "Where the finding lives; weights its deduction (references/scoring.md). Absent means active. Never discounts a secret." },
+          "file": { "type": "string", "description": "Display path of the file the finding is about, when the item has no changes[]. Groups non-active items for the per-file cap." },
+          "lesson": {
+            "type": "object",
+            "description": "The teaching part of the diagnosis, in the user's language. See references/teaching.md.",
+            "required": ["why", "impact", "better"],
+            "additionalProperties": false,
+            "properties": {
+              "why": { "type": "string", "description": "Why the current state is a problem: the mechanism, in plain words." },
+              "impact": { "type": "string", "description": "What it costs the user in practice, ideally with a number from this harness." },
+              "better": { "type": "string", "description": "Why the proposed state is better: what changes in the agent's behaviour." },
+              "principle": { "type": "string", "description": "The general rule to carry to other harnesses, one sentence." },
+              "tradeoff": { "type": "string", "description": "What the change costs or risks, said honestly." },
+              "learnMore": { "type": "string", "description": "An official doc URL that backs the lesson." }
+            }
+          },
+          "changes": {
+            "type": "array",
+            "description": "One entry per file the item changes: the before and after snippets the board shows as a diff. Filled before applying (the preview) and updated after applying with what was actually written.",
+            "items": {
+              "type": "object",
+              "required": ["path", "before", "after"],
+              "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string", "description": "Display path: home as ~, project as ./" },
+                "lang": { "enum": ["markdown", "json", "toml", "yaml", "shell", "text"] },
+                "before": { "type": "string", "description": "Relevant excerpt before the change; empty string for a new file. Secrets masked." },
+                "after": { "type": "string", "description": "The same excerpt after the change; empty string for a deletion. Secrets masked." },
+                "note": { "type": "string", "description": "One line on what to look at in this diff." },
+                "applied": { "type": "boolean", "description": "true once this exact change is on disk and verified." }
+              }
+            }
+          }
         }
       }
     },
@@ -128,6 +161,20 @@
           "title": { "type": "string" },
           "source": { "type": "string" },
           "note": { "type": "string" }
+        }
+      }
+    },
+    "defenses": {
+      "type": "array",
+      "description": "Recognized defenses checked in this run (a deny list, a blocking hook, a sandbox). Shown on the board; they never add points.",
+      "items": {
+        "type": "object",
+        "required": ["scope", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "scope": { "$ref": "#/$defs/scope" },
+          "title": { "type": "string" },
+          "detail": { "type": "string", "description": "What it blocks and how it was checked." }
         }
       }
     },
@@ -164,7 +211,7 @@
         "current": { "type": ["number", "null"] },
         "baseline": { "type": ["number", "null"] },
         "previous": { "type": ["number", "null"] },
-        "grade": { "type": ["string", "null"] },
+        "grade": { "type": ["string", "null"], "description": "A, B, C, D or F (states written before the F grade may hold E)." },
         "roundsCounted": { "type": "integer" },
         "roundsTotal": { "type": "integer" },
         "computedAt": { "type": "string", "format": "date-time" }

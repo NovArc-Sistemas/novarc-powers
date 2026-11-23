@@ -217,7 +217,33 @@
       "decision": "Aprovado.",
       "verified": "O hook bloqueia `git push origin main --force` num repo de teste.",
       "notVerified": "A segunda conta não foi checada; ela não carrega este settings.",
-      "backup": "backups/2026-11-19T14-20-00Z/"
+      "backup": "backups/2026-11-19T14-20-00Z/",
+      "lesson": {
+        "why": "O Claude Code compara regras de deny pelo começo do comando. `git push --force` fica bloqueado, mas `git push origin main --force` começa diferente e passa direto.",
+        "impact": "Um force-push na main apaga commits de outras pessoas sem aviso. A regra existia, então ninguém desconfiava do buraco.",
+        "better": "Um hook lê o comando inteiro antes de rodar e recusa `--force` ou `-f` em qualquer posição de um `git push`, com uma mensagem que diz ao agente o que fazer no lugar.",
+        "principle": "Bloqueie o argumento perigoso onde quer que ele apareça, não pelo começo do comando.",
+        "tradeoff": "Um hook roda em toda chamada de shell: soma alguns milissegundos e precisa ser mantido junto com o settings.",
+        "learnMore": "https://code.claude.com/docs/en/hooks"
+      },
+      "changes": [
+        {
+          "path": "~/.claude/settings.json",
+          "lang": "json",
+          "note": "a regra de prefixo sai; entra um hook que examina o comando inteiro",
+          "applied": true,
+          "before": "\"permissions\": {\n  \"deny\": [\n    \"Bash(rm -rf /*)\",\n    \"Bash(git push --force:*)\",\n    \"Bash(git reset --hard:*)\"\n  ]\n},\n\"hooks\": {}",
+          "after": "\"permissions\": {\n  \"deny\": [\n    \"Bash(rm -rf /*)\",\n    \"Bash(git reset --hard:*)\"\n  ]\n},\n\"hooks\": {\n  \"PreToolUse\": [\n    { \"matcher\": \"Bash\",\n      \"hooks\": [{ \"type\": \"command\", \"command\": \"node ~/.claude/scripts/block-force-push.mjs\" }] }\n  ]\n}"
+        },
+        {
+          "path": "~/.claude/scripts/block-force-push.mjs",
+          "lang": "text",
+          "note": "arquivo novo: recusa --force e -f em qualquer posição",
+          "applied": true,
+          "before": "",
+          "after": "const cmd = JSON.parse(await readStdin()).tool_input.command;\nif (/\\bgit\\s+push\\b/.test(cmd) && /(^|\\s)(--force|-f)(\\s|$)/.test(cmd)) {\n  console.error('Force-push bloqueado. Use --force-with-lease numa branch sua.');\n  process.exit(2);\n}"
+        }
+      ]
     },
     {
       "id": "U2",
@@ -229,7 +255,24 @@
       "finding": "Nenhuma skill de planejamento, depuração ou verificação dispara sozinha.",
       "proposal": "Instalar o superpowers e o índice de skills no CLAUDE.md.",
       "opinion": "A mudança de maior efeito na qualidade do dia a dia.",
-      "status": "queued"
+      "status": "queued",
+      "lesson": {
+        "why": "Sem uma camada de metodologia, o agente decide sozinho como trabalhar em cada tarefa: às vezes planeja, às vezes sai codando; às vezes testa, às vezes declara pronto sem rodar nada.",
+        "impact": "Nas últimas 32 sessões, 9 terminaram com o agente dizendo que estava pronto e você corrigindo logo depois.",
+        "better": "O Superpowers injeta no início de cada sessão o hábito de checar uma skill antes de agir: brainstorm antes de construir, plano antes de tarefa longa, verificação antes de dizer que terminou.",
+        "principle": "Processo que precisa ser lembrado a cada sessão deve ser carregado pelo harness, não pela sua memória.",
+        "tradeoff": "Algumas centenas de tokens no início de cada sessão, e o agente pergunta mais antes de começar.",
+        "learnMore": "https://github.com/obra/superpowers"
+      },
+      "changes": [
+        {
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
+          "note": "o índice curto faz as skills dispararem sem você citar o nome",
+          "before": "## Language\n- Respond in Brazilian Portuguese\n\n## Git\n- Never commit without being asked",
+          "after": "## Language\n- Respond in Brazilian Portuguese\n\n## Skills\nBefore acting on a task, check whether an installed skill covers it and invoke it.\n- brainstorming: before building anything new\n- writing-plans: before any multi-step task\n- verification-before-completion: before saying work is done\n\n## Git\n- Never commit without being asked"
+        }
+      ]
     },
     {
       "id": "U3",
@@ -242,7 +285,23 @@
       "evidence": "~2.100 tokens; ~1.650 estimados em inglês",
       "proposal": "Traduzir mantendo comandos e frases citadas idênticos.",
       "opinion": "Cerca de 20% menos tokens em toda sessão.",
-      "status": "open"
+      "status": "open",
+      "lesson": {
+        "why": "O modelo lê o CLAUDE.md inteiro no começo de toda sessão. Em português, o mesmo conteúdo ocupa mais tokens que em inglês, e as skills e ferramentas que ele cita estão todas em inglês.",
+        "impact": "Cerca de 450 tokens a mais em cada sessão, em todos os projetos.",
+        "better": "O mesmo conteúdo em inglês, com comandos, caminhos e frases que o agente deve dizer em português mantidos idênticos. Ele continua falando com você em português.",
+        "principle": "Arquivo que só agente lê vai em inglês; a conversa com você continua no seu idioma.",
+        "tradeoff": "Você passa a editar o arquivo em inglês. A tradução fica pronta para você conferir antes de entrar."
+      },
+      "changes": [
+        {
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
+          "note": "uma das 6 seções; a tradução completa está em drafts/ para aprovação",
+          "before": "## Obrigações gerais\n- Nunca faça commit sem eu pedir explicitamente\n- Nunca abra pull request sem eu pedir\n- Nunca faça merge sem eu pedir, e nunca squash",
+          "after": "## General obligations\n- Never commit unless explicitly asked\n- Never open a pull request unless asked\n- Never merge unless asked, and never squash"
+        }
+      ]
     },
     {
       "id": "U4",
@@ -255,7 +314,44 @@
       "proposal": "Instalar o rtk e registrar o hook.",
       "opinion": "Risco baixo, fácil de medir com `rtk gain`.",
       "status": "accepted",
-      "decision": "Você prefere testar o caveman primeiro."
+      "decision": "Você prefere testar o caveman primeiro.",
+      "lesson": {
+        "why": "Saída de testes, git e build chega ao modelo inteira: centenas de linhas de \"passou\" para achar a única que falhou.",
+        "impact": "Na média deste projeto, a saída de comandos é 38% dos tokens de entrada de uma sessão.",
+        "better": "O rtk filtra a saída antes de chegar ao modelo: só falhas, resumo e o que mudou.",
+        "principle": "O agente deve ler o resultado do comando, não o comando inteiro.",
+        "tradeoff": "Uma camada a mais entre o agente e o terminal; quando você precisar da saída crua, use `rtk proxy`.",
+        "learnMore": "https://github.com/rtk-ai/rtk"
+      },
+      "changes": []
+    },
+    {
+      "id": "U5",
+      "scope": "user",
+      "round": 6,
+      "severity": "high",
+      "class": "reversible",
+      "origin": "plugin",
+      "file": "~/.claude/plugins/cache/acme-tools/skills/ship-it/SKILL.md",
+      "title": "Skill de plugin manda pular os testes",
+      "finding": "A skill ship-it, que vem do plugin acme-tools, diz para fazer push sem rodar os testes quando a mudança \"parece pequena\".",
+      "proposal": "Desativar a skill ship-it no plugin e manter o resto do plugin.",
+      "opinion": "Vem de terceiros e uma atualização do plugin sobrescreve qualquer edição; desativar é o caminho.",
+      "status": "open"
+    },
+    {
+      "id": "U6",
+      "scope": "user",
+      "round": 6,
+      "severity": "high",
+      "class": "reversible",
+      "origin": "plugin",
+      "file": "~/.claude/plugins/cache/acme-tools/skills/ship-it/SKILL.md",
+      "title": "Skill de plugin faz commit sem pedir",
+      "finding": "A mesma skill manda fazer commit ao final de cada tarefa, o que contradiz a regra do seu CLAUDE.md.",
+      "proposal": "Resolvido junto com o U5: desativar a skill ship-it.",
+      "opinion": "Mesmo arquivo e mesma decisão que o U5; por isso os dois juntos descontam no máximo 10 pontos.",
+      "status": "open"
     },
     {
       "id": "P1",
@@ -268,7 +364,23 @@
       "evidence": "transcript-signals: 3 sessões; commits a1b2c3d, d4e5f6a",
       "proposal": "Checagem de pre-commit que recusa mudanças em migrations presentes na origin/main.",
       "opinion": "Barato e no alvo exato.",
-      "status": "open"
+      "status": "open",
+      "lesson": {
+        "why": "Uma migration aplicada já mudou o banco de produção. Editar o arquivo depois não muda o banco: só faz o repositório mentir sobre o que está lá.",
+        "impact": "Três sessões fizeram isso neste projeto (commits a1b2c3d e d4e5f6a). Cada uma custou uma investigação para descobrir por que o banco não batia com o código.",
+        "better": "Um pre-commit recusa qualquer alteração em migration que já existe na origin/main e diz para criar uma migration nova.",
+        "principle": "O que já foi aplicado é histórico: corrige-se com uma mudança nova, nunca editando a antiga.",
+        "tradeoff": "Corrigir um erro de digitação numa migration ainda não aplicada em produção exige `--no-verify`. É raro e fica visível."
+      },
+      "changes": [
+        {
+          "path": "./.githooks/pre-commit",
+          "lang": "shell",
+          "note": "arquivo novo; ativado com git config core.hooksPath .githooks",
+          "before": "",
+          "after": "#!/bin/sh\n# Applied migrations are history: fix them with a new migration.\nchanged=$(git diff --cached --name-only --diff-filter=M -- supabase/migrations/)\nfor f in $changed; do\n  if git cat-file -e \"origin/main:$f\" 2>/dev/null; then\n    echo \"Migration already on main: $f. Create a new migration instead.\" >&2\n    exit 1\n  fi\ndone"
+        }
+      ]
     },
     {
       "id": "P2",
@@ -282,7 +394,24 @@
       "opinion": "O agente segue esse doc ao pé da letra.",
       "status": "fixed",
       "verified": "Os dois comandos rodam.",
-      "backup": "backups/2026-11-19T14-40-00Z/"
+      "backup": "backups/2026-11-19T14-40-00Z/",
+      "lesson": {
+        "why": "O agente segue o docs/setup.md ao pé da letra. Dois scripts citados lá foram removidos, então ele tenta rodar, falha, e improvisa.",
+        "impact": "Cada sessão nova que monta o ambiente perde de 3 a 5 tentativas antes de achar o comando certo.",
+        "better": "Os dois comandos apontam para os scripts que existem hoje. Nenhuma outra linha do doc mudou.",
+        "principle": "Doc que o agente segue é código: quando o comando muda, o doc muda no mesmo commit.",
+        "tradeoff": "Nenhum."
+      },
+      "changes": [
+        {
+          "path": "./docs/setup.md",
+          "lang": "markdown",
+          "note": "só as duas linhas que falhavam",
+          "applied": true,
+          "before": "## Rodar localmente\n\n1. `npm install`\n2. `npm run db:seed-dev`\n3. `npm run dev:all`\n4. Abra http://localhost:3000",
+          "after": "## Rodar localmente\n\n1. `npm install`\n2. `npm run db:seed`\n3. `npm run dev`\n4. Abra http://localhost:3000"
+        }
+      ]
     },
     {
       "id": "P3",
@@ -294,7 +423,24 @@
       "finding": "O hook de post-commit chama um caminho que não existe mais; o grafo tem 12 dias.",
       "proposal": "Apontar o hook para o binário instalado e rodar em segundo plano.",
       "opinion": "Desatualizado, o grafo engana mais do que ajuda.",
-      "status": "in-progress"
+      "status": "in-progress",
+      "lesson": {
+        "why": "O hook que atualiza o grafo depois de cada commit chama um caminho antigo do graphify. Ele falha em silêncio, e o grafo parou no dia em que o caminho mudou.",
+        "impact": "O grafo está 12 dias atrás da main. O agente consulta o grafo para entender a arquitetura e recebe uma foto velha.",
+        "better": "O hook chama o binário instalado e roda em segundo plano, sem segurar o commit. Se falhar, escreve num log que a próxima revisão lê.",
+        "principle": "Automação que falha em silêncio é pior que nenhuma: você confia em algo que parou.",
+        "tradeoff": "Em segundo plano, o grafo fica pronto alguns segundos depois do commit, não no mesmo instante.",
+        "learnMore": "https://github.com/Graphify-Labs/graphify"
+      },
+      "changes": [
+        {
+          "path": "./.git/hooks/post-commit",
+          "lang": "shell",
+          "note": "caminho corrigido, execução em segundo plano e log de falha",
+          "before": "#!/bin/sh\n/home/dev/.local/bin/graphify-old update .",
+          "after": "#!/bin/sh\n# Refresh the knowledge graph without blocking the commit.\n(graphify update . >/dev/null 2>>.novarc-powers/novarc-harness-doctor/logs/graphify.log &)"
+        }
+      ]
     },
     {
       "id": "P4",
@@ -307,12 +453,38 @@
       "proposal": "Nada.",
       "opinion": "Está bom assim.",
       "status": "ok"
+    },
+    {
+      "id": "P5",
+      "scope": "project",
+      "round": 1,
+      "severity": "high",
+      "class": "permission",
+      "origin": "example",
+      "file": "./examples/claude-settings.example.json",
+      "title": "Exemplo de settings libera Bash(*)",
+      "finding": "O arquivo de exemplo que o README manda copiar libera qualquer comando de shell.",
+      "proposal": "Trocar Bash(*) pela lista curta de comandos que o projeto usa.",
+      "opinion": "Nenhuma sessão carrega o exemplo, mas quem copiar herda a permissão inteira.",
+      "status": "open"
     }
   ],
   "leads": [
     {
       "title": "Um ajuste para limitar as definições de ferramentas MCP por sessão",
       "source": "Visto numa entrada de changelog; ainda não está na documentação."
+    }
+  ],
+  "defenses": [
+    {
+      "scope": "user",
+      "title": "Hook PreToolUse bloqueia force-push",
+      "detail": "~/.claude/scripts/block-force-push.mjs recusa --force e -f em qualquer posição de um git push; testado num repo de teste nesta execução."
+    },
+    {
+      "scope": "project",
+      "title": "Pre-commit lint-staged",
+      "detail": "Bloqueia o commit quando o lint falha; rodou em menos de 2 s nos últimos commits."
     }
   ],
   "log": [

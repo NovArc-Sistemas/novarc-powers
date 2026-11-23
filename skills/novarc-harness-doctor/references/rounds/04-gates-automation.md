@@ -25,7 +25,9 @@ Do not propose gates from a generic list. Propose them from evidence.
 1. Run `scripts/transcript-signals.mjs --cwd <project root>`. It reads past session transcripts
    for this project locally and prints counts only: failed commands grouped by command, hook
    blocks, user corrections, repeated retries, and sessions that ended on an error. It never
-   prints message text.
+   prints message text. Then take the token cost of each pattern from `session-impact.mjs`
+   (`waste[]`): a gate that prevents 9 million tokens of retries a month is an easy decision;
+   one that prevents 50 thousand may not be worth its friction.
 2. Read the project's own record of trouble: recent `fix`/`revert`/`hotfix` commits
    (`git log --oneline -200`), reverted PRs, a pendings or incidents file, CI failures on the
    default branch.

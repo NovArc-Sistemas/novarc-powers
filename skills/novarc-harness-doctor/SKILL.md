@@ -63,12 +63,19 @@ round file gives.
 
 ```bash
 node <skill>/scripts/discover.mjs --scope <user|project|both> --cwd <project root>
+node <skill>/scripts/harness-checks.mjs --scope <user|project|both> --cwd <project root>
 node <skill>/scripts/probe-clis.mjs --cwd <project root>
 node <skill>/scripts/secret-scan.mjs <each config dir and instruction file found>
-node <skill>/scripts/transcript-signals.mjs --cwd <project root>     # project scope only
+node <skill>/scripts/session-impact.mjs --cwd <project root> --days 30     # project scope
+node <skill>/scripts/session-impact.mjs --scope user --days 30             # user scope
 ```
 
-Each prints JSON. Then read `references/pitfalls.md` and check every pitfall that applies; the
+Each prints JSON. `harness-checks.mjs` returns **candidate** findings with evidence, origin and
+the defenses it recognised (`references/checks.md`): verify each one before it becomes an item,
+and copy its `origin` and `file` into the item. `session-impact.mjs` measures what the harness
+cost in the window (tokens, context at start, retries, corrections, exploration, unused context);
+put its numbers in the item `impact` text and in the board's impact block, and keep measured and
+estimated apart. Then read `references/pitfalls.md` and check every pitfall that applies; the
 probes do not catch all of them.
 
 For project scope, read the true state: compare the local default branch with its remote first.
@@ -76,10 +83,17 @@ If the checkout is behind, read files from the remote ref, not from disk.
 
 ### 3. Build the board
 
+The board is a **diagnosis that teaches**: for every finding the user sees why the current state
+is a problem, the exact change as a before/after diff, and why the result is better. Read
+`references/teaching.md` before writing the first item.
+
 Fill `state.json`: the `layers` (what enters a session, in load order), the full `inventory`
 **including what is fine**, and one `item` per finding with `round`, `severity`, `finding`,
-`proposal`, and `opinion`. Every inventory entry gets an opinion, not only the ones you want to
-change. Then:
+`proposal`, `opinion`, a `lesson` (`why`, `impact`, `better`, `principle`, `tradeoff`) and the
+`changes` (one before/after excerpt per file it touches). Set `origin` (and `file` when there is
+no `changes`) whenever the finding lives somewhere other than live configuration, and list what
+already protects the harness in `defenses`: both shape the score (`references/scoring.md`).
+Every inventory entry gets an opinion, not only the ones you want to change. Then:
 
 ```bash
 node <skill>/scripts/render-board.mjs <ws>/state.json
@@ -111,7 +125,9 @@ Work the queue in this order; each round unblocks the next. Read the round file 
 
 ### 5. Per item
 
-1. **Decide.** Guided: present finding, proposal and your opinion; one item at a time; wait.
+1. **Decide.** Guided: present the finding, the lesson, the diff, the trade-off and your
+   opinion; one item at a time; wait. The user decides looking at the diff, never at a
+   description of it.
    Doctor: apply `references/doctor-policy.md` — the safe classes are applied, everything else
    goes to the queue with status `queued`.
 2. **Backup** (rule 3).
@@ -119,13 +135,15 @@ Work the queue in this order; each round unblocks the next. Read the round file 
    files, the exact change and the verification to run, and stay with the user. Otherwise do it
    yourself.
 4. **Verify** (rule 4). A subagent's report is a claim; check the files yourself.
-5. **Record.** Set the item's `status`, add a dated `log` line with what was verified and what
-   was not, re-render the board.
+5. **Record.** Set the item's `status`, replace each `changes[].after` with what was actually
+   written and set `applied: true`, add a dated `log` line with what was verified and what was
+   not, re-render the board.
 
 ### 6. Close
 
 Write `<ws>/reports/<date>.md`: score before and after per scope, what changed, what is queued,
-what could not be verified, and the unconfirmed leads. In doctor mode, list the queue as the
+what could not be verified, the unconfirmed leads, and a short "what to carry forward" list
+with the `principle` of every fixed item. In doctor mode, list the queue as the
 next thing the user should look at. For user scope, offer the portable mirror described in
 `references/rounds/08-external-dependencies.md`. Set `lastRun`.
 

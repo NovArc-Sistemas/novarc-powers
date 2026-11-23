@@ -30,5 +30,7 @@ Rules that override the table:
 - After each applied item, verify. On a failed verification, restore the backup, mark the item
   `failed`, and continue with the next one. Three failures in a row stop doctor mode and hand
   the queue to the user.
+- An item applied without asking still carries its full `lesson` and its `changes` diff, so the
+  user can read afterwards what changed and why (`references/teaching.md`).
 - Doctor mode never commits or pushes. Project-scope changes are left in the working tree and
   listed in the report.

@@ -2,7 +2,7 @@
 // render-board.mjs <state.json> [--out-dir <dir>] [--lang en|pt]
 //
 // Validates a harness-doctor state file against templates/state.schema.json, computes the scores
-// exactly as references/scoring.md describes, writes them back into the state (only the `scores`
+// exactly as references/scoring.md describes (confidence-weighted, 0 to 100 per round), writes them back into the state (only the `scores`
 // key changes), and writes board.html + board.md next to the state or into --out-dir.
 // The board chrome follows `state.language`, else --lang, else English (scripts/lib/i18n.mjs).
 // Re-rendering an unchanged state produces byte-identical files.
@@ -23,15 +23,22 @@ export const ROUND_WEIGHTS = { 1: 20, 2: 15, 3: 10, 4: 15, 5: 5, 6: 15, 7: 10, 8
 /** English round names; the localised ones live in lib/i18n.mjs. */
 export const ROUND_NAMES = STRINGS.en.rounds;
 export const ROUNDS_TOTAL = 8;
-export const SEVERITY_POINTS = { critical: 10, high: 5, medium: 2, low: 1 };
-// scoring.md lists open/queued/failed = 100%, accepted = 50%, fixed/ok/wontfix = 0%.
-// `in-progress` is not in that table; an item being worked on is not resolved yet, so it counts
-// in full like `open`.
+// Confidence-weighted model: every counted round starts at 100 and loses points per unresolved
+// item, weighted by status and by where the finding lives, with the noise of one non-active file
+// capped. The idea is inspired by AgentShield's src/reporter/score.ts (MIT,
+// affaan-m/agentshield); this is a re-implementation. Rationale in references/scoring.md.
+export const SEVERITY_POINTS = { critical: 25, high: 15, medium: 5, low: 2 };
+// `in-progress` counts in full: an item being worked on is not resolved yet.
 export const STATUS_FACTOR = {
   open: 1, queued: 1, failed: 1, 'in-progress': 1,
   accepted: 0.5,
   fixed: 0, ok: 0, 'wontfix-not-applicable': 0,
 };
+/** How much a finding counts by where it lives. An item without `origin` is `active`. */
+export const ORIGIN_WEIGHT = { active: 1, 'project-optional': 0.75, plugin: 0.5, example: 0.25 };
+/** Most points the non-active items of one file can take from one round. */
+export const FILE_CAP = 10;
+export const ROUND_MAX = 100;
 
 /** Floor to one decimal ("never round one up"), with an epsilon so 64.99999999 reads as 65. */
 export function floor1(x) {
@@ -41,10 +48,10 @@ export function floor1(x) {
 export function gradeFor(score) {
   if (score === null || score === undefined) return null;
   if (score >= 90) return 'A';
-  if (score >= 80) return 'B';
-  if (score >= 65) return 'C';
-  if (score >= 50) return 'D';
-  return 'E';
+  if (score >= 75) return 'B';
+  if (score >= 60) return 'C';
+  if (score >= 40) return 'D';
+  return 'F';
 }
 
 function roundStatus(state, scope, round) {
@@ -52,40 +59,75 @@ function roundStatus(state, scope, round) {
   return r ? r.status : 'pending';
 }
 
+/** The file an item is about: its first change's path, else `file`, else null. */
+export function itemFile(item) {
+  const c = Array.isArray(item.changes) ? item.changes[0] : null;
+  if (c && c.path) return c.path;
+  return item.file || null;
+}
+
+/** Origin weight. A `secret` item always counts in full, wherever it lives. */
+export function originWeight(item) {
+  if (item.class === 'secret') return 1;
+  return ORIGIN_WEIGHT[item.origin || 'active'] ?? 1;
+}
+
+/** True when the item's deduction goes into its file's capped group. */
+function inFileCap(item) {
+  return (item.origin || 'active') !== 'active' && item.class !== 'secret' && itemFile(item) !== null;
+}
+
 /**
- * Per-round breakdown for one scope. `baseline` treats every item as open.
- * Round score = weight x (1 - min(1, cost / 10)).
+ * Points one round loses to its items: severity x status factor x origin weight, summed, with the
+ * items of each non-active file (secrets excepted) capped together at FILE_CAP. `baseline` treats
+ * every item as open (status factor 1); origin weights and the cap apply either way.
+ */
+export function roundDeductions(items, { baseline = false } = {}) {
+  let total = 0;
+  const perFile = new Map();
+  for (const i of items) {
+    const status = baseline ? 1 : (STATUS_FACTOR[i.status] ?? 1);
+    const d = (SEVERITY_POINTS[i.severity] ?? 0) * status * originWeight(i);
+    if (inFileCap(i)) {
+      const f = itemFile(i);
+      perFile.set(f, (perFile.get(f) || 0) + d);
+    } else {
+      total += d;
+    }
+  }
+  for (const d of perFile.values()) total += Math.min(FILE_CAP, d);
+  return total;
+}
+
+/**
+ * Per-round breakdown for one scope. Round score = max(0, 100 - deductions), from 0 to 100, and
+ * null for a round that is not `done`. `baselineScore` treats every item as open.
  */
 export function roundBreakdown(state, scope) {
   const out = [];
   for (let r = 1; r <= ROUNDS_TOTAL; r++) {
     const status = roundStatus(state, scope, r);
     const items = (state.items || []).filter((i) => i.scope === scope && i.round === r);
-    let cost = 0;
-    let baseCost = 0;
-    for (const i of items) {
-      const pts = SEVERITY_POINTS[i.severity] ?? 0;
-      cost += pts * (STATUS_FACTOR[i.status] ?? 1);
-      baseCost += pts;
-    }
-    const weight = ROUND_WEIGHTS[r];
+    const deductions = roundDeductions(items);
+    const baselineDeductions = roundDeductions(items, { baseline: true });
     const counted = status === 'done';
     out.push({
       round: r,
       name: ROUND_NAMES[r],
       status,
-      weight,
+      weight: ROUND_WEIGHTS[r],
       counted,
       items: items.length,
-      cost,
-      baselineCost: baseCost,
-      score: counted ? weight * (1 - Math.min(1, cost / 10)) : null,
-      baselineScore: counted ? weight * (1 - Math.min(1, baseCost / 10)) : null,
+      deductions,
+      baselineDeductions,
+      score: counted ? Math.max(0, ROUND_MAX - deductions) : null,
+      baselineScore: counted ? Math.max(0, ROUND_MAX - baselineDeductions) : null,
     });
   }
   return out;
 }
 
+/** Scope score = weighted average of the `done` rounds' scores, floored to one decimal. */
 export function scoreScope(state, scope) {
   const rows = roundBreakdown(state, scope);
   const done = rows.filter((r) => r.counted);
@@ -95,8 +137,8 @@ export function scoreScope(state, scope) {
     return { current: null, baseline: null, grade: null, roundsCounted: 0, roundsTotal, breakdown: rows };
   }
   const w = done.reduce((s, r) => s + r.weight, 0);
-  const cur = floor1((done.reduce((s, r) => s + r.score, 0) / w) * 100);
-  const base = floor1((done.reduce((s, r) => s + r.baselineScore, 0) / w) * 100);
+  const cur = floor1(done.reduce((s, r) => s + r.weight * r.score, 0) / w);
+  const base = floor1(done.reduce((s, r) => s + r.weight * r.baselineScore, 0) / w);
   return { current: cur, baseline: base, grade: gradeFor(cur), roundsCounted: done.length, roundsTotal, breakdown: rows };
 }
 
@@ -289,7 +331,7 @@ header { display: flex; flex-direction: column; gap: 4px; }
 .grade { font-size: 1.3rem; font-weight: 700; padding: 2px 10px; border-radius: var(--radius); }
 .g-A, .g-B { background: var(--ok-bg); color: var(--ok-fg); }
 .g-C, .g-D { background: var(--warn-bg); color: var(--warn-fg); }
-.g-E { background: var(--bad-bg); color: var(--bad-fg); }
+.g-F { background: var(--bad-bg); color: var(--bad-fg); }
 .bars { display: flex; flex-direction: column; gap: 6px; }
 .bar { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr) 4.5rem; gap: 8px; align-items: center; font-size: 0.85rem; }
 .bar .track { height: 10px; background: var(--bg3); border-radius: 999px; overflow: hidden; border: 1px solid var(--border2); }
@@ -326,6 +368,7 @@ td summary { padding: 0; font-weight: 400; }
 .detail-grid { display: grid; gap: 6px; padding: 8px 0 2px; }
 .detail-grid b { font-weight: 600; }
 ul.plain { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: 6px; }
+.defenses-note { margin-bottom: 10px; }
 `;
 
 // The client receives `T` (the chrome dictionary for the board's language) and `LOCALE` from a
@@ -351,7 +394,8 @@ const CLIENT_JS = `
   function fill(tpl, vars) { return String(tpl).replace(/\\{(\\w+)\\}/g, function (m, k) { return Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : m; }); }
   function lbl(map, v) { return map && Object.prototype.hasOwnProperty.call(map, v) ? map[v] : String(v); }
   function pill(prefix, v, map) { return el('span', { cls: 'pill ' + prefix + String(v), text: lbl(map, v) }); }
-  function fmt(n) { return n === null || n === undefined ? '-' : (Math.round(n * 10) / 10).toLocaleString(LOCALE); }
+  // Floors like the renderer: a score shown is never rounded up.
+  function fmt(n) { return n === null || n === undefined ? '-' : (Math.floor(n * 10 + 1e-7) / 10).toLocaleString(LOCALE); }
   function when(iso) { var d = new Date(iso); return isNaN(d.getTime()) ? String(iso) : d.toLocaleString(LOCALE); }
   function table(head, rows) {
     var t = el('table');
@@ -395,16 +439,28 @@ const CLIENT_JS = `
       var name = lbl(T.rounds, r.round);
       b.appendChild(el('span', { cls: 'label', title: name, text: r.round + ' ' + name }));
       var track = el('div', { cls: 'track', role: 'img', 'aria-label': r.counted ? fill(T.pointsOf, { score: fmt(r.score), weight: r.weight }) : lbl(T.roundStatus, r.status) });
-      var pct = r.counted ? Math.max(0, Math.min(100, (r.score / r.weight) * 100)) : 0;
+      var pct = r.counted ? Math.max(0, Math.min(100, r.score)) : 0;
       var fillBar = el('div', { cls: 'fill' }); fillBar.style.width = pct + '%';
       track.appendChild(fillBar);
       b.appendChild(track);
-      b.appendChild(el('span', { cls: 'num', text: r.counted ? fmt(r.score) + '/' + r.weight : lbl(T.roundStatus, r.status) }));
+      b.appendChild(el('span', { cls: 'num', text: r.counted ? fmt(r.score) : lbl(T.roundStatus, r.status) }));
       bars.appendChild(b);
     });
     card.appendChild(bars);
     cards.appendChild(card);
   });
+
+  // Recognized defenses: listed for context, never part of the score.
+  var defBox = document.getElementById('defenses');
+  var defs = st.defenses || [];
+  if (!defs.length) defBox.appendChild(el('p', { cls: 'muted', text: T.noDefenses }));
+  else {
+    var dul = el('ul', { cls: 'plain' });
+    defs.forEach(function (d) {
+      dul.appendChild(el('li', null, el('b', { text: d.title }), ' \\u2014 ', el('span', { cls: 'muted', text: lbl(T.scope, d.scope) }), d.detail ? el('div', { cls: 'muted', text: d.detail }) : null));
+    });
+    defBox.appendChild(dul);
+  }
 
   // Layers
   var layersBox = document.getElementById('layers');
@@ -483,19 +539,20 @@ const CLIENT_JS = `
       tr.appendChild(td(pill('s-', i.severity, T.severity)));
       tr.appendChild(td(pill('st-', i.status, T.status)));
       tr.appendChild(td(lbl(T['class'], i['class'])));
+      tr.appendChild(td(lbl(T.origin, i.origin || 'active')));
       var d = el('details');
       d.appendChild(el('summary', { text: i.title }));
       var g = el('div', { cls: 'detail-grid' });
       [['finding', i.finding], ['evidence', i.evidence], ['proposal', i.proposal], ['opinion', i.opinion], ['decision', i.decision],
-       ['verified', i.verified], ['notVerified', i.notVerified], ['backup', i.backup], ['updated', i.updatedAt ? when(i.updatedAt) : '']].forEach(function (p) {
+       ['verified', i.verified], ['notVerified', i.notVerified], ['backup', i.backup], ['file', i.file], ['updated', i.updatedAt ? when(i.updatedAt) : '']].forEach(function (p) {
         if (p[1]) g.appendChild(el('p', null, el('b', { text: T.field[p[0]] + ': ' }), p[1]));
       });
       d.appendChild(g);
       tr.appendChild(td(d));
       return tr;
     });
-    if (!rows.length) { var e = el('tr'); var c = td(T.noItemsMatch); c.setAttribute('colspan', '7'); e.appendChild(c); rows.push(e); }
-    itemsBox.appendChild(table([T.col.id, T.col.scope, T.col.round, T.col.severity, T.col.status, T.col['class'], T.col.title], rows));
+    if (!rows.length) { var e = el('tr'); var c = td(T.noItemsMatch); c.setAttribute('colspan', '8'); e.appendChild(c); rows.push(e); }
+    itemsBox.appendChild(table([T.col.id, T.col.scope, T.col.round, T.col.severity, T.col.status, T.col['class'], T.col.origin, T.col.title], rows));
   }
   drawItems();
 
@@ -580,6 +637,7 @@ export function renderHtml(state, lang = resolveLanguage(state.language)) {
 <noscript><p>${escHtml(T.noscript)}</p></noscript>
 </header>
 <section aria-labelledby="h-scores"><h2 id="h-scores">${escHtml(T.hScores)}</h2><div class="cards" id="cards"></div></section>
+<section aria-labelledby="h-defenses"><h2 id="h-defenses">${escHtml(T.hDefenses)}</h2><p class="muted defenses-note">${escHtml(T.defensesNote)}</p><div id="defenses"></div></section>
 <section aria-labelledby="h-layers"><h2 id="h-layers">${escHtml(T.hLayers)}</h2><div class="cards" id="layers"></div></section>
 <section aria-labelledby="h-rounds"><h2 id="h-rounds">${escHtml(T.hRounds)}</h2><div id="rounds"></div></section>
 <section aria-labelledby="h-items"><h2 id="h-items">${escHtml(T.hItems)}</h2><div class="filters" id="item-filters"></div><div id="items"></div></section>
@@ -601,6 +659,8 @@ function cell(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 function num(n) { return n === null || n === undefined ? '-' : String(n); }
+/** Deducted points as written: sums of quarters are exact in binary, so no rounding is needed. */
+function pointsText(n) { return String(Number(n.toFixed(4))); }
 
 export function renderMarkdown(state, lang = resolveLanguage(state.language)) {
   const T = STRINGS[lang];
@@ -620,12 +680,18 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language)) {
   }
   L.push('');
   for (const scope of state.scopes) {
-    L.push(`### ${fill(T.scopeByRound, { scope: label(T.scopeTitle, scope) })}`, '', `| ${C.round} | ${C.weight} | ${C.status} | ${C.score} | ${C.items} |`, '|---|---|---|---|---|');
+    L.push(`### ${fill(T.scopeByRound, { scope: label(T.scopeTitle, scope) })}`, '', `| ${C.round} | ${C.weight} | ${C.status} | ${C.score} | ${C.deducted} | ${C.items} |`, '|---|---|---|---|---|---|');
     for (const r of roundBreakdown(state, scope)) {
-      L.push(`| ${r.round} ${T.rounds[r.round]} | ${r.weight} | ${label(T.roundStatus, r.status)} | ${r.counted ? `${floor1(r.score)}/${r.weight}` : '-'} | ${r.items} |`);
+      L.push(`| ${r.round} ${T.rounds[r.round]} | ${r.weight} | ${label(T.roundStatus, r.status)} | ${r.counted ? floor1(r.score) : '-'} | ${r.counted ? pointsText(r.deductions) : '-'} | ${r.items} |`);
     }
     L.push('');
   }
+
+  L.push(`## ${T.hDefenses}`, '', T.defensesNote, '');
+  const defenses = state.defenses || [];
+  if (!defenses.length) L.push(T.noDefenses);
+  for (const d of defenses) L.push(`- **${cell(d.title)}** (${sc(d.scope)})${d.detail ? `: ${cell(d.detail)}` : ''}`);
+  L.push('');
 
   L.push(`## ${T.hLayers}`, '');
   for (const scope of state.scopes) {
@@ -645,12 +711,13 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language)) {
     const items = state.items.filter((i) => i.round === r);
     if (!items.length) continue;
     L.push(`### ${fill(T.roundHeading, { n: r, name: T.rounds[r] })}`, '');
-    L.push(`| ${C.id} | ${C.scope} | ${C.severity} | ${C.status} | ${C.class} | ${C.title} |`, '|---|---|---|---|---|---|');
-    for (const i of items) L.push(`| ${cell(i.id)} | ${sc(i.scope)} | ${label(T.severity, i.severity)} | ${label(T.status, i.status)} | ${label(T.class, i.class)} | ${cell(i.title)} |`);
+    L.push(`| ${C.id} | ${C.scope} | ${C.severity} | ${C.status} | ${C.class} | ${C.origin} | ${C.title} |`, '|---|---|---|---|---|---|---|');
+    for (const i of items) L.push(`| ${cell(i.id)} | ${sc(i.scope)} | ${label(T.severity, i.severity)} | ${label(T.status, i.status)} | ${label(T.class, i.class)} | ${label(T.origin, i.origin || 'active')} | ${cell(i.title)} |`);
     L.push('');
     for (const i of items) {
       L.push(`- **${i.id}** ${cell(i.finding)}`);
       if (i.evidence) L.push(`  - ${F.evidence}: ${cell(i.evidence)}`);
+      if (i.file) L.push(`  - ${F.file}: ${cell(i.file)}`);
       L.push(`  - ${F.proposal}: ${cell(i.proposal)}`);
       L.push(`  - ${F.opinion}: ${cell(i.opinion)}`);
       if (i.decision) L.push(`  - ${F.decision}: ${cell(i.decision)}`);
