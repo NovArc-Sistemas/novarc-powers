@@ -106,7 +106,13 @@ export function hookEntries(hooksObj) {
       const list = Array.isArray(g.hooks) ? g.hooks : (g.command || g.type ? [g] : []);
       for (const h of list) {
         if (!h || typeof h !== 'object') continue;
-        out.push({ event, matcher, type: h.type || 'command', command: typeof h.command === 'string' ? h.command : '' });
+        const base = typeof h.command === 'string' ? h.command : '';
+        const args = Array.isArray(h.args) ? h.args.filter((a) => typeof a === 'string') : [];
+        const entry = { event, matcher, type: h.type || 'command', command: args.length ? [base, ...args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a))].join(' ') : base };
+        if (h.async === true) entry.async = true;
+        if (h.asyncRewake === true) entry.asyncRewake = true;
+        if (typeof h.onFailure === 'string') entry.onFailure = h.onFailure;
+        out.push(entry);
       }
     }
   }

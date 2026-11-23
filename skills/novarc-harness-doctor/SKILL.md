@@ -1,160 +1,181 @@
 ---
 name: novarc-harness-doctor
-description: Use when someone wants their AI coding agent setup reviewed, scored or fixed - "review my harness", "harness doctor", "audit my CLAUDE.md / AGENTS.md", "why does my agent keep failing on this project", "which CLIs or plugins should I install", "too many MCP servers", "set up gates for this project". Covers the user harness (config dirs, instructions, permissions, hooks, skills, plugins, MCP servers, CLIs), the project harness (instruction files, docs, gates, knowledge graph), or both. Two modes - guided review (the user decides item by item) and doctor (safe fixes applied automatically, the rest queued). Works in Claude Code, Codex, Traycer and any agent with file and shell access.
+description: Use when someone wants their AI coding agent setup reviewed, measured, explained or fixed - "review my harness", "harness doctor", "audit my CLAUDE.md / AGENTS.md", "why does my agent keep failing on this project", "how many tokens am I wasting", "too many MCP servers", "which CLIs or plugins should I install", "set up gates for this project", "keep my Claude and Codex accounts in sync". Reviews every user account's harness and any number of project harnesses in one run, measures what they cost over the last 30 days of sessions, and shows each finding with the why and a before/after diff on one interactive board where the user decides. Guided or doctor mode. Works in Claude Code, Codex and any agent with file and shell access.
 ---
 
 # novarc-harness-doctor
 
 A harness is everything that shapes an agent session before the user types: instruction files,
-permissions, hooks, skills, plugins, MCP servers, CLIs, and the project's docs and gates. This
-skill inventories it, scores it, and fixes it with the user.
+permissions, hooks, skills, plugins, MCP servers, CLIs, and a project's docs and gates. A machine
+has one **user harness per account** (each Claude Code account, Codex, and so on) and one
+**project harness per repository**. This skill finds them, measures what they cost, explains what
+is wrong and why, and fixes what the user approves.
 
-`<skill>` below is the folder this file is in. `<ws>` is the workspace: `.novarc-powers/novarc-harness-doctor/`
-under the project root for project scope, under the home directory for user scope. When both
-scopes run, use the project workspace and record both scopes in the same state file.
+`<skill>` is the folder this file is in. A review is a **run** that lives on disk at
+`~/.novarc-powers/novarc-harness-doctor/runs/<runId>/` (`<run>` below), so several sessions can
+work on it and any session can resume it. `scripts/run.mjs` does the bookkeeping; you write
+findings, never `state.json`. Every script and file format is specified in
+`references/contracts.md`. The scripts need Node 20+ and no packages; without Node follow
+`references/environments/generic.md`.
 
 ## Hard rules
 
-These hold in both modes. They exist because each one was broken once and cost real work.
+They hold in both modes. Each one was broken once and cost real work.
 
-1. **Read-only until the board exists.** Discovery changes nothing.
+1. **Read-only until the user approves something.** Finding, measuring and building the board
+   change nothing outside `<run>`.
 2. **Never print a secret.** Mask to the first 4 characters before anything reaches the
-   conversation, the board, the state file or a log. Use `scripts/secret-scan.mjs`, never a raw
+   conversation, the board, a findings file or a log. Use `scripts/secret-scan.mjs`, never a raw
    `grep` over config.
-3. **Backup before every edit**, into `<ws>/backups/<timestamp>/`. A backup of a file that holds a
-   secret is made with the secret already masked, or not made and the item says so.
-4. **Verify after every change**, by re-reading the real state, and record what was *not*
+3. **Backup before every edit**, into `<run>/backups/<stamp>/`, and record the change with
+   `run.mjs record` so it can be undone. A backup of a file that holds a secret is made with the
+   secret masked, or not made and the item says so.
+4. **Verify after every change** by re-reading the real state, and record what was *not*
    verified. "Should work" is not a result.
-5. **Never recommend from memory.** A tool, flag or feature is recommended only from
-   `references/catalog/` (which carries a source and a verification date) or from documentation
-   read in this session. Anything else is listed as an unconfirmed lead.
+5. **Never recommend from memory.** A tool, flag, price or feature comes from
+   `references/catalog/` (each entry has a source and a date) or from documentation read in this
+   session. Anything else is an unconfirmed lead.
 6. **Never without the user's yes:** installing software, deleting, changing permissions,
-   touching secrets, committing, pushing. See `references/doctor-policy.md`.
-7. **Write only inside `<ws>`** and the harness files an approved item names.
-8. **Say when the user's premise is wrong**, then do what they decide.
-9. **CLI before MCP.** Prefer an official CLI to an MCP server for the same service; keep an MCP
-   server at user level only when nearly every conversation needs it, otherwise at project
-   level. Always show the user the options; never move or remove a server without their choice.
+   touching secrets, adding a gate, linking or replicating accounts, committing, pushing. See
+   `references/doctor-policy.md`.
+7. **One writer per harness.** Reviewing is parallel; at any moment only one session or
+   subagent edits a given harness.
+8. **Explain everything you propose.** Every item carries the why, the cost, the exact change
+   and the rule to keep (`references/teaching.md`). The user decides looking at the diff.
+9. **CLI before MCP.** Prefer an official CLI to an MCP server; keep a server at user level only
+   when nearly every conversation needs it. Show the options; never move or remove one unasked.
+10. **Say when the user's premise is wrong**, then do what they decide.
 
 ## Flow
 
-### 1. Prepare
-
-Ask, in one message, only what is not already clear from the request:
-
-- **Scope**: user harness, project harness, or both.
-- **Mode**: guided review or doctor.
-
-Detect the environment and read the matching file in `references/environments/`
-(`claude-code.md`, `codex.md`, `traycer.md`, otherwise `generic.md`). It says where config
-lives, how to show the board and whether subagents exist.
-
-Create `<ws>` and an empty `<ws>/state.json` that follows `templates/state.schema.json`
-(`templates/state.example.json` shows a filled one; do not copy its data). In project scope,
-make sure local parts are ignored by git: if `.novarc-powers/.gitignore` is missing or lacks
-them, add the lines `*/backups/`, `*/logs/`, `*/drafts/` and `*/board.html` to it (the installer
-writes the same file; append, never replace). If a state file already exists, this is a re-run: copy each
-`scores.<scope>.current` to `previous`, keep the items, and report what changed since `lastRun`.
-
-### 2. Discover (read-only)
-
-Run the probes. They need Node 20+ and no packages; without Node, follow the manual steps each
-round file gives.
+### 1. Find and choose
 
 ```bash
-node <skill>/scripts/discover.mjs --scope <user|project|both> --cwd <project root>
-node <skill>/scripts/harness-checks.mjs --scope <user|project|both> --cwd <project root>
-node <skill>/scripts/probe-clis.mjs --cwd <project root>
-node <skill>/scripts/secret-scan.mjs <each config dir and instruction file found>
-node <skill>/scripts/session-impact.mjs --cwd <project root> --days 30     # project scope
-node <skill>/scripts/session-impact.mjs --scope user --days 30             # user scope
+node <skill>/scripts/accounts.mjs list --lang <pt|en>
+node <skill>/scripts/find-projects.mjs --days 30        # add --roots <dir,dir> if the user names folders
 ```
 
-Each prints JSON. `harness-checks.mjs` returns **candidate** findings with evidence, origin and
-the defenses it recognised (`references/checks.md`): verify each one before it becomes an item,
-and copy its `origin` and `file` into the item. `session-impact.mjs` measures what the harness
-cost in the window (tokens, context at start, retries, corrections, exploration, unused context);
-put its numbers in the item `impact` text and in the board's impact block, and keep measured and
-estimated apart. Then read `references/pitfalls.md` and check every pitfall that applies; the
-probes do not catch all of them.
+Tell the user, in one message, what you found: the accounts by provider (label and masked
+identity) and the projects with their activity. Then ask only what the request did not already
+answer:
 
-For project scope, read the true state: compare the local default branch with its remote first.
-If the checkout is behind, read files from the remote ref, not from disk.
+- **Which harnesses.** Default: every account that is not `empty` plus every `suggested`
+  project; with more than about eight projects, propose the most active ones and name the
+  rest. A request about one project ("review this repo") selects that project and the account
+  in use (`inUse`); do not ask.
+- **Which account is the primary** when there are two or more. Recommend the one with the most
+  activity. Explain in one sentence what it means: the primary's harness becomes the source,
+  the other accounts follow it (`references/accounts.md`).
+- **Mode**: guided review (default) or doctor.
 
-### 3. Build the board
+Read the environment file for where config lives and how to show the board:
+`references/environments/claude-code.md`, `codex.md`, else `generic.md`.
 
-The board is a **diagnosis that teaches**: for every finding the user sees why the current state
-is a problem, the exact change as a before/after diff, and why the result is better. Read
-`references/teaching.md` before writing the first item.
-
-Fill `state.json`: the `layers` (what enters a session, in load order), the full `inventory`
-**including what is fine**, and one `item` per finding with `round`, `severity`, `finding`,
-`proposal`, `opinion`, a `lesson` (`why`, `impact`, `better`, `principle`, `tradeoff`) and the
-`changes` (one before/after excerpt per file it touches). Set `origin` (and `file` when there is
-no `changes`) whenever the finding lives somewhere other than live configuration, and list what
-already protects the harness in `defenses`: both shape the score (`references/scoring.md`).
-Every inventory entry gets an opinion, not only the ones you want to change. Then:
+### 2. Start the run and measure
 
 ```bash
-node <skill>/scripts/render-board.mjs <ws>/state.json
+node <skill>/scripts/run.mjs init --select <selection.json> --mode guided --days 30 --lang <pt|en> --title "<name>"
+node <skill>/scripts/run.mjs probe
 ```
 
-Mark each round's status per scope in `rounds` as you go (`pending`, `done`, `skipped`,
-`not-applicable`); only `done` rounds count toward the score.
+`probe` inventories each harness, runs the rule engine (candidate findings with evidence,
+`references/checks.md`), measures the last 30 days of sessions (tokens, context at start,
+retries, corrections, exploration, unused context) and snapshots the files the board shows, all
+into `<run>/probes/`. `--lang` is the language you speak with the user.
 
-It computes the score per scope (`references/scoring.md`; never write a score by hand) and writes
-`<ws>/board.html` and `<ws>/board.md`. Show the board the way the environment file says.
-Re-render after every status change.
-Set `language` in `state.json` to the language you speak with the user (`pt` or `en`; other
-languages fall back to `en`).
+To join a run another session started: `run.mjs status --run <id>`, then claim units as below.
 
-### 4. Rounds
+### 3. Review
 
-Work the queue in this order; each round unblocks the next. Read the round file when you reach it.
+The work is split into units (`references/contracts.md`). With subagents, orchestrate as
+`references/orchestration.md` says: one reviewer per unit, all selected harnesses each. Without
+subagents, take the units yourself, in this order:
 
-| # | Round | File | Scope |
+```bash
+node <skill>/scripts/run.mjs claim --session <label>       # prints the unit's brief
+# ... review, write the findings file ...
+node <skill>/scripts/run.mjs complete --unit <id> --session <label> --findings <file>
+```
+
+For each unit: read the round files its brief names, read `references/teaching.md` and
+`references/pitfalls.md`, then work from the probes. Rule-engine output is **candidates**: verify
+each one in the real file before it becomes an item, and drop the false ones. Every item gets
+its `lesson`, its exact `changes` (text copied from disk, each with a `why`), `origin` when it
+is not live configuration, and `saves` when the measurement supports a number. Write what is
+fine too (`inventory`, `defenses`): the board is also the map of the harness. For a project,
+read the true state first: if the default branch is behind its remote, read from the remote ref.
+
+| # | Round | File | Applies to |
 |---|---|---|---|
-| 1 | Security and permissions | `references/rounds/01-security-permissions.md` | both |
-| 2 | Instructions and structure | `references/rounds/02-instructions-structure.md` | both |
-| 3 | Documentation | `references/rounds/03-documentation.md` | project |
-| 4 | Gates and automation | `references/rounds/04-gates-automation.md` | both |
-| 5 | Cleanup | `references/rounds/05-cleanup.md` | both |
-| 6 | Skills and knowledge | `references/rounds/06-skills-knowledge.md` | both |
-| 7 | CLIs, MCP servers and tools | `references/rounds/07-clis-tools.md` | both |
-| 8 | External dependencies | `references/rounds/08-external-dependencies.md` | both |
+| 1 | Security and permissions | `references/rounds/01-security-permissions.md` | all |
+| 2 | Instructions and structure | `references/rounds/02-instructions-structure.md` | all |
+| 3 | Documentation | `references/rounds/03-documentation.md` | projects |
+| 4 | Gates and automation | `references/rounds/04-gates-automation.md` | all |
+| 5 | Cleanup | `references/rounds/05-cleanup.md` | all |
+| 6 | Skills and knowledge | `references/rounds/06-skills-knowledge.md` | all |
+| 7 | CLIs, MCP servers and tools | `references/rounds/07-clis-tools.md` | all |
+| 8 | External dependencies | `references/rounds/08-external-dependencies.md` | all |
 
-### 5. Per item
+A linked account inherits the primary's harness: review the primary, and for the linked
+account only what differs. The same finding in several harnesses becomes one `group`.
 
-1. **Decide.** Guided: present the finding, the lesson, the diff, the trade-off and your
-   opinion; one item at a time; wait. The user decides looking at the diff, never at a
-   description of it.
-   Doctor: apply `references/doctor-policy.md` — the safe classes are applied, everything else
-   goes to the queue with status `queued`.
-2. **Backup** (rule 3).
-3. **Execute.** If the environment has subagents, hand the execution to one with the exact
-   files, the exact change and the verification to run, and stay with the user. Otherwise do it
-   yourself.
-4. **Verify** (rule 4). A subagent's report is a claim; check the files yourself.
-5. **Record.** Set the item's `status`, replace each `changes[].after` with what was actually
-   written and set `applied: true`, add a dated `log` line with what was verified and what was
-   not, re-render the board.
+### 4. Show the board
 
-### 6. Close
+```bash
+node <skill>/scripts/run.mjs build --channel <artifact|server|file>
+```
 
-Write `<ws>/reports/<date>.md`: score before and after per scope, what changed, what is queued,
-what could not be verified, the unconfirmed leads, and a short "what to carry forward" list
-with the `principle` of every fixed item. In doctor mode, list the queue as the
-next thing the user should look at. For user scope, offer the portable mirror described in
-`references/rounds/08-external-dependencies.md`. Set `lastRun`.
+It merges everything into `<run>/state.json`, computes the scores (`references/scoring.md`; never
+write one by hand), checks that every change is anchored in its file (fix any warning it
+prints), and renders `<run>/board.html`. Open it the way the environment file says. The board
+has an overview (every harness before and after, accounts, group decisions), one tab per
+harness (impact, explorer of its files with each change drawn in place, diagnosis) and a
+Decide tab. Tell the user in two sentences how to use it, and start with the three findings
+that matter most.
 
-## Modes in one line each
+### 5. Decide and apply
 
-- **Guided review**: nothing is applied without an answer to that item.
-- **Doctor**: reversible and additive fixes are applied with backup; permissions, secrets,
-  deletions, installs, gates and translations wait in the queue (translations arrive drafted).
+Loop until `run.mjs next` suggests `close`:
+
+1. **Collect decisions**: `run.mjs decisions` (the environment file says how they arrive from
+   the board). In chat, record what the user says with `run.mjs decide`. Answer every question
+   the user asked from the board, in chat, in the same teaching style.
+2. **Apply what was approved**, one executor per harness (`apply:<harness>` units): for each
+   item `run.mjs mark --status in-progress`, back up, make exactly the change the item shows,
+   verify, `run.mjs record`, then `run.mjs mark --status fixed --verified "..."` (or `failed`,
+   after restoring the backup). A subagent's report is a claim: check the files yourself.
+3. **Rebuild** (`run.mjs build`) so the board shows the new state and scores.
+
+Guided mode applies nothing without a decision on that item. Doctor mode applies the safe
+classes on its own (`references/doctor-policy.md`, `run.mjs mark --auto`) and leaves the rest
+open on the board; everything it applied still shows its lesson and diff.
+
+### 6. Accounts
+
+When there is more than one account, after the primary's harness is in the state the user
+wants: `accounts.mjs plan --primary <id>`, show the plan and its conflicts on the board (class
+`sync`), apply what the user approves with `accounts.mjs apply`, then offer the session-start
+check that keeps the accounts in step (`accounts.mjs install-check`, a gate). Details and
+safety rules: `references/accounts.md`.
+
+### 7. Close
+
+Write `<run>/report.md`: per harness the score before and after, what changed, what was
+declined or deferred, what could not be verified, the unconfirmed leads, and "what to carry
+forward": the `principle` of every fixed item. Tell the user that `run.mjs undo` reverts the
+run and that running the skill again in 30 days measures the real effect. Then
+`run.mjs close`. For a project, offer to copy the report into
+`.novarc-powers/novarc-harness-doctor/reports/` in the repo.
+
+## Modes
+
+- **Guided review**: nothing is applied without the user's decision on that item.
+- **Doctor**: reversible and additive fixes are applied with backup and shown afterwards;
+  permissions, secrets, deletions, installs, gates, account sync and translations wait for a
+  decision (translations arrive drafted in `<run>/drafts/`).
 
 ## Concurrency
 
-If another agent session may be editing the same harness right now (the user says so, or a
-config file changes under you between reads), switch to guided mode and re-read every file
-immediately before editing it.
+If another session may be editing the same harness right now (the user says so, or a file
+changes under you between reads), use guided mode and re-read every file immediately before
+editing it. Never edit a harness another executor has claimed.

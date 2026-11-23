@@ -1,506 +1,2125 @@
 {
-  "schemaVersion": 1,
-  "skillVersion": "0.1.0",
-  "mode": "guided",
+  "schemaVersion": 2,
+  "skillVersion": "0.2.0",
   "language": "pt",
-  "scopes": [
-    "user",
-    "project"
-  ],
+  "mode": "guided",
+  "run": {
+    "id": "20261120-k3x9",
+    "title": "Marina",
+    "startedAt": "2026-11-20T13:30:00Z",
+    "lastRun": "2026-11-20T15:10:00Z",
+    "windowDays": 30
+  },
   "environment": {
     "agent": "claude-code",
-    "os": "windows",
-    "board": "claude artifact"
+    "os": "macos",
+    "channel": "file"
   },
-  "project": {
-    "name": "acme-shop",
-    "isCode": true,
-    "defaultBranch": "main",
-    "behindRemote": 0
+  "accounts": {
+    "primary": "claude-1",
+    "syncInstalled": false,
+    "list": [
+      {
+        "id": "claude-1",
+        "provider": "claude-code",
+        "label": "Claude Code · conta 1",
+        "identity": "ma…@example.com",
+        "path": "~/.claude",
+        "isDefault": true,
+        "harness": "u1",
+        "sync": {
+          "mode": "primary",
+          "status": "ok"
+        }
+      },
+      {
+        "id": "claude-2",
+        "provider": "claude-code",
+        "label": "Claude Code · conta 2",
+        "identity": "ma…@example.org",
+        "path": "~/.claude-conta2",
+        "isDefault": false,
+        "host": "um lançador de várias contas",
+        "harness": "u2",
+        "sync": {
+          "mode": "linked",
+          "status": "drift",
+          "detail": "Três elementos são links para a principal. A pasta de agentes falta e os atalhos de teclado divergem.",
+          "elements": [
+            {
+              "name": "CLAUDE.md",
+              "state": "linked"
+            },
+            {
+              "name": "settings.json",
+              "state": "linked"
+            },
+            {
+              "name": "skills/",
+              "state": "linked"
+            },
+            {
+              "name": "agents/",
+              "state": "missing",
+              "note": "Existe na principal e não nesta conta. Veja U2-801."
+            },
+            {
+              "name": "keybindings.json",
+              "state": "divergent",
+              "note": "Um atalho diferente. Pode ser de propósito."
+            },
+            {
+              "name": "servidores MCP",
+              "state": "account-only",
+              "note": "Um servidor configurado só aqui."
+            },
+            {
+              "name": ".claude.json",
+              "state": "not-portable",
+              "note": "Estado da conta, com dados de login: nunca é copiado."
+            }
+          ]
+        }
+      },
+      {
+        "id": "codex-1",
+        "provider": "codex",
+        "label": "Codex",
+        "path": "~/.codex",
+        "isDefault": true,
+        "harness": "u3",
+        "sync": {
+          "mode": "replicated",
+          "status": "ok",
+          "detail": "A parte portável é gerada a partir da conta principal.",
+          "elements": [
+            {
+              "name": "AGENTS.md",
+              "state": "generated",
+              "note": "Gerado do CLAUDE.md da principal."
+            },
+            {
+              "name": "skills/",
+              "state": "copied"
+            },
+            {
+              "name": "hooks",
+              "state": "not-portable",
+              "note": "O formato de hooks é outro: precisa ser escrito à mão."
+            },
+            {
+              "name": "config.toml",
+              "state": "account-only"
+            }
+          ]
+        }
+      }
+    ]
   },
-  "startedAt": "2026-11-19T14:00:00Z",
-  "lastRun": "2026-11-19T15:10:00Z",
+  "harnesses": [
+    {
+      "id": "u1",
+      "kind": "user",
+      "name": "Claude Code · conta 1",
+      "path": "~/.claude",
+      "provider": "claude-code",
+      "account": "claude-1",
+      "activity": {
+        "sessions": 412,
+        "lastActive": "2026-11-20T12:05:00Z"
+      },
+      "elements": {
+        "permissions": [
+          {
+            "layer": "user",
+            "kind": "allow",
+            "rule": "Bash(npm run *)",
+            "file": "fu1-2"
+          },
+          {
+            "layer": "user",
+            "kind": "allow",
+            "rule": "Bash(git status)",
+            "file": "fu1-2"
+          },
+          {
+            "layer": "user",
+            "kind": "allow",
+            "rule": "Bash(git diff *)",
+            "file": "fu1-2"
+          },
+          {
+            "layer": "user",
+            "kind": "deny",
+            "rule": "Bash(git push --force:*)",
+            "file": "fu1-2",
+            "item": "U1-101",
+            "note": "Só bloqueia quando a flag vem logo depois de push."
+          },
+          {
+            "layer": "user",
+            "kind": "deny",
+            "rule": "Read(./.env)",
+            "file": "fu1-2",
+            "item": "U1-103",
+            "note": "Testada nesta revisão."
+          }
+        ],
+        "hooks": [
+          {
+            "id": "u1-stop-1",
+            "source": "agent",
+            "event": "Stop",
+            "command": "bash ~/.claude/hooks/avisa-fim.sh",
+            "file": "fu1-2",
+            "script": "fu1-3",
+            "blocking": false,
+            "note": "Só avisa: não impede nada."
+          },
+          {
+            "id": "u1-plugin-1",
+            "source": "plugin",
+            "plugin": "exemplo-tools",
+            "event": "SessionStart",
+            "command": "npx exemplo-tools@latest sync",
+            "blocking": null,
+            "item": "U1-802",
+            "note": "Roda um pacote sem versão fixa."
+          }
+        ],
+        "skills": [
+          {
+            "name": "revisao-pr",
+            "level": "user",
+            "description": "Use quando o usuário pedir para revisar um pull request antes de aprovar.",
+            "descriptionChars": 82,
+            "file": "fu1-4",
+            "invocations": 0,
+            "verdict": "retire",
+            "reason": "Nenhuma invocação em 30 dias. Antes de apagar, confirme se o problema não é a descrição.",
+            "item": "U1-601"
+          },
+          {
+            "name": "gerar-changelog",
+            "level": "user",
+            "description": "Gera o changelog de uma versão a partir dos commits.",
+            "descriptionChars": 54,
+            "invocations": 0,
+            "verdict": "merge",
+            "mergeInto": "release",
+            "reason": "Faz parte do fluxo de release e nunca foi chamada sozinha."
+          },
+          {
+            "name": "release",
+            "level": "user",
+            "description": "Use para publicar uma versão: changelog, tag e publicação.",
+            "descriptionChars": 61,
+            "invocations": 2,
+            "verdict": "keep",
+            "reason": "Usada nas duas releases do período."
+          },
+          {
+            "name": "formatar-planilha",
+            "level": "plugin",
+            "plugin": "exemplo-tools",
+            "description": "Formata planilhas exportadas. A descrição traz uma lista longa de exemplos de uso.",
+            "descriptionChars": 1380,
+            "invocations": null,
+            "verdict": "unmeasured",
+            "reason": "Skills de plugin não aparecem no registro de uso desta versão."
+          }
+        ],
+        "agents": [
+          {
+            "name": "revisor",
+            "level": "user",
+            "model": "sonnet",
+            "tools": "Read, Grep, Glob",
+            "promptChars": 1240
+          }
+        ],
+        "plugins": [
+          {
+            "name": "exemplo-tools",
+            "marketplace": "exemplo-marketplace",
+            "enabled": true,
+            "pinned": false,
+            "note": "Sem versão fixa: cada atualização troca o que roda nas suas sessões.",
+            "item": "U1-802"
+          },
+          {
+            "name": "outro-plugin",
+            "marketplace": "exemplo-marketplace",
+            "enabled": false,
+            "pinned": null
+          }
+        ],
+        "mcp": [
+          {
+            "name": "github",
+            "level": "user",
+            "transport": "remote",
+            "calls": 0,
+            "cli": "gh",
+            "item": "U1-702",
+            "note": "Carregado em toda sessão, sem nenhuma chamada."
+          },
+          {
+            "name": "postgres-local",
+            "level": "user",
+            "transport": "local",
+            "calls": 0,
+            "note": "Nunca chamado no período."
+          }
+        ],
+        "clis": [
+          {
+            "name": "gh",
+            "installed": true,
+            "version": "2.83.0",
+            "auth": "ok",
+            "signals": [
+              ".github/"
+            ]
+          },
+          {
+            "name": "rg",
+            "installed": true,
+            "version": "14.1.1",
+            "auth": "unknown"
+          },
+          {
+            "name": "pnpm",
+            "installed": false,
+            "signals": [
+              "18 comandos não encontrados"
+            ],
+            "item": "U1-701",
+            "note": "Chamado pelo agente e ausente."
+          }
+        ]
+      },
+      "impact": {
+        "windowDays": 30,
+        "from": "2026-10-21T00:00:00Z",
+        "to": "2026-11-20T00:00:00Z",
+        "sessions": 412,
+        "activeDays": 24,
+        "totalTokens": 486000000,
+        "byKind": {
+          "input": 1200000,
+          "cacheWrite": 9600000,
+          "cacheRead": 472800000,
+          "output": 2400000
+        },
+        "weightedTotal": 72480000,
+        "weightedByKind": {
+          "input": 1200000,
+          "cacheWrite": 12000000,
+          "cacheRead": 47280000,
+          "output": 12000000
+        },
+        "weights": {
+          "unit": "input-token equivalents",
+          "source": "references/catalog/pricing-weights.json",
+          "verifiedAt": "2026-11-10",
+          "sources": [
+            "https://example.com/pricing"
+          ],
+          "perModelFamily": {
+            "modelo-exemplo": {
+              "turns": 9900,
+              "ratios": {
+                "input": 1,
+                "cacheWrite": 1.25,
+                "cacheRead": 0.1,
+                "output": 5
+              }
+            }
+          }
+        },
+        "contextAtStart": {
+          "perSessionMedian": 38200,
+          "perSessionP90": 51800,
+          "total": 15700000,
+          "weightedTotal": 3100000,
+          "turns": 9900,
+          "carriedTokens": 377000000,
+          "carriedWeighted": 38900000
+        },
+        "contextPeak": {
+          "median": 96000,
+          "p90": 158000,
+          "sessionsOver160k": 37
+        },
+        "waste": [
+          {
+            "kind": "exploration",
+            "episodes": 63,
+            "sessions": 48,
+            "tokens": 8200000,
+            "weighted": 590000,
+            "basis": "measured"
+          },
+          {
+            "kind": "retry",
+            "episodes": 41,
+            "sessions": 29,
+            "tokens": 5600000,
+            "weighted": 420000,
+            "basis": "measured",
+            "topHeads": [
+              "npm test",
+              "git push",
+              "npm run",
+              "npx tsc",
+              "node scripts",
+              "gh pr",
+              "docker compose"
+            ]
+          },
+          {
+            "kind": "correction",
+            "episodes": 27,
+            "sessions": 22,
+            "tokens": 3600000,
+            "weighted": 270000,
+            "basis": "measured",
+            "items": [
+              "U1-203"
+            ]
+          },
+          {
+            "kind": "notfound",
+            "episodes": 18,
+            "sessions": 11,
+            "tokens": 1100000,
+            "weighted": 85000,
+            "basis": "measured",
+            "topHeads": [
+              "pnpm run"
+            ],
+            "items": [
+              "U1-701"
+            ]
+          },
+          {
+            "kind": "hook-block",
+            "episodes": 9,
+            "sessions": 7,
+            "tokens": 600000,
+            "weighted": 45000,
+            "basis": "measured",
+            "topHeads": [
+              "git push"
+            ],
+            "items": [
+              "U1-101"
+            ]
+          },
+          {
+            "kind": "error-end",
+            "episodes": 6,
+            "sessions": 6,
+            "tokens": 500000,
+            "weighted": 40000,
+            "basis": "measured"
+          },
+          {
+            "kind": "loop",
+            "episodes": 0,
+            "sessions": 0,
+            "tokens": 0,
+            "weighted": 0,
+            "basis": "measured"
+          }
+        ],
+        "estimates": [
+          {
+            "id": "mcp-github",
+            "label": "Servidor MCP do GitHub fora das sessões que o usam",
+            "tool": "gh",
+            "tokens": 3200000,
+            "weighted": 330000,
+            "source": "cerca de 7.800 tokens da lista de ferramentas vezes 412 sessões",
+            "items": [
+              "U1-702"
+            ]
+          },
+          {
+            "id": "agent-files-english",
+            "label": "Arquivos de agente em inglês",
+            "tokens": 1100000,
+            "weighted": 115000,
+            "source": "diferença média de tokens entre os dois idiomas nas instruções, vezes as sessões",
+            "items": [
+              "U1-201"
+            ]
+          }
+        ],
+        "unusedContext": {
+          "skillsNeverInvoked": [
+            "revisao-pr",
+            "gerar-changelog"
+          ],
+          "mcpServersNeverCalled": [
+            "github",
+            "postgres-local"
+          ]
+        },
+        "example": true
+      },
+      "scores": {
+        "current": 79.6,
+        "baseline": 78.2,
+        "projected": 87.8,
+        "previous": null,
+        "grade": "B",
+        "baselineGrade": "B",
+        "projectedGrade": "B",
+        "roundsCounted": 5,
+        "roundsTotal": 7,
+        "computedAt": "2026-11-20T15:10:00.000Z"
+      }
+    },
+    {
+      "id": "u2",
+      "kind": "user",
+      "name": "Claude Code · conta 2",
+      "path": "~/.claude-conta2",
+      "provider": "claude-code",
+      "account": "claude-2",
+      "inherits": "u1",
+      "impactSkipped": {
+        "reason": "shared-sessions",
+        "with": "u1"
+      },
+      "scores": {
+        "current": 98.8,
+        "baseline": 98.8,
+        "projected": 98.8,
+        "previous": null,
+        "grade": "A",
+        "baselineGrade": "A",
+        "projectedGrade": "A",
+        "roundsCounted": 3,
+        "roundsTotal": 7,
+        "computedAt": "2026-11-20T15:10:00.000Z"
+      }
+    },
+    {
+      "id": "u3",
+      "kind": "user",
+      "name": "Codex",
+      "path": "~/.codex",
+      "provider": "codex",
+      "account": "codex-1",
+      "activity": {
+        "sessions": 31,
+        "lastActive": "2026-11-15T10:12:00Z"
+      },
+      "scores": {
+        "current": 99.1,
+        "baseline": 99.1,
+        "projected": 99.1,
+        "previous": null,
+        "grade": "A",
+        "baselineGrade": "A",
+        "projectedGrade": "A",
+        "roundsCounted": 2,
+        "roundsTotal": 7,
+        "computedAt": "2026-11-20T15:10:00.000Z"
+      }
+    },
+    {
+      "id": "loja-web",
+      "kind": "project",
+      "name": "loja-web",
+      "path": "~/dev/loja-web",
+      "project": {
+        "isCode": true,
+        "defaultBranch": "main",
+        "behindRemote": 0,
+        "worktrees": 2
+      },
+      "activity": {
+        "sessions": 187,
+        "lastActive": "2026-11-20T11:48:00Z"
+      },
+      "elements": {
+        "permissions": [
+          {
+            "layer": "project",
+            "kind": "allow",
+            "rule": "Bash(npm test)",
+            "file": "floja-3"
+          },
+          {
+            "layer": "project",
+            "kind": "allow",
+            "rule": "Bash(npm run lint)",
+            "file": "floja-3"
+          },
+          {
+            "layer": "project",
+            "kind": "allow",
+            "rule": "Bash(rm -rf *)",
+            "file": "floja-3",
+            "item": "LOJA-101",
+            "note": "Apaga qualquer coisa sem perguntar."
+          }
+        ],
+        "hooks": [
+          {
+            "id": "loja-git-1",
+            "source": "git",
+            "event": "pre-commit",
+            "command": "npx lint-staged || true",
+            "file": "floja-4",
+            "script": "floja-4",
+            "blocking": false,
+            "item": "LOJA-401",
+            "note": "O `|| true` impede o bloqueio."
+          },
+          {
+            "id": "loja-ci-1",
+            "source": "ci",
+            "event": "push, pull_request",
+            "command": "npm ci && npm test",
+            "file": "floja-5",
+            "blocking": true,
+            "note": "Bloqueia o merge quando um teste falha."
+          }
+        ],
+        "skills": [
+          {
+            "name": "criar-migracao",
+            "level": "project",
+            "description": "Use para criar uma migração de banco no padrão do projeto.",
+            "descriptionChars": 58,
+            "invocations": 7,
+            "verdict": "keep",
+            "reason": "Usada em 7 sessões, sempre com sucesso."
+          }
+        ],
+        "mcp": [
+          {
+            "name": "postgres-local",
+            "level": "project",
+            "transport": "local",
+            "calls": 23,
+            "note": "No lugar certo: só este projeto usa."
+          }
+        ],
+        "docs": [
+          {
+            "path": "./README.md",
+            "bytes": 3100,
+            "lastCommit": "2026-09-02T10:00:00Z",
+            "language": "en",
+            "reader": "customer",
+            "status": "fine",
+            "item": "LOJA-302",
+            "note": "Atual, mas no idioma errado para quem lê."
+          },
+          {
+            "path": "./docs/setup.md",
+            "bytes": 96,
+            "lastCommit": "2026-03-14T10:00:00Z",
+            "language": "pt",
+            "reader": "developer",
+            "status": "stale",
+            "file": "floja-6",
+            "item": "LOJA-301"
+          },
+          {
+            "path": "./docs/arquitetura.md",
+            "bytes": 36800,
+            "lastCommit": "2026-10-28T10:00:00Z",
+            "language": "pt",
+            "reader": "agent",
+            "status": "always-loaded",
+            "file": "floja-7",
+            "item": "LOJA-202"
+          }
+        ]
+      },
+      "impact": {
+        "windowDays": 30,
+        "from": "2026-10-21T00:00:00Z",
+        "to": "2026-11-20T00:00:00Z",
+        "sessions": 187,
+        "activeDays": 19,
+        "totalTokens": 243000000,
+        "byKind": {
+          "input": 600000,
+          "cacheWrite": 4900000,
+          "cacheRead": 236300000,
+          "output": 1200000
+        },
+        "weightedTotal": 36355000,
+        "weightedByKind": {
+          "input": 600000,
+          "cacheWrite": 6125000,
+          "cacheRead": 23630000,
+          "output": 6000000
+        },
+        "weights": {
+          "unit": "input-token equivalents",
+          "source": "references/catalog/pricing-weights.json",
+          "verifiedAt": "2026-11-10",
+          "sources": [
+            "https://example.com/pricing"
+          ],
+          "perModelFamily": {
+            "modelo-exemplo": {
+              "turns": 9900,
+              "ratios": {
+                "input": 1,
+                "cacheWrite": 1.25,
+                "cacheRead": 0.1,
+                "output": 5
+              }
+            }
+          }
+        },
+        "contextAtStart": {
+          "perSessionMedian": 47400,
+          "perSessionP90": 58900,
+          "total": 8860000,
+          "weightedTotal": 1720000,
+          "turns": 4100,
+          "carriedTokens": 194000000,
+          "carriedWeighted": 20100000
+        },
+        "contextPeak": {
+          "median": 121000,
+          "p90": 171000,
+          "sessionsOver160k": 29
+        },
+        "waste": [
+          {
+            "kind": "correction",
+            "episodes": 31,
+            "sessions": 24,
+            "tokens": 4600000,
+            "weighted": 330000,
+            "basis": "measured",
+            "items": [
+              "LOJA-401"
+            ]
+          },
+          {
+            "kind": "retry",
+            "episodes": 22,
+            "sessions": 17,
+            "tokens": 3100000,
+            "weighted": 220000,
+            "basis": "measured",
+            "topHeads": [
+              "npm test",
+              "npm run"
+            ]
+          },
+          {
+            "kind": "loop",
+            "episodes": 3,
+            "sessions": 3,
+            "tokens": 450000,
+            "weighted": 32000,
+            "basis": "measured"
+          },
+          {
+            "kind": "notfound",
+            "episodes": 6,
+            "sessions": 6,
+            "tokens": 300000,
+            "weighted": 22000,
+            "basis": "measured",
+            "topHeads": [
+              "npm run"
+            ],
+            "items": [
+              "LOJA-301"
+            ]
+          }
+        ],
+        "estimates": [
+          {
+            "id": "architecture-doc",
+            "label": "Documento de arquitetura fora das sessões que não precisam dele",
+            "tokens": 1720000,
+            "weighted": 172000,
+            "source": "9.200 tokens vezes 187 sessões",
+            "items": [
+              "LOJA-202"
+            ]
+          }
+        ],
+        "unusedContext": {
+          "skillsNeverInvoked": [],
+          "mcpServersNeverCalled": []
+        },
+        "example": true
+      },
+      "scores": {
+        "current": 82.5,
+        "baseline": 82.1,
+        "projected": 82.5,
+        "previous": null,
+        "grade": "B",
+        "baselineGrade": "B",
+        "projectedGrade": "B",
+        "roundsCounted": 5,
+        "roundsTotal": 8,
+        "computedAt": "2026-11-20T15:10:00.000Z"
+      }
+    },
+    {
+      "id": "api-pedidos",
+      "kind": "project",
+      "name": "api-pedidos",
+      "path": "~/dev/api-pedidos",
+      "project": {
+        "isCode": true,
+        "defaultBranch": "main",
+        "behindRemote": 3,
+        "worktrees": 0
+      },
+      "activity": {
+        "sessions": 96,
+        "lastActive": "2026-11-19T17:20:00Z"
+      },
+      "scores": {
+        "current": 97.8,
+        "baseline": 97.8,
+        "projected": 97.8,
+        "previous": null,
+        "grade": "A",
+        "baselineGrade": "A",
+        "projectedGrade": "A",
+        "roundsCounted": 2,
+        "roundsTotal": 8,
+        "computedAt": "2026-11-20T15:10:00.000Z"
+      }
+    }
+  ],
   "rounds": [
     {
+      "harness": "u1",
       "round": 1,
-      "scope": "user",
       "status": "done"
     },
     {
+      "harness": "u1",
+      "round": 2,
+      "status": "done"
+    },
+    {
+      "harness": "u1",
+      "round": 3,
+      "status": "not-applicable",
+      "note": "Documentação é uma rodada de projeto."
+    },
+    {
+      "harness": "u1",
+      "round": 4,
+      "status": "pending"
+    },
+    {
+      "harness": "u1",
+      "round": 5,
+      "status": "pending"
+    },
+    {
+      "harness": "u1",
+      "round": 6,
+      "status": "done"
+    },
+    {
+      "harness": "u1",
+      "round": 7,
+      "status": "done"
+    },
+    {
+      "harness": "u1",
+      "round": 8,
+      "status": "done"
+    },
+    {
+      "harness": "u2",
       "round": 1,
-      "scope": "project",
       "status": "done"
     },
     {
+      "harness": "u2",
       "round": 2,
-      "scope": "user",
       "status": "done"
     },
     {
+      "harness": "u2",
+      "round": 3,
+      "status": "not-applicable",
+      "note": "Documentação é uma rodada de projeto."
+    },
+    {
+      "harness": "u2",
+      "round": 4,
+      "status": "pending"
+    },
+    {
+      "harness": "u2",
+      "round": 5,
+      "status": "pending"
+    },
+    {
+      "harness": "u2",
+      "round": 6,
+      "status": "pending"
+    },
+    {
+      "harness": "u2",
+      "round": 7,
+      "status": "pending"
+    },
+    {
+      "harness": "u2",
+      "round": 8,
+      "status": "done"
+    },
+    {
+      "harness": "u3",
+      "round": 1,
+      "status": "done"
+    },
+    {
+      "harness": "u3",
       "round": 2,
-      "scope": "project",
       "status": "done"
     },
     {
+      "harness": "u3",
       "round": 3,
-      "scope": "user",
-      "status": "not-applicable"
+      "status": "not-applicable",
+      "note": "Documentação é uma rodada de projeto."
     },
     {
+      "harness": "u3",
+      "round": 4,
+      "status": "pending"
+    },
+    {
+      "harness": "u3",
+      "round": 5,
+      "status": "pending"
+    },
+    {
+      "harness": "u3",
+      "round": 6,
+      "status": "pending"
+    },
+    {
+      "harness": "u3",
+      "round": 7,
+      "status": "pending"
+    },
+    {
+      "harness": "u3",
+      "round": 8,
+      "status": "pending"
+    },
+    {
+      "harness": "loja-web",
+      "round": 1,
+      "status": "done"
+    },
+    {
+      "harness": "loja-web",
+      "round": 2,
+      "status": "done"
+    },
+    {
+      "harness": "loja-web",
       "round": 3,
-      "scope": "project",
       "status": "done"
     },
     {
+      "harness": "loja-web",
       "round": 4,
-      "scope": "user",
-      "status": "pending"
-    },
-    {
-      "round": 4,
-      "scope": "project",
       "status": "done"
     },
     {
+      "harness": "loja-web",
       "round": 5,
-      "scope": "user",
+      "status": "done"
+    },
+    {
+      "harness": "loja-web",
+      "round": 6,
       "status": "pending"
     },
     {
-      "round": 5,
-      "scope": "project",
-      "status": "pending"
-    },
-    {
-      "round": 6,
-      "scope": "user",
-      "status": "done"
-    },
-    {
-      "round": 6,
-      "scope": "project",
-      "status": "done"
-    },
-    {
+      "harness": "loja-web",
       "round": 7,
-      "scope": "user",
-      "status": "done"
-    },
-    {
-      "round": 7,
-      "scope": "project",
       "status": "skipped",
-      "note": "Você pediu para deixar os CLIs para a próxima execução."
+      "note": "Você pediu para deixar CLIs e ferramentas para a próxima revisão."
     },
     {
+      "harness": "loja-web",
       "round": 8,
-      "scope": "user",
       "status": "pending"
     },
     {
+      "harness": "api-pedidos",
+      "round": 1,
+      "status": "done"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 2,
+      "status": "done"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 3,
+      "status": "pending"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 4,
+      "status": "pending"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 5,
+      "status": "pending"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 6,
+      "status": "pending"
+    },
+    {
+      "harness": "api-pedidos",
+      "round": 7,
+      "status": "pending"
+    },
+    {
+      "harness": "api-pedidos",
       "round": 8,
-      "scope": "project",
       "status": "pending"
     }
   ],
   "layers": [
     {
-      "scope": "user",
+      "harness": "u1",
       "name": "CLAUDE.md",
       "kind": "instructions",
+      "file": "fu1-1",
       "path": "~/.claude/CLAUDE.md",
-      "tokens": 2100
+      "tokens": 310,
+      "basis": "measured"
     },
     {
-      "scope": "user",
+      "harness": "u1",
       "name": "settings.json",
       "kind": "permissions",
+      "file": "fu1-2",
       "path": "~/.claude/settings.json",
-      "note": "41 allow, 6 deny"
+      "note": "3 allow, 2 deny"
     },
     {
-      "scope": "user",
+      "harness": "u1",
+      "name": "Descrições das skills",
+      "kind": "skills",
+      "tokens": 420,
+      "basis": "estimated",
+      "note": "4 skills, 3 do usuário e 1 de plugin"
+    },
+    {
+      "harness": "u1",
       "name": "Plugins",
       "kind": "plugins",
-      "tokens": 3400,
-      "note": "4 ativos"
+      "tokens": 2100,
+      "basis": "estimated",
+      "note": "1 ativo"
     },
     {
-      "scope": "user",
+      "harness": "u1",
       "name": "Servidores MCP",
       "kind": "mcp",
-      "tokens": 5200,
-      "note": "3 servidores no nível do usuário"
+      "tokens": 9400,
+      "basis": "estimated",
+      "note": "2 servidores no nível do usuário"
     },
     {
-      "scope": "project",
+      "harness": "u2",
       "name": "CLAUDE.md",
       "kind": "instructions",
+      "file": "fu2-1",
+      "path": "~/.claude-conta2/CLAUDE.md",
+      "tokens": 310,
+      "basis": "measured",
+      "note": "Link para a conta principal"
+    },
+    {
+      "harness": "u3",
+      "name": "AGENTS.md",
+      "kind": "instructions",
+      "file": "fu3-1",
+      "path": "~/.codex/AGENTS.md",
+      "tokens": 30,
+      "basis": "measured"
+    },
+    {
+      "harness": "loja-web",
+      "name": "CLAUDE.md",
+      "kind": "instructions",
+      "file": "floja-1",
       "path": "./CLAUDE.md",
-      "tokens": 3900
+      "tokens": 60,
+      "basis": "measured"
     },
     {
-      "scope": "project",
-      "name": "docs/",
+      "harness": "loja-web",
+      "name": "AGENTS.md",
+      "kind": "instructions",
+      "file": "floja-2",
+      "path": "./AGENTS.md",
+      "tokens": 45,
+      "basis": "measured",
+      "note": "Importado pelo CLAUDE.md"
+    },
+    {
+      "harness": "loja-web",
+      "name": "docs/arquitetura.md",
       "kind": "docs",
-      "path": "./docs",
-      "note": "23 arquivos, 4 carregados por instrução"
+      "file": "floja-7",
+      "path": "./docs/arquitetura.md",
+      "tokens": 9200,
+      "basis": "measured",
+      "note": "Importado pelo CLAUDE.md em toda sessão"
     },
     {
-      "scope": "project",
-      "name": "graphify-out/",
-      "kind": "other",
-      "path": "./graphify-out",
-      "note": "12 dias atrás da main"
+      "harness": "loja-web",
+      "name": "Servidor MCP do projeto",
+      "kind": "mcp",
+      "tokens": 1600,
+      "basis": "estimated",
+      "note": "postgres-local"
+    },
+    {
+      "harness": "api-pedidos",
+      "name": "AGENTS.md",
+      "kind": "instructions",
+      "file": "fapi-1",
+      "path": "./AGENTS.md",
+      "tokens": 40,
+      "basis": "measured"
+    }
+  ],
+  "files": [
+    {
+      "id": "fu1-1",
+      "harness": "u1",
+      "path": "~/.claude/CLAUDE.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "# Regras gerais\n\n- Responda em português do Brasil.\n- Código, comentários e mensagens de commit em inglês.\n- Nunca faça commit sem eu pedir: um commit fora de hora mistura o trabalho de duas tarefas.\n\n## Git\n\n- Um branch por tarefa, no formato `tipo/descricao-curta`.\n- Nunca faça push direto na main.\n- Antes de abrir PR, rode os testes e o lint.\n\n## Estilo\n\n- Prefira funções pequenas e nomes completos.\n- Não adicione dependência nova sem perguntar.\n\n## Checklist de release\n\n1. Atualize o CHANGELOG com as mudanças da versão.\n2. Rode `npm version` com o tipo certo de incremento.\n3. Gere as notas da versão a partir dos commits.\n4. Publique o pacote e confira a página do registro.\n5. Avise o time no canal de releases.\n\n## Ferramentas\n\n- Use `gh` para tudo que for GitHub.\n- Use `rg` no lugar de `grep`.\n",
+      "bytes": 823,
+      "tokens": 202,
+      "loaded": "always",
+      "role": "Regras que entram em toda sessão desta conta, em qualquer projeto."
+    },
+    {
+      "id": "fu1-2",
+      "harness": "u1",
+      "path": "~/.claude/settings.json",
+      "category": "settings",
+      "lang": "json",
+      "content": "{\n  \"env\": {\n    \"GITHUB_TOKEN\": \"ghp_…\"\n  },\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(npm run *)\",\n      \"Bash(git status)\",\n      \"Bash(git diff *)\"\n    ],\n    \"deny\": [\n      \"Bash(git push --force:*)\",\n      \"Read(./.env)\"\n    ]\n  },\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          { \"type\": \"command\", \"command\": \"bash ~/.claude/hooks/avisa-fim.sh\" }\n        ]\n      }\n    ]\n  }\n}\n",
+      "bytes": 409,
+      "tokens": 102,
+      "loaded": "always",
+      "role": "Permissões, variáveis de ambiente e hooks da conta."
+    },
+    {
+      "id": "fu1-3",
+      "harness": "u1",
+      "path": "~/.claude/hooks/avisa-fim.sh",
+      "category": "hook",
+      "lang": "shell",
+      "content": "#!/usr/bin/env bash\n# Toca um aviso quando a sessão termina.\nprintf '\\a'\n",
+      "bytes": 74,
+      "tokens": 18,
+      "loaded": "never",
+      "role": "Roda quando a sessão termina e toca um aviso sonoro."
+    },
+    {
+      "id": "fu1-4",
+      "harness": "u1",
+      "path": "~/.claude/skills/revisao-pr/SKILL.md",
+      "category": "skill",
+      "lang": "markdown",
+      "content": "---\nname: revisao-pr\ndescription: Use quando o usuário pedir para revisar um pull request antes de aprovar.\n---\n\n# Revisão de PR\n\nLeia o diff inteiro, rode os testes e liste o que impede o merge antes do que é só gosto.\n",
+      "bytes": 224,
+      "tokens": 55,
+      "loaded": "on-demand",
+      "role": "Skill de revisão de pull request. A descrição entra em toda sessão; o corpo só quando é invocada."
+    },
+    {
+      "id": "fu2-1",
+      "harness": "u2",
+      "path": "~/.claude-conta2/CLAUDE.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "",
+      "omitted": "linked",
+      "linkTo": "~/.claude/CLAUDE.md",
+      "inheritedFrom": "u1",
+      "loaded": "always",
+      "role": "Link para as regras da conta principal."
+    },
+    {
+      "id": "fu2-2",
+      "harness": "u2",
+      "path": "~/.claude-conta2/keybindings.json",
+      "category": "settings",
+      "lang": "json",
+      "content": "{\n  \"bindings\": [\n    { \"key\": \"ctrl+k\", \"command\": \"clear\" }\n  ]\n}\n",
+      "bytes": 68,
+      "tokens": 17,
+      "loaded": "never",
+      "role": "Atalhos de teclado desta conta, diferentes dos da principal."
+    },
+    {
+      "id": "fu3-1",
+      "harness": "u3",
+      "path": "~/.codex/AGENTS.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "# Agent rules\n\n- Answer in Brazilian Portuguese.\n- Run the tests before saying the work is done.\n",
+      "bytes": 97,
+      "tokens": 24,
+      "loaded": "always",
+      "role": "Regras do Codex, geradas a partir do CLAUDE.md da conta principal."
+    },
+    {
+      "id": "fu3-2",
+      "harness": "u3",
+      "path": "~/.codex/config.toml",
+      "category": "settings",
+      "lang": "toml",
+      "content": "model = \"gpt-5\"\napproval_policy = \"on-request\"\n\n[sandbox]\nmode = \"workspace-write\"\n",
+      "bytes": 83,
+      "tokens": 21,
+      "loaded": "always",
+      "role": "Modelo, política de aprovação e sandbox do Codex."
+    },
+    {
+      "id": "floja-1",
+      "harness": "loja-web",
+      "path": "./CLAUDE.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "# loja-web\n\nLoja online em Next.js com API em Node.\n\n@AGENTS.md\n@docs/arquitetura.md\n\n## Comandos\n\n- `npm run dev` sobe o servidor local.\n- `npm test` roda os testes.\n- `npm run lint` roda o lint.\n",
+      "bytes": 197,
+      "tokens": 49,
+      "loaded": "always",
+      "role": "Entrada do projeto para o Claude Code. Importa o AGENTS.md e um documento de arquitetura."
+    },
+    {
+      "id": "floja-2",
+      "harness": "loja-web",
+      "path": "./AGENTS.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "# Instruções para agentes\n\n- Rode os testes antes de dizer que terminou.\n- Não mexa na pasta `legacy/` sem pedir.\n- Mensagens de commit em inglês, no imperativo.\n",
+      "bytes": 166,
+      "tokens": 41,
+      "loaded": "always",
+      "role": "Regras do projeto para qualquer agente."
+    },
+    {
+      "id": "floja-3",
+      "harness": "loja-web",
+      "path": "./.claude/settings.json",
+      "category": "settings",
+      "lang": "json",
+      "content": "{\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(npm test)\",\n      \"Bash(npm run lint)\",\n      \"Bash(rm -rf *)\"\n    ]\n  }\n}\n",
+      "bytes": 123,
+      "tokens": 31,
+      "loaded": "always",
+      "role": "Permissões que valem só neste projeto."
+    },
+    {
+      "id": "floja-4",
+      "harness": "loja-web",
+      "path": "./.githooks/pre-commit",
+      "category": "gate",
+      "lang": "shell",
+      "content": "#!/bin/sh\n# Roda o lint nos arquivos alterados.\nnpx lint-staged || true\n",
+      "bytes": 72,
+      "tokens": 18,
+      "loaded": "never",
+      "role": "Hook do git que roda antes de cada commit."
+    },
+    {
+      "id": "floja-5",
+      "harness": "loja-web",
+      "path": "./.github/workflows/ci.yml",
+      "category": "gate",
+      "lang": "yaml",
+      "content": "name: ci\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n      - run: npm ci\n      - run: npm test\n",
+      "bytes": 263,
+      "tokens": 66,
+      "loaded": "never",
+      "role": "CI: roda os testes em cada push e pull request."
+    },
+    {
+      "id": "floja-6",
+      "harness": "loja-web",
+      "path": "./docs/setup.md",
+      "category": "doc",
+      "lang": "markdown",
+      "content": "# Como rodar\n\n1. `npm install`\n2. `npm run seed` para criar os dados de exemplo.\n3. `npm run dev`\n",
+      "bytes": 98,
+      "tokens": 25,
+      "loaded": "on-demand",
+      "role": "Passo a passo para rodar o projeto."
+    },
+    {
+      "id": "floja-7",
+      "harness": "loja-web",
+      "path": "./docs/arquitetura.md",
+      "category": "doc",
+      "lang": "markdown",
+      "content": "",
+      "omitted": "budget",
+      "bytes": 36800,
+      "tokens": 9200,
+      "loaded": "always",
+      "role": "Documento de arquitetura, importado pelo CLAUDE.md em toda sessão."
+    },
+    {
+      "id": "fapi-1",
+      "harness": "api-pedidos",
+      "path": "./AGENTS.md",
+      "category": "instructions",
+      "lang": "markdown",
+      "content": "# Instruções para agentes\n\n- A API segue o contrato em `openapi.yaml`: mude o contrato antes do código.\n- Toda rota nova precisa de teste de integração.\n",
+      "bytes": 158,
+      "tokens": 38,
+      "loaded": "always",
+      "role": "Regras do projeto para qualquer agente."
+    },
+    {
+      "id": "fapi-2",
+      "harness": "api-pedidos",
+      "path": "./.github/workflows/ci.yml",
+      "category": "gate",
+      "lang": "yaml",
+      "content": "name: ci\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n      - run: npm ci\n      - run: npm test\n",
+      "bytes": 263,
+      "tokens": 66,
+      "loaded": "never",
+      "role": "CI: roda os testes em cada push e pull request."
     }
   ],
   "inventory": [
     {
-      "id": "U-INV-1",
-      "scope": "user",
+      "id": "U1-INV-1",
+      "harness": "u1",
       "category": "Instruções",
       "name": "CLAUDE.md",
+      "file": "fu1-1",
       "path": "~/.claude/CLAUDE.md",
+      "detail": "29 linhas",
       "verdict": "attention",
-      "opinion": "Claro e curto, mas escrito em português.",
-      "itemId": "U3"
+      "opinion": "Curto e claro. Em português, e com um checklist que não precisa estar ali.",
+      "item": "U1-201"
     },
     {
-      "id": "U-INV-2",
-      "scope": "user",
+      "id": "U1-INV-2",
+      "harness": "u1",
       "category": "Permissões",
       "name": "deny: git push --force",
       "verdict": "problem",
-      "opinion": "Só bloqueia quando a flag vem logo depois do push.",
-      "itemId": "U1"
+      "opinion": "Só bloqueia quando a flag vem logo depois de push.",
+      "item": "U1-101"
     },
     {
-      "id": "U-INV-3",
-      "scope": "user",
+      "id": "U1-INV-3",
+      "harness": "u1",
+      "category": "Permissões",
+      "name": "deny: Read(./.env)",
+      "verdict": "fine",
+      "opinion": "Testada: a leitura é recusada.",
+      "item": "U1-103"
+    },
+    {
+      "id": "U1-INV-4",
+      "harness": "u1",
       "category": "CLIs",
       "name": "gh 2.83.0",
       "verdict": "fine",
-      "opinion": "Instalado e logado; as instruções já preferem o CLI ao servidor MCP do GitHub."
+      "opinion": "Instalado e logado. É o que deve substituir o servidor MCP do GitHub."
     },
     {
-      "id": "P-INV-1",
-      "scope": "project",
-      "category": "Docs",
-      "name": "docs/setup.md",
-      "path": "./docs/setup.md",
-      "verdict": "problem",
-      "opinion": "Dois dos cinco comandos não existem mais.",
-      "itemId": "P2"
+      "id": "U1-INV-5",
+      "harness": "u1",
+      "category": "Skills",
+      "name": "release",
+      "verdict": "fine",
+      "opinion": "Usada nas duas releases do período, com descrição que diz quando se aplica."
     },
     {
-      "id": "P-INV-2",
-      "scope": "project",
+      "id": "LOJA-INV-1",
+      "harness": "loja-web",
       "category": "Gates",
       "name": "pre-commit: lint-staged",
+      "file": "floja-4",
+      "path": "./.githooks/pre-commit",
+      "verdict": "problem",
+      "opinion": "Roda e não bloqueia.",
+      "item": "LOJA-401"
+    },
+    {
+      "id": "LOJA-INV-2",
+      "harness": "loja-web",
+      "category": "Gates",
+      "name": "CI: npm test",
+      "file": "floja-5",
+      "path": "./.github/workflows/ci.yml",
       "verdict": "fine",
-      "opinion": "Rápido (menos de 2 s nos últimos commits) e bloqueia quando falha."
+      "opinion": "Rápido (menos de 3 minutos) e bloqueia o merge quando falha."
+    },
+    {
+      "id": "LOJA-INV-3",
+      "harness": "loja-web",
+      "category": "Documentação",
+      "name": "docs/setup.md",
+      "file": "floja-6",
+      "path": "./docs/setup.md",
+      "verdict": "attention",
+      "opinion": "Um dos três comandos não existe mais.",
+      "item": "LOJA-301"
+    },
+    {
+      "id": "API-INV-1",
+      "harness": "api-pedidos",
+      "category": "Gates",
+      "name": "CI: npm test",
+      "file": "fapi-2",
+      "path": "./.github/workflows/ci.yml",
+      "verdict": "fine",
+      "opinion": "Mesma configuração do loja-web, funcionando."
     }
   ],
   "items": [
     {
-      "id": "U1",
-      "scope": "user",
+      "id": "U1-101",
+      "harness": "u1",
       "round": 1,
       "severity": "critical",
       "class": "permission",
-      "title": "Regra que bloqueia force-push é contornável",
-      "finding": "A regra de deny só pega `git push --force` como prefixo.",
-      "evidence": "settings.json deny[2]",
-      "proposal": "Trocar por um hook PreToolUse que bloqueia --force e -f em qualquer posição de um git push.",
-      "opinion": "Vale: hoje a regra dá uma falsa sensação de segurança.",
-      "status": "fixed",
-      "decision": "Aprovado.",
-      "verified": "O hook bloqueia `git push origin main --force` num repo de teste.",
-      "notVerified": "A segunda conta não foi checada; ela não carrega este settings.",
-      "backup": "backups/2026-11-19T14-20-00Z/",
+      "check": "deny-prefix-bypass",
+      "title": "A regra que bloqueia push forçado é contornável",
+      "finding": "A regra de deny só bloqueia o comando quando `--force` vem logo depois de `git push`.",
+      "evidence": "settings.json, permissions.deny[0]; 9 chamadas bloqueadas e 2 que passaram em 30 dias",
+      "proposal": "Tirar a regra de prefixo e bloquear com um hook que lê o comando inteiro.",
+      "opinion": "Vale fazer hoje: a regra existe, então ninguém desconfia do buraco.",
       "lesson": {
-        "why": "O Claude Code compara regras de deny pelo começo do comando. `git push --force` fica bloqueado, mas `git push origin main --force` começa diferente e passa direto.",
-        "impact": "Um force-push na main apaga commits de outras pessoas sem aviso. A regra existia, então ninguém desconfiava do buraco.",
-        "better": "Um hook lê o comando inteiro antes de rodar e recusa `--force` ou `-f` em qualquer posição de um `git push`, com uma mensagem que diz ao agente o que fazer no lugar.",
+        "why": "Uma regra de deny (a lista do que o agente não pode rodar) compara o começo do comando. `git push --force` fica bloqueado, mas `git push origin main --force` começa diferente e passa.",
+        "impact": "Um push forçado na main apaga commits de outras pessoas sem aviso. Em 30 dias, 2 comandos com `--force` no fim passaram pela regra.",
+        "better": "Um hook (um script que roda antes de cada comando) lê o comando inteiro, recusa `--force` e `-f` em qualquer posição e diz ao agente o que usar no lugar.",
         "principle": "Bloqueie o argumento perigoso onde quer que ele apareça, não pelo começo do comando.",
-        "tradeoff": "Um hook roda em toda chamada de shell: soma alguns milissegundos e precisa ser mantido junto com o settings.",
+        "tradeoff": "O hook roda em toda chamada de shell: soma alguns milissegundos e vira mais um arquivo para manter.",
         "learnMore": "https://code.claude.com/docs/en/hooks"
       },
       "changes": [
         {
+          "file": "fu1-2",
           "path": "~/.claude/settings.json",
           "lang": "json",
-          "note": "a regra de prefixo sai; entra um hook que examina o comando inteiro",
-          "applied": true,
-          "before": "\"permissions\": {\n  \"deny\": [\n    \"Bash(rm -rf /*)\",\n    \"Bash(git push --force:*)\",\n    \"Bash(git reset --hard:*)\"\n  ]\n},\n\"hooks\": {}",
-          "after": "\"permissions\": {\n  \"deny\": [\n    \"Bash(rm -rf /*)\",\n    \"Bash(git reset --hard:*)\"\n  ]\n},\n\"hooks\": {\n  \"PreToolUse\": [\n    { \"matcher\": \"Bash\",\n      \"hooks\": [{ \"type\": \"command\", \"command\": \"node ~/.claude/scripts/block-force-push.mjs\" }] }\n  ]\n}"
+          "before": "      \"Bash(git push --force:*)\",\n",
+          "after": "",
+          "why": "A regra de prefixo sai: ela passa a sensação de bloqueio sem bloquear."
         },
         {
-          "path": "~/.claude/scripts/block-force-push.mjs",
-          "lang": "text",
-          "note": "arquivo novo: recusa --force e -f em qualquer posição",
-          "applied": true,
+          "file": "fu1-2",
+          "path": "~/.claude/settings.json",
+          "lang": "json",
           "before": "",
-          "after": "const cmd = JSON.parse(await readStdin()).tool_input.command;\nif (/\\bgit\\s+push\\b/.test(cmd) && /(^|\\s)(--force|-f)(\\s|$)/.test(cmd)) {\n  console.error('Force-push bloqueado. Use --force-with-lease numa branch sua.');\n  process.exit(2);\n}"
+          "insertAfter": "  \"hooks\": {",
+          "after": "    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hooks\": [\n          { \"type\": \"command\", \"command\": \"bash ~/.claude/hooks/bloqueia-force-push.sh\" }\n        ]\n      }\n    ],\n",
+          "why": "Registra o hook para rodar antes de todo comando de shell."
+        },
+        {
+          "path": "~/.claude/hooks/bloqueia-force-push.sh",
+          "lang": "shell",
+          "before": "",
+          "after": "#!/usr/bin/env bash\n# Recusa git push com --force ou -f em qualquer posição do comando.\ncmd=\"$(jq -r '.tool_input.command // \"\"')\"\ncase \"$cmd\" in\n  *\"git push\"*\"--force\"*|*\"git push\"*\" -f\"*)\n    echo \"Push forçado bloqueado: use --force-with-lease num branch seu.\" >&2\n    exit 2\n    ;;\nesac\nexit 0\n",
+          "why": "O script novo: sai com código 2, que é o que faz o Claude Code bloquear, e explica o que fazer."
         }
-      ]
+      ],
+      "status": "open"
     },
     {
-      "id": "U2",
-      "scope": "user",
-      "round": 6,
-      "severity": "medium",
-      "class": "install",
-      "title": "Sem camada de metodologia",
-      "finding": "Nenhuma skill de planejamento, depuração ou verificação dispara sozinha.",
-      "proposal": "Instalar o superpowers e o índice de skills no CLAUDE.md.",
-      "opinion": "A mudança de maior efeito na qualidade do dia a dia.",
-      "status": "queued",
+      "id": "U1-102",
+      "harness": "u1",
+      "round": 1,
+      "severity": "critical",
+      "class": "secret",
+      "title": "Token do GitHub escrito no settings.json",
+      "finding": "O settings.json guarda um token de acesso em texto puro, na seção `env`.",
+      "evidence": "settings.json, env.GITHUB_TOKEN (mascarado)",
+      "proposal": "Tirar o token do arquivo, guardar no cofre de credenciais do sistema e trocar o token.",
+      "opinion": "Troque o token de qualquer jeito: ele já passou por backup e sincronização.",
+      "decision": "Aprovado. Você vai trocar o token no GitHub.",
+      "updatedAt": "2026-11-20T14:40:00Z",
       "lesson": {
-        "why": "Sem uma camada de metodologia, o agente decide sozinho como trabalhar em cada tarefa: às vezes planeja, às vezes sai codando; às vezes testa, às vezes declara pronto sem rodar nada.",
-        "impact": "Nas últimas 32 sessões, 9 terminaram com o agente dizendo que estava pronto e você corrigindo logo depois.",
-        "better": "O Superpowers injeta no início de cada sessão o hábito de checar uma skill antes de agir: brainstorm antes de construir, plano antes de tarefa longa, verificação antes de dizer que terminou.",
-        "principle": "Processo que precisa ser lembrado a cada sessão deve ser carregado pelo harness, não pela sua memória.",
-        "tradeoff": "Algumas centenas de tokens no início de cada sessão, e o agente pergunta mais antes de começar.",
-        "learnMore": "https://github.com/obra/superpowers"
+        "why": "Tudo que está em `env` vai para o ambiente de cada comando que o agente roda, e o arquivo entra em backup e em qualquer cópia do harness.",
+        "impact": "Quem lê o arquivo, ou qualquer script que o agente rode, usa o token com as permissões que ele tem.",
+        "better": "O `gh` lê a credencial do cofre do sistema. O arquivo fica sem segredo e pode ser copiado para outra máquina.",
+        "principle": "Arquivo de configuração não guarda segredo: guarda onde o segredo está.",
+        "tradeoff": "Você precisa rodar `gh auth login` uma vez em cada máquina."
       },
       "changes": [
         {
-          "path": "~/.claude/CLAUDE.md",
-          "lang": "markdown",
-          "note": "o índice curto faz as skills dispararem sem você citar o nome",
-          "before": "## Language\n- Respond in Brazilian Portuguese\n\n## Git\n- Never commit without being asked",
-          "after": "## Language\n- Respond in Brazilian Portuguese\n\n## Skills\nBefore acting on a task, check whether an installed skill covers it and invoke it.\n- brainstorming: before building anything new\n- writing-plans: before any multi-step task\n- verification-before-completion: before saying work is done\n\n## Git\n- Never commit without being asked"
+          "file": "fu1-2",
+          "path": "~/.claude/settings.json",
+          "lang": "json",
+          "before": "  \"env\": {\n    \"GITHUB_TOKEN\": \"ghp_…\"\n  },\n",
+          "after": "",
+          "why": "O token sai do arquivo. O `gh` passa a usar o login guardado no cofre do sistema."
         }
-      ]
+      ],
+      "status": "in-progress"
     },
     {
-      "id": "U3",
-      "scope": "user",
+      "id": "U1-103",
+      "harness": "u1",
+      "round": 1,
+      "severity": "low",
+      "class": "none",
+      "title": "Leitura do .env bloqueada",
+      "finding": "A regra `Read(./.env)` impede o agente de ler o arquivo de ambiente do projeto.",
+      "proposal": "Nada a mudar.",
+      "opinion": "Está certo e foi testado nesta revisão: a leitura é recusada.",
+      "status": "ok"
+    },
+    {
+      "id": "U1-201",
+      "harness": "u1",
       "round": 2,
       "severity": "medium",
       "class": "translate-agent",
-      "title": "Arquivo de instruções em português",
-      "finding": "O CLAUDE.md está em português.",
-      "evidence": "~2.100 tokens; ~1.650 estimados em inglês",
-      "proposal": "Traduzir mantendo comandos e frases citadas idênticos.",
-      "opinion": "Cerca de 20% menos tokens em toda sessão.",
-      "status": "open",
+      "group": "G-1",
+      "title": "CLAUDE.md da conta em português",
+      "finding": "As regras da conta estão em português, e só o agente lê este arquivo.",
+      "evidence": "29 linhas, cerca de 310 tokens por sessão",
+      "proposal": "Traduzir as seções para inglês, mantendo a regra de responder em português.",
+      "opinion": "Vale: o ganho por sessão é pequeno, mas o arquivo entra em todas.",
+      "saves": {
+        "tokens": 1100000,
+        "basis": "estimated",
+        "how": "cerca de 2.700 tokens a menos por sessão em instruções e releituras, vezes 412 sessões"
+      },
       "lesson": {
-        "why": "O modelo lê o CLAUDE.md inteiro no começo de toda sessão. Em português, o mesmo conteúdo ocupa mais tokens que em inglês, e as skills e ferramentas que ele cita estão todas em inglês.",
-        "impact": "Cerca de 450 tokens a mais em cada sessão, em todos os projetos.",
-        "better": "O mesmo conteúdo em inglês, com comandos, caminhos e frases que o agente deve dizer em português mantidos idênticos. Ele continua falando com você em português.",
-        "principle": "Arquivo que só agente lê vai em inglês; a conversa com você continua no seu idioma.",
-        "tradeoff": "Você passa a editar o arquivo em inglês. A tradução fica pronta para você conferir antes de entrar."
+        "why": "O mesmo texto em português ocupa mais tokens do que em inglês, e as skills e a documentação que o agente cruza com as regras estão em inglês.",
+        "impact": "Cerca de 310 tokens a mais em cada uma das 412 sessões do período, e regras que casam pior com o nome das ferramentas.",
+        "better": "O arquivo fica menor e as regras usam as mesmas palavras das skills. A resposta para você continua em português.",
+        "principle": "Arquivo que só o agente lê fica em inglês; o que você lê fica no seu idioma.",
+        "tradeoff": "Você passa a revisar as regras em inglês."
       },
       "changes": [
         {
+          "file": "fu1-1",
           "path": "~/.claude/CLAUDE.md",
           "lang": "markdown",
-          "note": "uma das 6 seções; a tradução completa está em drafts/ para aprovação",
-          "before": "## Obrigações gerais\n- Nunca faça commit sem eu pedir explicitamente\n- Nunca abra pull request sem eu pedir\n- Nunca faça merge sem eu pedir, e nunca squash",
-          "after": "## General obligations\n- Never commit unless explicitly asked\n- Never open a pull request unless asked\n- Never merge unless asked, and never squash"
+          "before": "## Git\n\n- Um branch por tarefa, no formato `tipo/descricao-curta`.\n- Nunca faça push direto na main.\n- Antes de abrir PR, rode os testes e o lint.",
+          "after": "## Git\n\n- One branch per task, named `type/short-description`.\n- Never push straight to main.\n- Run the tests and the linter before opening a PR.",
+          "why": "A seção de git, traduzida linha por linha, sem mudar nenhuma regra."
+        },
+        {
+          "file": "fu1-1",
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
+          "before": "## Estilo\n\n- Prefira funções pequenas e nomes completos.\n- Não adicione dependência nova sem perguntar.",
+          "after": "## Style\n\n- Prefer small functions and full names.\n- Ask before adding a new dependency.",
+          "why": "A seção de estilo, com o mesmo conteúdo."
         }
-      ]
+      ],
+      "status": "open"
     },
     {
-      "id": "U4",
-      "scope": "user",
-      "round": 7,
-      "severity": "low",
-      "class": "install",
-      "title": "rtk não instalado",
-      "finding": "A saída de testes e do git chega ao modelo sem filtro.",
-      "proposal": "Instalar o rtk e registrar o hook.",
-      "opinion": "Risco baixo, fácil de medir com `rtk gain`.",
-      "status": "accepted",
-      "decision": "Você prefere testar o caveman primeiro.",
-      "lesson": {
-        "why": "Saída de testes, git e build chega ao modelo inteira: centenas de linhas de \"passou\" para achar a única que falhou.",
-        "impact": "Na média deste projeto, a saída de comandos é 38% dos tokens de entrada de uma sessão.",
-        "better": "O rtk filtra a saída antes de chegar ao modelo: só falhas, resumo e o que mudou.",
-        "principle": "O agente deve ler o resultado do comando, não o comando inteiro.",
-        "tradeoff": "Uma camada a mais entre o agente e o terminal; quando você precisar da saída crua, use `rtk proxy`.",
-        "learnMore": "https://github.com/rtk-ai/rtk"
+      "id": "U1-202",
+      "harness": "u1",
+      "round": 2,
+      "severity": "medium",
+      "class": "reversible",
+      "title": "Checklist de release carregado em toda sessão",
+      "finding": "O CLAUDE.md traz um checklist de release que você usa uma vez por mês.",
+      "evidence": "8 linhas, cerca de 130 tokens em cada uma das 412 sessões",
+      "proposal": "Mover o checklist para um arquivo próprio e deixar uma linha que diz quando ler.",
+      "opinion": "Mudança sem risco: nada se perde, só deixa de ser carregado à toa.",
+      "decision": "Aprovado no painel.",
+      "updatedAt": "2026-11-20T14:55:00Z",
+      "saves": {
+        "tokens": 53000,
+        "basis": "measured",
+        "how": "130 tokens vezes 412 sessões"
       },
-      "changes": []
-    },
-    {
-      "id": "U5",
-      "scope": "user",
-      "round": 6,
-      "severity": "high",
-      "class": "reversible",
-      "origin": "plugin",
-      "file": "~/.claude/plugins/cache/acme-tools/skills/ship-it/SKILL.md",
-      "title": "Skill de plugin manda pular os testes",
-      "finding": "A skill ship-it, que vem do plugin acme-tools, diz para fazer push sem rodar os testes quando a mudança \"parece pequena\".",
-      "proposal": "Desativar a skill ship-it no plugin e manter o resto do plugin.",
-      "opinion": "Vem de terceiros e uma atualização do plugin sobrescreve qualquer edição; desativar é o caminho.",
-      "status": "open"
-    },
-    {
-      "id": "U6",
-      "scope": "user",
-      "round": 6,
-      "severity": "high",
-      "class": "reversible",
-      "origin": "plugin",
-      "file": "~/.claude/plugins/cache/acme-tools/skills/ship-it/SKILL.md",
-      "title": "Skill de plugin faz commit sem pedir",
-      "finding": "A mesma skill manda fazer commit ao final de cada tarefa, o que contradiz a regra do seu CLAUDE.md.",
-      "proposal": "Resolvido junto com o U5: desativar a skill ship-it.",
-      "opinion": "Mesmo arquivo e mesma decisão que o U5; por isso os dois juntos descontam no máximo 10 pontos.",
-      "status": "open"
-    },
-    {
-      "id": "P1",
-      "scope": "project",
-      "round": 4,
-      "severity": "high",
-      "class": "gate",
-      "title": "Migrations editadas depois de aplicadas",
-      "finding": "Três sessões editaram uma migration que já estava na main.",
-      "evidence": "transcript-signals: 3 sessões; commits a1b2c3d, d4e5f6a",
-      "proposal": "Checagem de pre-commit que recusa mudanças em migrations presentes na origin/main.",
-      "opinion": "Barato e no alvo exato.",
-      "status": "open",
       "lesson": {
-        "why": "Uma migration aplicada já mudou o banco de produção. Editar o arquivo depois não muda o banco: só faz o repositório mentir sobre o que está lá.",
-        "impact": "Três sessões fizeram isso neste projeto (commits a1b2c3d e d4e5f6a). Cada uma custou uma investigação para descobrir por que o banco não batia com o código.",
-        "better": "Um pre-commit recusa qualquer alteração em migration que já existe na origin/main e diz para criar uma migration nova.",
-        "principle": "O que já foi aplicado é histórico: corrige-se com uma mudança nova, nunca editando a antiga.",
-        "tradeoff": "Corrigir um erro de digitação numa migration ainda não aplicada em produção exige `--no-verify`. É raro e fica visível."
+        "why": "Tudo que está no CLAUDE.md entra no contexto de toda sessão, mesmo quando a tarefa não tem relação.",
+        "impact": "O checklist ocupa contexto em 412 sessões e foi útil em 2.",
+        "better": "O arquivo principal diz que o checklist existe e onde está. O agente lê quando a tarefa é publicar uma versão.",
+        "principle": "No arquivo sempre carregado fica o que vale para toda tarefa; o resto fica a uma linha de distância.",
+        "tradeoff": "Se a linha de referência for vaga, o agente pode não abrir o arquivo quando precisa."
       },
       "changes": [
         {
-          "path": "./.githooks/pre-commit",
-          "lang": "shell",
-          "note": "arquivo novo; ativado com git config core.hooksPath .githooks",
+          "file": "fu1-1",
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
+          "before": "## Checklist de release\n\n1. Atualize o CHANGELOG com as mudanças da versão.\n2. Rode `npm version` com o tipo certo de incremento.\n3. Gere as notas da versão a partir dos commits.\n4. Publique o pacote e confira a página do registro.\n5. Avise o time no canal de releases.\n\n",
+          "after": "",
+          "why": "O checklist sai do arquivo que entra em toda sessão."
+        },
+        {
+          "file": "fu1-1",
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
           "before": "",
-          "after": "#!/bin/sh\n# Applied migrations are history: fix them with a new migration.\nchanged=$(git diff --cached --name-only --diff-filter=M -- supabase/migrations/)\nfor f in $changed; do\n  if git cat-file -e \"origin/main:$f\" 2>/dev/null; then\n    echo \"Migration already on main: $f. Create a new migration instead.\" >&2\n    exit 1\n  fi\ndone"
+          "insertAfter": "- Use `rg` no lugar de `grep`.",
+          "after": "- Para publicar uma versão, leia `~/.claude/docs/release.md` antes de começar.\n",
+          "why": "Uma linha diz quando o checklist importa e onde ele está."
+        },
+        {
+          "path": "~/.claude/docs/release.md",
+          "lang": "markdown",
+          "before": "",
+          "after": "## Checklist de release\n\n1. Atualize o CHANGELOG com as mudanças da versão.\n2. Rode `npm version` com o tipo certo de incremento.\n3. Gere as notas da versão a partir dos commits.\n4. Publique o pacote e confira a página do registro.\n5. Avise o time no canal de releases.\n",
+          "why": "O mesmo checklist, agora num arquivo lido só quando a tarefa é uma release."
         }
-      ]
+      ],
+      "status": "approved"
     },
     {
-      "id": "P2",
-      "scope": "project",
+      "id": "U1-203",
+      "harness": "u1",
+      "round": 2,
+      "severity": "low",
+      "class": "additive",
+      "title": "Regra de commit sem o motivo",
+      "finding": "A regra dizia para não fazer commit sem pedido, mas não dizia por quê.",
+      "proposal": "Acrescentar o motivo na mesma linha.",
+      "opinion": "Pequeno e útil: com o motivo, o agente sabe quando a regra se aplica.",
+      "decision": "Aprovado.",
+      "verified": "Arquivo relido depois da edição: a linha nova está lá e o resto não mudou.",
+      "notVerified": "A conta 2 enxerga a mudança pelo link, mas não foi aberta uma sessão nela para conferir.",
+      "backup": "backups/20261120-1430/",
+      "updatedAt": "2026-11-20T14:31:00Z",
+      "lesson": {
+        "why": "Uma regra sem motivo é seguida ao pé da letra ou ignorada quando parece não caber. O agente não consegue pesar o que não conhece.",
+        "impact": "Em 4 sessões o agente perguntou se podia fazer commit de um arquivo gerado, sem saber o que a regra protegia.",
+        "better": "Com o motivo, o agente decide sozinho os casos óbvios e pergunta nos que importam.",
+        "principle": "Toda regra carrega o porquê na mesma linha.",
+        "tradeoff": "A linha fica um pouco mais longa."
+      },
+      "changes": [
+        {
+          "file": "fu1-1",
+          "path": "~/.claude/CLAUDE.md",
+          "lang": "markdown",
+          "applied": true,
+          "before": "- Nunca faça commit sem eu pedir.",
+          "after": "- Nunca faça commit sem eu pedir: um commit fora de hora mistura o trabalho de duas tarefas.",
+          "why": "O motivo entra na própria regra."
+        }
+      ],
+      "status": "fixed"
+    },
+    {
+      "id": "U1-601",
+      "harness": "u1",
+      "round": 6,
+      "severity": "medium",
+      "class": "delete",
+      "file": "~/.claude/skills/revisao-pr/SKILL.md",
+      "title": "Skill de revisão de PR nunca invocada",
+      "finding": "A skill `revisao-pr` não foi invocada nenhuma vez em 30 dias.",
+      "evidence": "0 invocações em 412 sessões; descrição de 82 caracteres carregada em todas",
+      "proposal": "Aposentar a skill, ou reescrever a descrição para ela ser encontrada.",
+      "opinion": "Antes de apagar, vale saber se você revisa PR pelo agente. Se sim, o problema é a descrição.",
+      "decision": "Você quer pensar: a skill foi escrita para um projeto que volta em dezembro.",
+      "lesson": {
+        "why": "A descrição de cada skill entra em toda sessão para o agente decidir quando usar. Uma skill que nunca é escolhida só ocupa esse espaço.",
+        "impact": "Pouco por sessão, mas é um sinal: ou a skill não serve mais, ou a descrição não casa com o jeito que você pede.",
+        "better": "Sobra uma lista de skills que o agente de fato usa, e cada descrição diz quando ela se aplica.",
+        "principle": "Uma skill se justifica pelo uso, não por existir.",
+        "tradeoff": "Apagar é definitivo; o backup guarda a pasta."
+      },
+      "status": "deferred"
+    },
+    {
+      "id": "U1-701",
+      "harness": "u1",
+      "round": 7,
+      "severity": "medium",
+      "class": "install",
+      "title": "Comando `pnpm` chamado sem estar instalado",
+      "finding": "O agente tentou `pnpm run` 18 vezes e o comando não existe nesta máquina.",
+      "evidence": "18 episódios em 11 sessões",
+      "proposal": "Instalar o pnpm, ou dizer nas instruções que os projetos usam npm.",
+      "opinion": "O mais barato é uma linha nas instruções.",
+      "decision": "Recusado: você prefere corrigir isso no projeto que ainda cita pnpm.",
+      "updatedAt": "2026-11-20T14:20:00Z",
+      "status": "declined"
+    },
+    {
+      "id": "U1-702",
+      "harness": "u1",
+      "round": 7,
+      "severity": "high",
+      "class": "external",
+      "title": "Servidor MCP do GitHub no nível do usuário",
+      "finding": "O servidor MCP do GitHub está configurado para a conta inteira e carrega a lista de ferramentas em toda sessão.",
+      "evidence": "0 chamadas em 30 dias; o CLI `gh` está instalado e logado",
+      "proposal": "Remover o servidor do nível do usuário. O CLI `gh` cobre o mesmo uso sem custo até ser chamado.",
+      "opinion": "Remova: você já usa o `gh` e o servidor não foi chamado nenhuma vez.",
+      "saves": {
+        "tokens": 3200000,
+        "basis": "estimated",
+        "how": "cerca de 7.800 tokens da lista de ferramentas vezes 412 sessões"
+      },
+      "lesson": {
+        "why": "Um servidor MCP (um programa que dá ferramentas ao agente) entrega a descrição de todas as ferramentas no início de cada sessão, usadas ou não.",
+        "impact": "Estimativa de 7.800 tokens por sessão, em 412 sessões, sem nenhuma chamada no período.",
+        "better": "O agente chama `gh` quando precisa do GitHub. Nada é carregado antes disso.",
+        "principle": "Prefira o CLI oficial ao servidor MCP; deixe no nível do usuário só o que quase toda conversa usa.",
+        "tradeoff": "Se alguma automação sua depende do servidor, ela para. Nenhuma foi encontrada."
+      },
+      "status": "open"
+    },
+    {
+      "id": "U1-802",
+      "harness": "u1",
+      "round": 8,
+      "severity": "medium",
+      "class": "external",
+      "origin": "plugin",
+      "file": "~/.claude/plugins/cache/exemplo-tools/hooks/hooks.json",
+      "title": "Plugin roda um pacote sem versão fixa",
+      "finding": "Um hook do plugin `exemplo-tools` roda um pacote npm na versão mais recente a cada sessão.",
+      "evidence": "hooks.json do plugin, evento SessionStart",
+      "proposal": "Fixar a versão do plugin no marketplace.",
+      "opinion": "Vale tentar de novo quando o marketplace publicar uma versão marcada.",
+      "decision": "Aprovado.",
+      "notVerified": "A versão fixada não instalou: o marketplace não tem a tag pedida. O plugin voltou ao estado anterior.",
+      "updatedAt": "2026-11-20T15:02:00Z",
+      "status": "failed"
+    },
+    {
+      "id": "U2-801",
+      "harness": "u2",
+      "round": 8,
+      "severity": "medium",
+      "class": "sync",
+      "title": "A conta 2 não enxerga os agentes da principal",
+      "finding": "A pasta `agents/` existe na conta principal e falta na conta 2.",
+      "evidence": "comparação das duas pastas de configuração",
+      "proposal": "Criar o link de `agents/` para a conta principal, como já é feito com as skills.",
+      "opinion": "Vale: hoje o mesmo pedido dá resultado diferente conforme a conta em que a sessão abriu.",
+      "lesson": {
+        "why": "Cada conta tem a sua pasta de configuração. O que não é link para a principal precisa ser copiado à mão, e a cópia envelhece.",
+        "impact": "Um subagente criado na conta 1 não existe na conta 2, e o agente improvisa sem ele.",
+        "better": "As duas contas leem a mesma pasta. Uma edição vale para as duas.",
+        "principle": "Uma fonte da verdade por elemento do harness; o resto é link.",
+        "tradeoff": "Um agente que você queira só numa conta passa a precisar de uma exceção declarada."
+      },
+      "status": "open"
+    },
+    {
+      "id": "U3-201",
+      "harness": "u3",
+      "round": 2,
+      "severity": "low",
+      "class": "additive",
+      "title": "O Codex não recebeu a regra de commit",
+      "finding": "O AGENTS.md do Codex foi gerado antes de a regra de commit ganhar o motivo.",
+      "proposal": "Acrescentar a regra, já em inglês, no fim do arquivo.",
+      "opinion": "Simples e coerente com a conta principal.",
+      "lesson": {
+        "why": "O Codex não lê o CLAUDE.md: ele recebe uma cópia gerada. Regra que muda na principal precisa chegar à cópia.",
+        "impact": "No Codex o agente faz commit sem pedir, e no Claude Code não.",
+        "better": "As duas ferramentas seguem a mesma regra.",
+        "principle": "Regra que vale para você vale em todo agente que você usa.",
+        "tradeoff": "Nenhum além de manter a cópia em dia, que a verificação de sincronia faz."
+      },
+      "changes": [
+        {
+          "file": "fu3-1",
+          "path": "~/.codex/AGENTS.md",
+          "lang": "markdown",
+          "before": "",
+          "after": "- Never commit unless asked: a stray commit mixes the work of two tasks.\n",
+          "why": "A regra entra no fim do arquivo, com o motivo."
+        }
+      ],
+      "status": "open"
+    },
+    {
+      "id": "LOJA-101",
+      "harness": "loja-web",
+      "round": 1,
+      "severity": "critical",
+      "class": "permission",
+      "title": "O projeto libera `rm -rf` sem perguntar",
+      "finding": "A lista de allow do projeto deixa o agente rodar `rm -rf` com qualquer argumento, sem pedir confirmação.",
+      "evidence": "./.claude/settings.json, permissions.allow[2]",
+      "proposal": "Tirar a regra. O agente volta a perguntar antes de apagar.",
+      "opinion": "Tire. Uma pergunta a mais custa segundos; um `rm -rf` errado custa o dia.",
+      "lesson": {
+        "why": "Uma regra de allow (o que o agente roda sem perguntar) com curinga no fim vale para qualquer caminho, inclusive fora da pasta que você tinha em mente.",
+        "impact": "Um caminho montado errado apaga trabalho sem commit. O git só devolve o que já estava versionado.",
+        "better": "O agente continua podendo apagar, mas mostra o comando e espera o seu sim.",
+        "principle": "Libere sem pergunta só o que você desfaz com um comando.",
+        "tradeoff": "Mais uma confirmação nas tarefas de limpeza."
+      },
+      "changes": [
+        {
+          "file": "floja-3",
+          "path": "./.claude/settings.json",
+          "lang": "json",
+          "before": "      \"Bash(npm run lint)\",\n      \"Bash(rm -rf *)\"",
+          "after": "      \"Bash(npm run lint)\"",
+          "why": "A regra sai e a linha anterior perde a vírgula, para o JSON continuar válido."
+        }
+      ],
+      "status": "open"
+    },
+    {
+      "id": "LOJA-103",
+      "harness": "loja-web",
+      "round": 1,
+      "severity": "medium",
+      "class": "permission",
+      "origin": "example",
+      "file": "./examples/settings.exemplo.json",
+      "title": "O exemplo de configuração sugere liberar tudo",
+      "finding": "O arquivo de exemplo traz `Bash(*)` na lista de allow.",
+      "proposal": "Trocar o exemplo por uma lista curta de comandos do projeto.",
+      "opinion": "Não roda em sessão nenhuma, por isso pesa pouco na nota. Mas é o que um colega novo vai copiar.",
+      "status": "open"
+    },
+    {
+      "id": "LOJA-104",
+      "harness": "loja-web",
+      "round": 1,
+      "severity": "low",
+      "class": "permission",
+      "origin": "project-optional",
+      "file": "./.claude/settings.local.example.json",
+      "title": "O perfil local opcional libera o deploy",
+      "finding": "O perfil local de exemplo libera `npm run deploy` sem confirmação.",
+      "proposal": "Trocar por uma regra de ask.",
+      "opinion": "Só vale para quem copia o perfil.",
+      "decision": "Recusado: só você usa esse perfil, e de propósito.",
+      "status": "declined"
+    },
+    {
+      "id": "LOJA-201",
+      "harness": "loja-web",
+      "round": 2,
+      "severity": "medium",
+      "class": "translate-agent",
+      "group": "G-1",
+      "title": "AGENTS.md do projeto em português",
+      "finding": "As instruções do projeto para agentes estão em português.",
+      "evidence": "5 linhas, carregadas em 187 sessões",
+      "proposal": "Traduzir o arquivo para inglês.",
+      "opinion": "Vale junto com os outros arquivos de agente.",
+      "saves": {
+        "tokens": 240000,
+        "basis": "estimated",
+        "how": "cerca de 1.300 tokens a menos por sessão em instruções e releituras, vezes 187 sessões"
+      },
+      "lesson": {
+        "why": "O mesmo texto em português ocupa mais tokens, e o agente cruza estas regras com código e documentação em inglês.",
+        "impact": "Um pouco de contexto a mais em cada uma das 187 sessões do projeto.",
+        "better": "O arquivo fica menor e usa as palavras do código.",
+        "principle": "Arquivo que só o agente lê fica em inglês; o que você lê fica no seu idioma.",
+        "tradeoff": "Quem mantém o arquivo passa a escrever em inglês."
+      },
+      "changes": [
+        {
+          "file": "floja-2",
+          "path": "./AGENTS.md",
+          "lang": "markdown",
+          "before": "# Instruções para agentes\n\n- Rode os testes antes de dizer que terminou.\n- Não mexa na pasta `legacy/` sem pedir.\n- Mensagens de commit em inglês, no imperativo.\n",
+          "after": "# Agent instructions\n\n- Run the tests before saying the work is done.\n- Do not touch the `legacy/` folder without asking.\n- Commit messages in English, imperative mood.\n",
+          "why": "O arquivo inteiro, traduzido regra por regra."
+        }
+      ],
+      "status": "open"
+    },
+    {
+      "id": "LOJA-202",
+      "harness": "loja-web",
+      "round": 2,
+      "severity": "high",
+      "class": "reversible",
+      "title": "Documento de arquitetura importado em toda sessão",
+      "finding": "O CLAUDE.md importa `docs/arquitetura.md` inteiro, e ele entra no contexto de toda sessão do projeto.",
+      "evidence": "cerca de 9.200 tokens em cada uma das 187 sessões",
+      "proposal": "Trocar o import por uma linha que diz quando ler o documento.",
+      "opinion": "É a mudança que mais devolve contexto neste projeto.",
+      "saves": {
+        "tokens": 1720000,
+        "basis": "measured",
+        "how": "9.200 tokens vezes 187 sessões"
+      },
+      "lesson": {
+        "why": "Uma linha com `@arquivo` copia o arquivo inteiro para dentro das instruções. Não é um link: é o texto todo, toda vez.",
+        "impact": "9.200 tokens antes de você digitar, em 187 sessões. A maioria delas não mexeu em pedidos nem em pagamento.",
+        "better": "O agente sabe que o documento existe e quando ele importa, e abre só nessas tarefas.",
+        "principle": "Importe o que toda tarefa precisa; aponte para o resto.",
+        "tradeoff": "Numa tarefa de arquitetura o agente gasta uma leitura a mais."
+      },
+      "changes": [
+        {
+          "file": "floja-1",
+          "path": "./CLAUDE.md",
+          "lang": "markdown",
+          "before": "@docs/arquitetura.md",
+          "after": "Leia `docs/arquitetura.md` antes de mexer em pedidos ou em pagamento.",
+          "why": "O import vira uma instrução: o documento continua a um passo, mas não entra em toda sessão."
+        }
+      ],
+      "status": "open"
+    },
+    {
+      "id": "LOJA-301",
+      "harness": "loja-web",
       "round": 3,
       "severity": "medium",
       "class": "reversible",
-      "title": "Doc de setup desatualizado",
-      "finding": "docs/setup.md cita dois scripts que foram removidos.",
-      "proposal": "Corrigir só os dois comandos.",
-      "opinion": "O agente segue esse doc ao pé da letra.",
-      "status": "fixed",
-      "verified": "Os dois comandos rodam.",
-      "backup": "backups/2026-11-19T14-40-00Z/",
+      "title": "O guia de setup cita um comando que não existe",
+      "finding": "O passo 2 manda rodar `npm run seed`, que foi renomeado.",
+      "evidence": "package.json tem `db:seed`; 6 episódios de comando inexistente em 30 dias",
+      "proposal": "Corrigir o comando no guia.",
+      "opinion": "Correção de uma linha que evita um erro repetido.",
       "lesson": {
-        "why": "O agente segue o docs/setup.md ao pé da letra. Dois scripts citados lá foram removidos, então ele tenta rodar, falha, e improvisa.",
-        "impact": "Cada sessão nova que monta o ambiente perde de 3 a 5 tentativas antes de achar o comando certo.",
-        "better": "Os dois comandos apontam para os scripts que existem hoje. Nenhuma outra linha do doc mudou.",
-        "principle": "Doc que o agente segue é código: quando o comando muda, o doc muda no mesmo commit.",
+        "why": "O agente confia no que a documentação diz. Um comando errado vira uma tentativa, um erro e uma busca pelo comando certo.",
+        "impact": "6 vezes em 30 dias o agente rodou `npm run seed`, falhou e foi procurar no package.json.",
+        "better": "O comando do guia roda de primeira.",
+        "principle": "Documentação que o agente lê precisa rodar: confira os comandos quando o package.json mudar.",
         "tradeoff": "Nenhum."
       },
       "changes": [
         {
+          "file": "floja-6",
           "path": "./docs/setup.md",
           "lang": "markdown",
-          "note": "só as duas linhas que falhavam",
-          "applied": true,
-          "before": "## Rodar localmente\n\n1. `npm install`\n2. `npm run db:seed-dev`\n3. `npm run dev:all`\n4. Abra http://localhost:3000",
-          "after": "## Rodar localmente\n\n1. `npm install`\n2. `npm run db:seed`\n3. `npm run dev`\n4. Abra http://localhost:3000"
+          "before": "2. `npm run seed` para criar os dados de exemplo.",
+          "after": "2. `npm run db:seed` para criar os dados de exemplo.",
+          "why": "O nome do script como está no package.json."
         }
-      ]
+      ],
+      "status": "open"
     },
     {
-      "id": "P3",
-      "scope": "project",
-      "round": 6,
+      "id": "LOJA-302",
+      "harness": "loja-web",
+      "round": 3,
+      "severity": "low",
+      "class": "translate-human",
+      "file": "./README.md",
+      "title": "README para clientes escrito em inglês",
+      "finding": "O README é o que o cliente lê na entrega, e o cliente lê em português.",
+      "proposal": "Traduzir o README para português. O rascunho precisa da sua revisão antes de valer.",
+      "opinion": "A escolha é sua: tradução para gente não se aplica sozinha.",
+      "status": "open"
+    },
+    {
+      "id": "LOJA-401",
+      "harness": "loja-web",
+      "round": 4,
       "severity": "high",
-      "class": "reversible",
-      "title": "Hook de atualização do grafo falha em silêncio",
-      "finding": "O hook de post-commit chama um caminho que não existe mais; o grafo tem 12 dias.",
-      "proposal": "Apontar o hook para o binário instalado e rodar em segundo plano.",
-      "opinion": "Desatualizado, o grafo engana mais do que ajuda.",
-      "status": "in-progress",
+      "class": "gate",
+      "title": "O pre-commit nunca bloqueia",
+      "finding": "O hook de pre-commit roda o lint e ignora o resultado.",
+      "evidence": "./.githooks/pre-commit, linha 3; 14 commits com erro de lint chegaram à main em 30 dias",
+      "proposal": "Tirar o `|| true` do hook e rodar o lint também no CI.",
+      "opinion": "O gate existe e não funciona, que é pior do que não existir: todo mundo acha que está coberto.",
       "lesson": {
-        "why": "O hook que atualiza o grafo depois de cada commit chama um caminho antigo do graphify. Ele falha em silêncio, e o grafo parou no dia em que o caminho mudou.",
-        "impact": "O grafo está 12 dias atrás da main. O agente consulta o grafo para entender a arquitetura e recebe uma foto velha.",
-        "better": "O hook chama o binário instalado e roda em segundo plano, sem segurar o commit. Se falhar, escreve num log que a próxima revisão lê.",
-        "principle": "Automação que falha em silêncio é pior que nenhuma: você confia em algo que parou.",
-        "tradeoff": "Em segundo plano, o grafo fica pronto alguns segundos depois do commit, não no mesmo instante.",
-        "learnMore": "https://github.com/Graphify-Labs/graphify"
+        "why": "Um hook do git só impede o commit quando termina com erro. O `|| true` transforma qualquer erro em sucesso.",
+        "impact": "14 commits com erro de lint na main em 30 dias, cada um corrigido depois numa sessão própria.",
+        "better": "O commit com erro de lint não acontece, e o CI repete a checagem para quem não tem o hook instalado.",
+        "principle": "Um gate vale pelo que ele bloqueia: teste com um erro de propósito.",
+        "tradeoff": "Um commit rápido com lint quebrado passa a exigir a correção, ou um `--no-verify` consciente."
       },
       "changes": [
         {
-          "path": "./.git/hooks/post-commit",
+          "file": "floja-4",
+          "path": "./.githooks/pre-commit",
           "lang": "shell",
-          "note": "caminho corrigido, execução em segundo plano e log de falha",
-          "before": "#!/bin/sh\n/home/dev/.local/bin/graphify-old update .",
-          "after": "#!/bin/sh\n# Refresh the knowledge graph without blocking the commit.\n(graphify update . >/dev/null 2>>.novarc-powers/novarc-harness-doctor/logs/graphify.log &)"
+          "before": "npx lint-staged || true",
+          "after": "npx lint-staged",
+          "why": "Sem o `|| true`, um erro de lint volta a impedir o commit."
+        },
+        {
+          "file": "floja-5",
+          "path": "./.github/workflows/ci.yml",
+          "lang": "yaml",
+          "before": "",
+          "insertAfter": "      - run: npm ci",
+          "after": "      - run: npm run lint\n",
+          "why": "O CI roda o lint antes dos testes, para quem não tem o hook local."
         }
-      ]
+      ],
+      "status": "open"
     },
     {
-      "id": "P4",
-      "scope": "project",
-      "round": 2,
+      "id": "LOJA-502",
+      "harness": "loja-web",
+      "round": 5,
       "severity": "low",
       "class": "none",
-      "title": "AGENTS.md espelha o CLAUDE.md",
-      "finding": "Mesmo conteúdo, sem contradição.",
-      "proposal": "Nada.",
-      "opinion": "Está bom assim.",
-      "status": "ok"
+      "title": "Pasta de rascunhos fora do git",
+      "finding": "A pasta `rascunhos/` não é versionada.",
+      "proposal": "Nada a mudar.",
+      "opinion": "Não é parte do harness: o agente não lê essa pasta.",
+      "status": "not-applicable"
     },
     {
-      "id": "P5",
-      "scope": "project",
-      "round": 1,
-      "severity": "high",
-      "class": "permission",
-      "origin": "example",
-      "file": "./examples/claude-settings.example.json",
-      "title": "Exemplo de settings libera Bash(*)",
-      "finding": "O arquivo de exemplo que o README manda copiar libera qualquer comando de shell.",
-      "proposal": "Trocar Bash(*) pela lista curta de comandos que o projeto usa.",
-      "opinion": "Nenhuma sessão carrega o exemplo, mas quem copiar herda a permissão inteira.",
+      "id": "API-201",
+      "harness": "api-pedidos",
+      "round": 2,
+      "severity": "medium",
+      "class": "translate-agent",
+      "group": "G-1",
+      "title": "AGENTS.md do projeto em português",
+      "finding": "As instruções do projeto para agentes estão em português.",
+      "evidence": "4 linhas, carregadas em 96 sessões",
+      "proposal": "Traduzir o arquivo para inglês.",
+      "opinion": "Vale junto com os outros arquivos de agente.",
+      "saves": {
+        "tokens": 96000,
+        "basis": "estimated",
+        "how": "cerca de 1.000 tokens a menos por sessão em instruções e releituras, vezes 96 sessões"
+      },
+      "lesson": {
+        "why": "O mesmo texto em português ocupa mais tokens, e o agente cruza estas regras com um contrato de API escrito em inglês.",
+        "impact": "Um pouco de contexto a mais em cada uma das 96 sessões do projeto.",
+        "better": "O arquivo fica menor e usa as palavras do contrato.",
+        "principle": "Arquivo que só o agente lê fica em inglês; o que você lê fica no seu idioma.",
+        "tradeoff": "Quem mantém o arquivo passa a escrever em inglês."
+      },
+      "changes": [
+        {
+          "file": "fapi-1",
+          "path": "./AGENTS.md",
+          "lang": "markdown",
+          "before": "# Instruções para agentes\n\n- A API segue o contrato em `openapi.yaml`: mude o contrato antes do código.\n- Toda rota nova precisa de teste de integração.\n",
+          "after": "# Agent instructions\n\n- The API follows the contract in `openapi.yaml`: change the contract before the code.\n- Every new route needs an integration test.\n",
+          "why": "O arquivo inteiro, traduzido regra por regra."
+        }
+      ],
       "status": "open"
     }
   ],
-  "leads": [
+  "groups": [
     {
-      "title": "Um ajuste para limitar as definições de ferramentas MCP por sessão",
-      "source": "Visto numa entrada de changelog; ainda não está na documentação."
+      "id": "G-1",
+      "title": "Arquivos de agente em português",
+      "round": 2,
+      "summary": "O CLAUDE.md da conta e os AGENTS.md de dois projetos estão em português. Só o agente lê esses arquivos: em inglês eles custam menos em toda sessão e casam melhor com skills e código.",
+      "items": [
+        "U1-201",
+        "LOJA-201",
+        "API-201"
+      ]
     }
   ],
   "defenses": [
     {
-      "scope": "user",
-      "title": "Hook PreToolUse bloqueia force-push",
-      "detail": "~/.claude/scripts/block-force-push.mjs recusa --force e -f em qualquer posição de um git push; testado num repo de teste nesta execução."
+      "harness": "u1",
+      "title": "Leitura do .env bloqueada",
+      "detail": "A regra de deny foi testada nesta revisão e recusa a leitura."
     },
     {
-      "scope": "project",
-      "title": "Pre-commit lint-staged",
-      "detail": "Bloqueia o commit quando o lint falha; rodou em menos de 2 s nos últimos commits."
+      "harness": "loja-web",
+      "title": "CI bloqueia merge com teste falhando",
+      "detail": "Conferido no histórico: 3 pull requests barrados no período."
+    },
+    {
+      "harness": "api-pedidos",
+      "title": "CI bloqueia merge com teste falhando"
+    }
+  ],
+  "leads": [
+    {
+      "title": "Uma versão nova do Claude Code pode ter mudado o nome de um evento de hook",
+      "source": "https://code.claude.com/docs/en/hooks",
+      "note": "Não foi possível confirmar nesta revisão."
+    },
+    {
+      "harness": "loja-web",
+      "title": "O projeto pode se beneficiar de um grafo de conhecimento",
+      "source": "padrão de exploração medido: 63 episódios antes da primeira edição",
+      "note": "Só vale depois de resolver o import do documento de arquitetura."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "c0ffee00-0000-4000-8000-000000000001",
+      "at": "2026-11-20T14:20:00Z",
+      "runId": "20261120-k3x9",
+      "target": "U1-701",
+      "action": "decline",
+      "note": "Vou corrigir no projeto que ainda cita pnpm.",
+      "via": "chat"
+    },
+    {
+      "id": "c0ffee00-0000-4000-8000-000000000002",
+      "at": "2026-11-20T14:55:00Z",
+      "runId": "20261120-k3x9",
+      "target": "U1-202",
+      "action": "approve",
+      "via": "board"
     }
   ],
   "log": [
     {
-      "at": "2026-11-19T14:05:00Z",
-      "text": "Descoberta feita: 2 pastas de configuração, 1 projeto, 41 docs."
+      "at": "2026-11-20T13:42:00Z",
+      "text": "Descoberta concluída: 3 contas e 2 projetos, 17 arquivos no retrato."
     },
     {
-      "at": "2026-11-19T14:20:00Z",
-      "itemId": "U1",
-      "text": "Corrigido e verificado num repo de teste. Segunda conta não checada."
+      "at": "2026-11-20T14:20:00Z",
+      "harness": "u1",
+      "item": "U1-701",
+      "text": "Recusado no chat: o pnpm será tratado no projeto que ainda o cita."
     },
     {
-      "at": "2026-11-19T14:40:00Z",
-      "itemId": "P2",
-      "text": "Dois comandos corrigidos; os dois rodam."
+      "at": "2026-11-20T14:31:00Z",
+      "harness": "u1",
+      "item": "U1-203",
+      "text": "Motivo acrescentado à regra de commit. Arquivo relido: só a linha esperada mudou."
+    },
+    {
+      "at": "2026-11-20T14:40:00Z",
+      "harness": "u1",
+      "item": "U1-102",
+      "text": "Aplicação iniciada: backup feito com o token mascarado."
+    },
+    {
+      "at": "2026-11-20T15:02:00Z",
+      "harness": "u1",
+      "item": "U1-802",
+      "text": "Fixar a versão do plugin falhou: o marketplace não tem a tag. Estado anterior restaurado."
     }
   ]
 }

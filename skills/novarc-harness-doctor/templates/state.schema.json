@@ -1,54 +1,152 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "novarc-harness-doctor/state.schema.json",
-  "title": "novarc-harness-doctor state",
-  "description": "Single source of truth for one harness review. The board is rendered from it; scores are computed by render-board.mjs and must never be written by hand.",
+  "title": "novarc-harness-doctor state (v2)",
+  "description": "Single source of truth for one review run over one or more harnesses. A harness is one user account's config (kind user) or one project repo (kind project). The board is rendered from this file. `scores` are computed by render-board.mjs and never written by hand. All collections are flat arrays keyed by `harness` so partial findings from several sessions merge without conflicts.",
   "type": "object",
-  "required": ["schemaVersion", "skillVersion", "mode", "scopes", "environment", "startedAt", "rounds", "layers", "inventory", "items", "log"],
+  "required": ["schemaVersion", "skillVersion", "mode", "run", "environment", "harnesses", "rounds", "files", "items", "log"],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "skillVersion": { "type": "string" },
-    "mode": { "enum": ["guided", "doctor"] },
     "language": { "enum": ["en", "pt"], "description": "Language of the board chrome; item texts are written by the agent in the user's language." },
-    "scopes": {
-      "type": "array",
-      "minItems": 1,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/scope" }
+    "mode": { "enum": ["guided", "doctor"] },
+    "run": {
+      "type": "object",
+      "required": ["id", "startedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,40}$" },
+        "title": { "type": "string", "description": "Short name shown as the board title, e.g. the user's first name or the project name. Never an e-mail." },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "lastRun": { "type": "string", "format": "date-time" },
+        "windowDays": { "type": "integer", "minimum": 1, "maximum": 365 }
+      }
     },
     "environment": {
       "type": "object",
       "required": ["agent", "os"],
       "additionalProperties": false,
       "properties": {
-        "agent": { "enum": ["claude-code", "codex", "traycer", "other"] },
+        "agent": { "enum": ["claude-code", "codex", "opencode", "cursor", "gemini", "other"] },
         "os": { "enum": ["windows", "macos", "linux"] },
-        "board": { "type": "string", "description": "Where the board is shown, e.g. 'traycer artifact', 'claude artifact', 'local file'." }
+        "channel": { "enum": ["artifact", "server", "file"], "description": "How decisions travel from the board back to the session. artifact: claude.ai Artifact database; server: local serve-board.mjs; file: opened from disk, decisions pasted in chat." }
       }
     },
-    "project": {
+    "accounts": {
       "type": "object",
+      "description": "Agent accounts found on this machine and how their user harnesses relate. One account can be the primary; the others are linked (same provider) or replicated (other providers) from it.",
+      "required": ["list"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "description": "Folder name only; never an absolute path in shared files." },
-        "isCode": { "type": "boolean" },
-        "defaultBranch": { "type": "string" },
-        "behindRemote": { "type": "integer", "minimum": 0 }
+        "primary": { "type": ["string", "null"], "description": "Account id the user chose as primary, or null while undecided." },
+        "syncInstalled": { "type": "boolean", "description": "true once the self-healing sync check is registered." },
+        "list": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "provider", "label", "path", "harness"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+              "provider": { "$ref": "#/$defs/provider" },
+              "label": { "type": "string", "description": "Human label, e.g. 'Claude Code · account 2'." },
+              "identity": { "type": ["string", "null"], "description": "Masked account identity (first 2 characters of the local part, then the domain). Never a full e-mail." },
+              "path": { "type": "string", "description": "Display path of the config dir, home as ~." },
+              "isDefault": { "type": "boolean", "description": "true for the provider's default config dir." },
+              "host": { "type": ["string", "null"], "description": "Host app that owns this config dir, when it is not the provider's default (e.g. a multi-account launcher)." },
+              "harness": { "type": "string", "description": "Id of this account's user harness in `harnesses`." },
+              "elements": { "type": "integer", "minimum": 0, "description": "How many harness elements exist in this config dir." },
+              "empty": { "type": "boolean" },
+              "suggested": { "enum": ["link", "replicate", "none"], "description": "What the account comparison suggests for this account once a primary is chosen." },
+              "suggestionText": { "type": "string", "description": "One line for the board, in the run language." },
+              "sync": {
+                "type": "object",
+                "required": ["mode", "status"],
+                "additionalProperties": false,
+                "properties": {
+                  "mode": { "enum": ["primary", "linked", "replicated", "independent"], "description": "linked: same provider, elements are links into the primary. replicated: other provider, the portable subset is generated from the primary. independent: not managed." },
+                  "status": { "enum": ["ok", "drift", "broken", "none"] },
+                  "detail": { "type": "string" },
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "state"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": { "type": "string", "description": "Harness element, e.g. 'CLAUDE.md', 'skills/', 'settings.json', 'mcp servers'." },
+                        "state": { "enum": ["linked", "generated", "copied", "divergent", "missing", "account-only", "not-portable"] },
+                        "note": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
-    "startedAt": { "type": "string", "format": "date-time" },
-    "lastRun": { "type": "string", "format": "date-time" },
-    "rounds": {
+    "harnesses": {
       "type": "array",
-      "description": "One entry per round and scope. Only status 'done' counts toward the score.",
+      "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["round", "scope", "status"],
+        "required": ["id", "kind", "name", "path"],
         "additionalProperties": false,
         "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "kind": { "enum": ["user", "project"] },
+          "name": { "type": "string", "description": "Tab label: project folder name, or the account label for a user harness." },
+          "path": { "type": "string", "description": "Display path: home as ~. Never an absolute personal path." },
+          "provider": { "$ref": "#/$defs/provider" },
+          "account": { "type": "string", "description": "Account id, for a user harness." },
+          "inherits": { "type": "string", "description": "Harness id this one takes its elements from (a linked secondary account). Its tab shows the inherited elements as such and lists only what differs." },
+          "project": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "isCode": { "type": "boolean" },
+              "defaultBranch": { "type": "string" },
+              "behindRemote": { "type": "integer", "minimum": 0 },
+              "worktrees": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "activity": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sessions": { "type": "integer", "minimum": 0 },
+              "lastActive": { "type": "string", "format": "date-time" }
+            }
+          },
+          "elements": { "$ref": "#/$defs/elements" },
+          "impact": { "$ref": "#/$defs/impact" },
+          "impactSkipped": {
+            "type": "object",
+            "description": "Why this harness has no impact measurement. shared-sessions: the account uses the same sessions folder as the harness named in `with`, where they are measured. no-transcript-reader: the skill cannot read this provider's sessions.",
+            "required": ["reason"],
+            "additionalProperties": false,
+            "properties": {
+              "reason": { "enum": ["shared-sessions", "no-transcript-reader"] },
+              "with": { "type": "string" }
+            }
+          },
+          "scores": { "$ref": "#/$defs/score" }
+        }
+      }
+    },
+    "rounds": {
+      "type": "array",
+      "description": "One entry per harness and round. Only status 'done' counts toward the score.",
+      "items": {
+        "type": "object",
+        "required": ["harness", "round", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "harness": { "type": "string" },
           "round": { "$ref": "#/$defs/round" },
-          "scope": { "$ref": "#/$defs/scope" },
           "status": { "enum": ["pending", "done", "skipped", "not-applicable"] },
           "note": { "type": "string" }
         }
@@ -56,18 +154,45 @@
     },
     "layers": {
       "type": "array",
-      "description": "What enters a session, in load order. Drawn as the layers diagram.",
+      "description": "What enters a session, in load order, per harness.",
       "items": {
         "type": "object",
-        "required": ["scope", "name", "kind"],
+        "required": ["harness", "name", "kind"],
         "additionalProperties": false,
         "properties": {
-          "scope": { "$ref": "#/$defs/scope" },
+          "harness": { "type": "string" },
           "name": { "type": "string" },
           "kind": { "enum": ["instructions", "settings", "permissions", "hooks", "skills", "plugins", "mcp", "memory", "docs", "clis", "other"] },
-          "path": { "type": "string", "description": "Display path with the home dir shown as ~ and the project as ./" },
+          "file": { "type": "string", "description": "Id in `files`, when the layer is one file." },
+          "path": { "type": "string" },
           "tokens": { "type": "integer", "minimum": 0, "description": "Approximate tokens this layer adds to every session." },
+          "basis": { "enum": ["measured", "estimated"] },
           "note": { "type": "string" }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "Snapshot of the harness files the board's explorer shows. Written by snapshot-harness.mjs, never by hand: content is masked for secrets and capped. A change is drawn inside the file it touches by locating its `before` (pending) or `after` (applied) text in `content`.",
+      "items": {
+        "type": "object",
+        "required": ["id", "harness", "path", "category", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^f[0-9a-z-]{1,40}$" },
+          "harness": { "type": "string" },
+          "path": { "type": "string", "description": "Display path: ~ for home, ./ for the project root." },
+          "category": { "$ref": "#/$defs/fileCategory" },
+          "lang": { "enum": ["markdown", "json", "toml", "yaml", "shell", "powershell", "javascript", "python", "text"] },
+          "content": { "type": "string", "description": "File text with secrets masked. Empty when `omitted` is set." },
+          "omitted": { "enum": ["too-large", "binary", "budget", "unreadable", "linked", "not-included"], "description": "Why the content is not included. linked: this file is a link and its text lives in the file named by `linkTo`. not-included: left out of this rendering of the board." },
+          "truncated": { "type": "boolean" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "tokens": { "type": "integer", "minimum": 0, "description": "Approximate, characters / 4." },
+          "loaded": { "enum": ["always", "on-demand", "never"], "description": "always: enters every session. on-demand: read when the agent needs it. never: not read by the agent (a git hook, a CI workflow)." },
+          "linkTo": { "type": "string", "description": "Display path this file is a link to, when it is one." },
+          "role": { "type": "string", "description": "One line on what this file does in the harness, in the user's language. Written by the reviewing agent." },
+          "inheritedFrom": { "type": "string", "description": "Harness id that really owns this file, when it reaches this harness through a link." }
         }
       }
     },
@@ -76,18 +201,19 @@
       "description": "Everything found, including what is fine. Every entry carries an opinion.",
       "items": {
         "type": "object",
-        "required": ["id", "scope", "category", "name", "verdict", "opinion"],
+        "required": ["id", "harness", "category", "name", "verdict", "opinion"],
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string" },
-          "scope": { "$ref": "#/$defs/scope" },
+          "harness": { "type": "string" },
           "category": { "type": "string" },
           "name": { "type": "string" },
+          "file": { "type": "string", "description": "Id in `files`." },
           "path": { "type": "string" },
           "detail": { "type": "string" },
           "verdict": { "enum": ["fine", "attention", "problem"] },
           "opinion": { "type": "string" },
-          "itemId": { "type": "string", "description": "The item raised from this entry, if any." }
+          "item": { "type": "string", "description": "The item raised from this entry, if any." }
         }
       }
     },
@@ -95,54 +221,70 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "scope", "round", "severity", "class", "title", "finding", "proposal", "opinion", "status"],
+        "required": ["id", "harness", "round", "severity", "class", "title", "finding", "proposal", "opinion", "status"],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^[A-Z]{1,3}-?[0-9]{1,3}$" },
-          "scope": { "$ref": "#/$defs/scope" },
+          "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9]{0,5}-[0-9]{1,3}$", "description": "Harness prefix, dash, number: U-1, ACME-12." },
+          "harness": { "type": "string" },
           "round": { "$ref": "#/$defs/round" },
           "severity": { "enum": ["critical", "high", "medium", "low"] },
-          "class": { "enum": ["reversible", "additive", "translate-agent", "translate-human", "permission", "secret", "delete", "install", "gate", "external", "none"] },
+          "class": { "enum": ["reversible", "additive", "translate-agent", "translate-human", "permission", "secret", "delete", "install", "gate", "sync", "external", "none"] },
+          "origin": { "enum": ["active", "project-optional", "plugin", "example"], "description": "Where the finding lives; absent means active. See references/scoring.md." },
+          "file": { "type": "string", "description": "Display path of the file the finding is about, when it has no `changes`." },
+          "check": { "type": "string", "description": "Id of the harness-checks.mjs check this item was confirmed from, if any." },
+          "group": { "type": "string", "description": "Id in `groups`, when the same decision covers several harnesses." },
           "title": { "type": "string" },
           "finding": { "type": "string" },
           "evidence": { "type": "string", "description": "Counts, file:line, commit ids. Never secret values or transcript text." },
           "proposal": { "type": "string" },
           "opinion": { "type": "string" },
-          "status": { "enum": ["open", "queued", "in-progress", "fixed", "accepted", "failed", "ok", "wontfix-not-applicable"] },
-          "decision": { "type": "string" },
+          "status": { "$ref": "#/$defs/itemStatus" },
+          "decision": { "type": "string", "description": "What the user decided, in their words or a short paraphrase." },
+          "question": { "type": "string", "description": "A question the user asked about this item from the board, waiting for an answer in chat." },
           "verified": { "type": "string", "description": "What was checked after the change." },
           "notVerified": { "type": "string", "description": "What could not be checked." },
           "backup": { "type": "string" },
           "updatedAt": { "type": "string", "format": "date-time" },
-          "origin": { "enum": ["active", "project-optional", "plugin", "example"], "description": "Where the finding lives; weights its deduction (references/scoring.md). Absent means active. Never discounts a secret." },
-          "file": { "type": "string", "description": "Display path of the file the finding is about, when the item has no changes[]. Groups non-active items for the per-file cap." },
+          "saves": {
+            "type": "object",
+            "description": "What fixing this item is expected to save over the run window.",
+            "required": ["tokens", "basis"],
+            "additionalProperties": false,
+            "properties": {
+              "tokens": { "type": "integer", "minimum": 0 },
+              "basis": { "enum": ["measured", "estimated"] },
+              "how": { "type": "string", "description": "One line on where the number comes from." }
+            }
+          },
           "lesson": {
             "type": "object",
             "description": "The teaching part of the diagnosis, in the user's language. See references/teaching.md.",
             "required": ["why", "impact", "better"],
             "additionalProperties": false,
             "properties": {
-              "why": { "type": "string", "description": "Why the current state is a problem: the mechanism, in plain words." },
-              "impact": { "type": "string", "description": "What it costs the user in practice, ideally with a number from this harness." },
-              "better": { "type": "string", "description": "Why the proposed state is better: what changes in the agent's behaviour." },
-              "principle": { "type": "string", "description": "The general rule to carry to other harnesses, one sentence." },
-              "tradeoff": { "type": "string", "description": "What the change costs or risks, said honestly." },
-              "learnMore": { "type": "string", "description": "An official doc URL that backs the lesson." }
+              "why": { "type": "string" },
+              "impact": { "type": "string" },
+              "better": { "type": "string" },
+              "principle": { "type": "string" },
+              "tradeoff": { "type": "string" },
+              "learnMore": { "type": "string" }
             }
           },
           "changes": {
             "type": "array",
-            "description": "One entry per file the item changes: the before and after snippets the board shows as a diff. Filled before applying (the preview) and updated after applying with what was actually written.",
+            "description": "One entry per contiguous edit. The board draws it inside the file: removed text in red, added text in green, with `why` beside it.",
             "items": {
               "type": "object",
               "required": ["path", "before", "after"],
               "additionalProperties": false,
               "properties": {
-                "path": { "type": "string", "description": "Display path: home as ~, project as ./" },
-                "lang": { "enum": ["markdown", "json", "toml", "yaml", "shell", "text"] },
-                "before": { "type": "string", "description": "Relevant excerpt before the change; empty string for a new file. Secrets masked." },
-                "after": { "type": "string", "description": "The same excerpt after the change; empty string for a deletion. Secrets masked." },
-                "note": { "type": "string", "description": "One line on what to look at in this diff." },
+                "file": { "type": "string", "description": "Id in `files`. Omit for a file that does not exist yet." },
+                "path": { "type": "string", "description": "Display path, the same as the file's." },
+                "lang": { "enum": ["markdown", "json", "toml", "yaml", "shell", "powershell", "javascript", "python", "text"] },
+                "before": { "type": "string", "description": "Exact contiguous text as it is on disk (and in the file snapshot); empty string for a new file or a pure insertion. No elisions." },
+                "after": { "type": "string", "description": "Exact text that replaces it; empty string for a removal." },
+                "insertAfter": { "type": "string", "description": "For a pure insertion (`before` empty) into an existing file: the exact line after which `after` is inserted. Omit to append at the end." },
+                "why": { "type": "string", "description": "One or two sentences shown beside this edit: what this exact edit does and why, in the user's language." },
                 "applied": { "type": "boolean", "description": "true once this exact change is on disk and verified." }
               }
             }
@@ -150,42 +292,54 @@
         }
       }
     },
+    "groups": {
+      "type": "array",
+      "description": "The same finding in several harnesses, decided once. Approving a group approves its items; the user can exclude some.",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "round", "items"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^G-[0-9]{1,3}$" },
+          "title": { "type": "string" },
+          "round": { "$ref": "#/$defs/round" },
+          "summary": { "type": "string" },
+          "items": { "type": "array", "minItems": 2, "items": { "type": "string" } }
+        }
+      }
+    },
+    "defenses": {
+      "type": "array",
+      "description": "What already protects a harness, checked in this run. Listed on the board; never adds points.",
+      "items": {
+        "type": "object",
+        "required": ["harness", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "harness": { "type": "string" },
+          "title": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
     "leads": {
       "type": "array",
-      "description": "Unconfirmed leads: things worth checking that could not be confirmed from an official source in this run.",
       "items": {
         "type": "object",
         "required": ["title", "source"],
         "additionalProperties": false,
         "properties": {
+          "harness": { "type": "string" },
           "title": { "type": "string" },
           "source": { "type": "string" },
           "note": { "type": "string" }
         }
       }
     },
-    "defenses": {
+    "decisions": {
       "type": "array",
-      "description": "Recognized defenses checked in this run (a deny list, a blocking hook, a sandbox). Shown on the board; they never add points.",
-      "items": {
-        "type": "object",
-        "required": ["scope", "title"],
-        "additionalProperties": false,
-        "properties": {
-          "scope": { "$ref": "#/$defs/scope" },
-          "title": { "type": "string" },
-          "detail": { "type": "string", "description": "What it blocks and how it was checked." }
-        }
-      }
-    },
-    "scores": {
-      "type": "object",
-      "description": "Written by render-board.mjs only.",
-      "additionalProperties": false,
-      "properties": {
-        "user": { "$ref": "#/$defs/score" },
-        "project": { "$ref": "#/$defs/score" }
-      }
+      "description": "Decisions already taken into the state, newest last. Written by run.mjs from the board channel or from chat.",
+      "items": { "$ref": "#/$defs/decision" }
     },
     "log": {
       "type": "array",
@@ -195,26 +349,281 @@
         "additionalProperties": false,
         "properties": {
           "at": { "type": "string", "format": "date-time" },
-          "itemId": { "type": "string" },
+          "harness": { "type": "string" },
+          "item": { "type": "string" },
           "text": { "type": "string" }
         }
       }
     }
   },
   "$defs": {
-    "scope": { "enum": ["user", "project"] },
     "round": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "provider": { "enum": ["claude-code", "codex", "gemini", "opencode", "cursor", "copilot", "agents", "other"] },
+    "fileCategory": { "enum": ["instructions", "settings", "hook", "script", "gate", "skill", "agent", "command", "rule", "mcp", "plugin", "doc", "memory", "other"] },
+    "itemStatus": {
+      "enum": ["open", "approved", "in-progress", "fixed", "failed", "declined", "deferred", "ok", "not-applicable"],
+      "description": "open: needs the user's decision. approved: user said yes, waiting for an executor. in-progress: being applied. fixed: applied and verified. failed: applied, verification failed, restored. declined: user keeps it as is. deferred: user will decide later. ok: looked at, nothing to change. not-applicable."
+    },
+    "decision": {
+      "type": "object",
+      "required": ["at", "target", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "at": { "type": "string", "format": "date-time" },
+        "runId": { "type": "string", "description": "Run the decision was made in, as the board and `run.mjs decide` record it." },
+        "target": { "type": "string", "description": "An item id, a group id, or `accounts.primary` (with the chosen account id in `note`)." },
+        "action": { "enum": ["approve", "decline", "defer", "ask"] },
+        "note": { "type": "string" },
+        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Item ids left out of a group approval." },
+        "via": { "enum": ["board", "chat"] }
+      }
+    },
     "score": {
       "type": "object",
+      "description": "Written by render-board.mjs only.",
       "additionalProperties": false,
       "properties": {
         "current": { "type": ["number", "null"] },
-        "baseline": { "type": ["number", "null"] },
+        "baseline": { "type": ["number", "null"], "description": "Every item treated as open: the harness before this run." },
+        "projected": { "type": ["number", "null"], "description": "Approved and in-progress items treated as fixed: where the harness lands once what the user approved is applied." },
         "previous": { "type": ["number", "null"] },
-        "grade": { "type": ["string", "null"], "description": "A, B, C, D or F (states written before the F grade may hold E)." },
+        "grade": { "type": ["string", "null"] },
+        "baselineGrade": { "type": ["string", "null"] },
+        "projectedGrade": { "type": ["string", "null"] },
         "roundsCounted": { "type": "integer" },
         "roundsTotal": { "type": "integer" },
         "computedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "impact": {
+      "type": "object",
+      "description": "What this harness cost over the window. Filled from session-impact.mjs by run.mjs; `estimates` are added by the agent with their source.",
+      "required": ["windowDays", "sessions", "totalTokens"],
+      "additionalProperties": false,
+      "properties": {
+        "windowDays": { "type": "integer" },
+        "from": { "type": "string", "format": "date-time" },
+        "to": { "type": "string", "format": "date-time" },
+        "sessions": { "type": "integer", "minimum": 0 },
+        "activeDays": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "byKind": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer" }, "cacheWrite": { "type": "integer" }, "cacheRead": { "type": "integer" }, "output": { "type": "integer" }
+          }
+        },
+        "weightedTotal": { "type": "integer", "description": "Total in input-token equivalents, using the price weights in references/catalog/pricing-weights.json." },
+        "weightedByKind": {
+          "type": "object",
+          "description": "The weighted total split by token kind, in input-token equivalents.",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer" }, "cacheWrite": { "type": "integer" }, "cacheRead": { "type": "integer" }, "output": { "type": "integer" }
+          }
+        },
+        "weights": {
+          "type": "object",
+          "description": "Which price weights produced the weighted numbers, as session-impact.mjs reports them.",
+          "properties": {
+            "source": { "type": "string", "description": "The weights file used." },
+            "sources": { "type": "array", "items": { "type": "string" }, "description": "Price pages the weights were taken from." },
+            "verifiedAt": { "type": "string", "description": "When the weights were last checked against their sources." },
+            "perModelFamily": { "type": "object", "description": "Per model family: turns, tokens and the ratios applied." }
+          }
+        },
+        "contextAtStart": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "perSessionMedian": { "type": "integer" }, "perSessionP90": { "type": "integer" }, "total": { "type": "integer" }, "weightedTotal": { "type": "integer", "description": "The same total in input-token equivalents." }, "turns": { "type": "integer", "description": "Model turns in the window, over the sessions counted." }, "carriedTokens": { "type": "integer", "description": "The starting context of each session times its turns: it is re-read on every later turn." }, "carriedWeighted": { "type": "integer", "description": "The same, in input-token equivalents." } }
+        },
+        "contextPeak": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "median": { "type": "integer" }, "p90": { "type": "integer" }, "sessionsOver160k": { "type": "integer" } }
+        },
+        "waste": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "episodes", "tokens"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "enum": ["retry", "loop", "notfound", "correction", "hook-block", "error-end", "exploration"] },
+              "episodes": { "type": "integer" },
+              "sessions": { "type": "integer" },
+              "tokens": { "type": "integer" },
+              "weighted": { "type": "integer" },
+              "basis": { "enum": ["measured"] },
+              "topHeads": { "type": "array", "items": { "type": "string" } },
+              "items": { "type": "array", "items": { "type": "string" }, "description": "Item ids that address this kind of waste." }
+            }
+          }
+        },
+        "estimates": {
+          "type": "array",
+          "description": "Savings that are not measured. Shown apart from measured waste and never added into the measured total.",
+          "items": {
+            "type": "object",
+            "required": ["label", "tokens", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "description": "Stable id of the estimate, from references/catalog/estimates.json." },
+              "label": { "type": "string" },
+              "tool": { "type": "string" },
+              "tokens": { "type": "integer" },
+              "weighted": { "type": "integer" },
+              "source": { "type": "string", "description": "Where the number comes from, in one line." },
+              "items": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "unusedContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "skillsNeverInvoked": { "type": "array", "items": { "type": "string" } },
+            "mcpServersNeverCalled": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "example": { "type": "boolean", "description": "true only in the template example: numbers are illustrative." }
+      }
+    },
+    "elements": {
+      "type": "object",
+      "description": "Structured inventory the explorer renders as views. Written by snapshot-harness.mjs; the reviewing agent may add `verdict`, `note` and `item` fields.",
+      "additionalProperties": false,
+      "properties": {
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["layer", "kind", "rule"],
+            "additionalProperties": false,
+            "properties": {
+              "layer": { "enum": ["managed", "user", "project", "local"] },
+              "kind": { "enum": ["allow", "deny", "ask", "mode"] },
+              "rule": { "type": "string" },
+              "file": { "type": "string" },
+              "item": { "type": "string" },
+              "note": { "type": "string" }
+            }
+          }
+        },
+        "hooks": {
+          "type": "array",
+          "description": "Everything that runs automatically: agent hooks, git hooks, CI jobs, scheduled routines.",
+          "items": {
+            "type": "object",
+            "required": ["id", "source", "event"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "source": { "enum": ["agent", "plugin", "git", "ci", "scheduled"] },
+              "event": { "type": "string", "description": "PreToolUse, SessionStart, pre-commit, push, a cron expression..." },
+              "matcher": { "type": "string" },
+              "command": { "type": "string", "description": "Command line, masked and trimmed to 300 characters." },
+              "file": { "type": "string", "description": "File id where the hook is registered." },
+              "script": { "type": "string", "description": "File id of the script it runs, when it is one of the snapshot files." },
+              "plugin": { "type": "string" },
+              "blocking": { "type": ["boolean", "null"], "description": "Whether it can stop the action. null when it could not be told." },
+              "note": { "type": "string" },
+              "item": { "type": "string" }
+            }
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "level"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "level": { "enum": ["user", "project", "plugin"] },
+              "plugin": { "type": "string" },
+              "description": { "type": "string", "description": "Trimmed to 300 characters." },
+              "descriptionChars": { "type": "integer" },
+              "file": { "type": "string" },
+              "invocations": { "type": ["integer", "null"], "description": "Times invoked in the window; null when not measured." },
+              "verdict": { "enum": ["keep", "improve", "update", "retire", "merge", "unmeasured"] },
+              "reason": { "type": "string", "description": "Why this verdict; must stand on its own." },
+              "mergeInto": { "type": "string" },
+              "item": { "type": "string" }
+            }
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" }, "level": { "enum": ["user", "project", "plugin"] }, "model": { "type": "string" },
+              "tools": { "type": "string" }, "promptChars": { "type": "integer" }, "file": { "type": "string" }, "item": { "type": "string" }
+            }
+          }
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" }, "marketplace": { "type": "string" }, "enabled": { "type": "boolean" },
+              "pinned": { "type": ["boolean", "null"] }, "note": { "type": "string" }, "item": { "type": "string" }
+            }
+          }
+        },
+        "mcp": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "level"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "level": { "enum": ["user", "project", "local", "plugin", "account"] },
+              "transport": { "enum": ["local", "remote", "unknown"] },
+              "calls": { "type": ["integer", "null"], "description": "Tool calls in the window; null when not measured." },
+              "cli": { "type": "string", "description": "Official CLI that can replace it, when the catalog knows one." },
+              "file": { "type": "string" },
+              "note": { "type": "string" },
+              "item": { "type": "string" }
+            }
+          }
+        },
+        "clis": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "installed"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" }, "installed": { "type": "boolean" }, "version": { "type": "string" },
+              "collision": { "type": "boolean" }, "signals": { "type": "array", "items": { "type": "string" } },
+              "auth": { "enum": ["ok", "no", "unknown"] }, "note": { "type": "string" }, "item": { "type": "string" }
+            }
+          }
+        },
+        "docs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" }, "bytes": { "type": "integer" }, "lastCommit": { "type": "string" },
+              "language": { "type": "string" }, "reader": { "enum": ["agent", "developer", "customer", "unknown"] },
+              "status": { "enum": ["fine", "stale", "orphan", "contradicts", "always-loaded", "unchecked"] },
+              "file": { "type": "string" }, "note": { "type": "string" }, "item": { "type": "string" }
+            }
+          }
+        }
       }
     }
   }

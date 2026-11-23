@@ -44,7 +44,7 @@ skills/<name>/
   "summary": "English one-liner",
   "summary_pt": "Resumo em português",
   "profile": { "recommended": "on-demand", "supported": ["on-demand", "user", "project"] },
-  "environments": ["claude-code", "codex", "traycer"],
+  "environments": ["claude-code", "codex", "opencode"],
   "requires": [],
   "workspace": { "shared": ["state.json"], "local": ["backups/", "logs/"] }
 }
@@ -55,8 +55,9 @@ Choose `profile.recommended` with the table in [profiles.md](profiles.md).
 ## Working files: `.novarc-powers/<name>/`
 
 A skill that needs to keep files writes them **only** in `.novarc-powers/<name>/`, under the
-project root (project work) or the home directory (user work). It creates the folder on first
-run; it does not rely on the installer having run.
+project root (work that belongs to one project) or the home directory (work that spans
+projects or accounts, like a harness-doctor run). It creates the folder on first run; it does
+not rely on the installer having run.
 
 `workspace.shared` lists what may be committed with the project; `workspace.local` lists what
 must not (backups, logs, anything that can hold machine paths or config excerpts). The installer

@@ -1,8 +1,9 @@
 // Registry of every harness check plus the defense detector.
 // Each check is { id, round, severity, title, why, fix, run(model) } where run is pure and returns
 // an array of findings or { skip: reason }.
+import { hookBlocking } from '../snapshot/elements.mjs';
 import { PERMISSION_CHECKS } from './permissions.mjs';
-import { HOOK_CHECKS } from './hooks.mjs';
+import { HOOK_CHECKS, withBlockingFields } from './hooks.mjs';
 import { CONTENT_CHECKS } from './content.mjs';
 import { TOOLING_CHECKS } from './tooling.mjs';
 import { bySeverityThenId, parseRule, safeSnippet } from './util.mjs';
@@ -10,7 +11,6 @@ import { bySeverityThenId, parseRule, safeSnippet } from './util.mjs';
 export const CHECKS = [...PERMISSION_CHECKS, ...HOOK_CHECKS, ...CONTENT_CHECKS, ...TOOLING_CHECKS];
 export const CHECK_IDS = CHECKS.map((c) => c.id);
 
-const BLOCKING_RE = /\bexit\s+2\b|exit\(2\)|["']?permissionDecision["']?\s*[:=]\s*\\?["']?(deny|ask)|["']?decision["']?\s*[:=]\s*\\?["']?block/i;
 const SECRET_SCANNERS = /\b(gitleaks|trufflehog|detect-secrets|git-secrets|secretlint|ggshield|talisman|secret-scan)\b/i;
 
 /** Protections already in place. Never findings; the board shows them as what is fine. */
@@ -30,8 +30,12 @@ export function detectDefenses(model) {
     if (ask.length) out.push({ scope: s.scope, title: 'Ask rules', detail: `${s.display}: ${ask.length} ask rule(s)` });
   }
   for (const h of model.hooks) {
-    if (h.event !== 'PreToolUse' || h.type !== 'command' || !h.command) continue;
-    if (!BLOCKING_RE.test(`${h.command}\n${h.scriptText || ''}`)) continue;
+    // A defense only when the hook can really stop the tool call, by the test the snapshot uses
+    // (hookBlocking in snapshot/elements.mjs, from https://code.claude.com/docs/en/hooks, read on
+    // 2026-11-23): exit status 2 unless the command throws its status away, a printed deny, ask
+    // or block decision, or `onFailure: "block"` ("a failure does what exit code 2 does on that
+    // event"); never a background hook ("Async hooks can't block or control Claude's behavior").
+    if (h.event !== 'PreToolUse' || hookBlocking(withBlockingFields(h)) !== true) continue;
     out.push({ scope: h.scope, title: 'Blocking PreToolUse hook', detail: `${h.display}: matcher ${h.matcher ? safeSnippet(h.matcher, model.projectRoot, 40) : '(all tools)'}${h.scriptDisplay ? `, script ${h.scriptDisplay}` : ''}` });
   }
   for (const g of model.gitHookTexts) {

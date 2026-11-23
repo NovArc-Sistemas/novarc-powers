@@ -5,6 +5,14 @@ permission hole makes every other rule optional.
 
 ## Check
 
+Start from the rule engine: `probes/<harness>/checks.json` has the round 1 candidates
+(`references/checks.md` lists every check and its false positives). Confirm each in the real
+file; the checks below are what the engine cannot judge.
+
+Keep one picture in mind while reading: an agent that holds **private data**, reads **untrusted
+content** and has **a way out** (network, push, mail) can be talked into leaking. A harness does
+not need to remove all three; it needs to know where they meet and put a rule or a gate there.
+
 **Secrets**
 
 - Run `scripts/secret-scan.mjs` over every config dir, every instruction file, MCP server
@@ -34,6 +42,20 @@ permission hole makes every other rule optional.
 - Plugins and marketplaces from sources the user does not recognise.
 
 ## Fix
+
+Rule-engine findings and their usual fix:
+
+| Check | Proposal | Class |
+|---|---|---|
+| `env-base-url-override` | Ask who owns the endpoint; remove it unless it is a gateway the user runs on purpose | `permission` |
+| `mcp-project-auto-approve` | Turn auto-approval off; approve project servers one by one | `permission` |
+| `hook-auto-allow` | Make the hook decide on the command it sees, or remove the blanket allow | `permission` |
+| `deny-baseline-missing` | Add deny rules for credential folders, `.env` files and piping downloads into a shell | `permission` |
+| `hook-swallows-errors` | Let the hook fail visibly, or log the failure where the next review reads it | `reversible` |
+| `instructions-hidden-text` | Show the hidden text to the user and remove it; ask where the file came from | `reversible` |
+| `instructions-external-import` | Vendor the content into the repo, pinned, or drop the import | `reversible` |
+| `skill-shell-injection` | Quote the argument or pass it as data, not as shell text | `reversible` |
+| `npm-release-age-gate-missing` | Add the package manager's minimum release age setting (read its docs for the key) | `additive` |
 
 | Finding | Proposal | Class |
 |---|---|---|

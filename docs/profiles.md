@@ -10,17 +10,19 @@ Toda skill declara no seu `skill.json` o perfil que recomendamos e os perfis em 
 
 Para skills de uso raro. Nada é copiado. O instalador mantém um bloco gerenciado no arquivo de
 instruções do agente (`CLAUDE.md`, `AGENTS.md`), entre `<!-- novarc-powers:start -->` e
-`<!-- novarc-powers:end -->`, com uma linha por skill dizendo como buscá-la:
+`<!-- novarc-powers:end -->`, que diz como buscar uma skill e lista as disponíveis, uma por
+linha:
 
 ```text
 npx -y novarc-powers@<versão> fetch <skill>
+npx -y github:NovArc-Sistemas/novarc-powers#v<versão> fetch <skill>    # se a versão não estiver no npm
 ```
 
 O `fetch` copia a skill para `~/.novarc-powers/cache/<skill>@<versão>/` e imprime o caminho do
 `SKILL.md`, que o agente lê e segue. O texto fora do bloco nunca é tocado.
 
-**Custo:** uma linha por skill em toda sessão. **Atualização:** a versão fica fixada no
-ponteiro; `npx novarc-powers update` troca para a nova.
+**Custo:** poucas linhas em toda sessão. **Atualização:** a versão fica fixada no ponteiro; o
+comando `update` do instalador troca para a nova.
 
 ## Harness de usuário (`user`)
 

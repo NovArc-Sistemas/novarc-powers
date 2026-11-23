@@ -18,28 +18,40 @@ next time they touch a harness, without this skill. Every item is written to tha
    - `tradeoff`: what the change costs or risks. Every change has one; say it.
    - `learnMore`: an official doc URL when one backs the lesson. Never a URL from memory: only
      one you opened in this session.
-2. **`changes`**: one entry per file, with the `before` and `after` excerpt the board renders as
-   a diff.
+2. **`changes`**: one entry per contiguous edit. The board draws each one **inside the file it
+   touches**: the text that goes away in red, the text that arrives in green, and the change's
+   `why` beside it. A user reading `CLAUDE.md` on the board sees the whole file, with every
+   proposed edit in place.
+3. **`saves`**, when the measurement supports it: the tokens this fix is expected to save over
+   the window, `measured` or `estimated`, with one line on where the number comes from.
 
 Items that change nothing (status `ok`, a fine inventory entry) need no lesson; their `opinion`
 says why they are fine, which teaches too.
 
-## Writing the diff excerpts
+## Writing the changes
 
-- **Excerpt, not the whole file.** The changed lines plus 2 or 3 lines of context on each side,
-  so the reader sees where the change sits. Cut with a line `...` when skipping.
-- **Before is real, after is exact.** `before` is copied from disk. `after` is exactly what will
-  be written, not a paraphrase; after applying, update it to what was written and set
-  `applied: true`.
-- **New file:** `before` is `""`. **Deleted file or removed block:** `after` is `""`.
-- **Mask secrets** in both sides with the scanner's mask (first 4 characters, then `…`).
-- **Translations:** show one representative section side by side, not the whole file, and say
-  in `note` how many sections the full change covers.
-- **Installs** have no file diff of their own. Show the files the installer will touch (settings,
-  instruction files) when known from its docs, and the command in `proposal`. If the installer's
-  effect is unknown before running it, say so in `note` and fill the diff after it runs.
-- `note` points at the one thing to look at: "the `--force` check now matches anywhere in the
-  command".
+The board finds a change in its file by exact text, so precision is what makes it appear in the
+right place. `run.mjs build` prints a warning for every change it could not place; fix them all.
+
+- **`before` is the exact, contiguous text on disk**, as it appears in the file snapshot
+  (`<run>/probes/<harness>/snapshot.json`): same spaces, same line breaks, no `...` elisions.
+  Take just the lines that change, plus a neighbouring line when the text alone would be
+  ambiguous in the file. If a secret sits in those lines, copy the masked form the snapshot
+  shows.
+- **`after` is exactly what will be written.** After applying, it is what was written.
+- **One entry per place.** Three edits in one file are three entries, each with its own `why`.
+- **Insertion:** `before` is `""` and `insertAfter` is the exact line the new text goes after
+  (omit it to append at the end of the file). **Removal:** `after` is `""`.
+- **New file:** no `file`, `before` is `""`, `path` is where it will live.
+- **`why`** is one or two sentences about *this* edit, in the user's language: what it does and
+  why it is better. The lesson explains the problem; `why` explains the line.
+- **Translations:** the changes cover the whole file, section by section, so the user can read
+  the translated file on the board. Draft the full file in `<run>/drafts/` first.
+- **Installs** have no diff of their own. Show the files the installer will touch when its
+  documentation says which, and the command in `proposal`. If the effect is unknown before
+  running it, say so and add the changes after it runs.
+- **`role`** on a file (through `fileRoles` in the findings): one line on what the file does in
+  the harness. The explorer shows it; write it for every file a user would not recognise.
 
 ## Tone
 

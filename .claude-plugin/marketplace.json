@@ -5,15 +5,17 @@
   },
   "metadata": {
     "description": "NOVARC Powers: agent skills for Claude Code, Codex and other coding agents. One plugin per skill, so you install only what you use.",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "novarc-harness-doctor",
-      "description": "Inventories, scores and fixes your AI coding agent harness (user, project or both), guided or automatic. Recommended profile: on-demand (prefer `npx novarc-powers`, which installs only a pointer).",
+      "description": "Finds every agent harness on your machine, measures what it cost over the last 30 days, and explains and fixes it on one interactive board. Recommended profile: on-demand (prefer the installer, which writes only a pointer).",
       "source": "./",
       "strict": false,
-      "skills": ["./skills/novarc-harness-doctor"]
+      "skills": [
+        "./skills/novarc-harness-doctor"
+      ]
     }
   ]
 }

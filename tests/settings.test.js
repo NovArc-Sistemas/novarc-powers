@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { addHook, hookCommand, removeHook } from '../src/settings-hook.js';
-import { read, readJson, run, sandbox } from './helpers.js';
+import { PKG_VERSION, read, readJson, run, sandbox } from './helpers.js';
 
 const CMD = hookCommand(path.join('X:', 'h', '.novarc-powers', 'hooks', 'check-update.js'));
 
@@ -57,7 +57,7 @@ test('CLI registers the hook once across repeated installs and unregisters on --
   assert.match(read(settings), /^\{\n {4}"theme"/, 'indentation preserved');
   assert.ok(fs.existsSync(path.join(sb.home, '.novarc-powers', 'hooks', 'check-update.js')));
   const cfg = readJson(path.join(sb.home, '.novarc-powers', 'config.json'));
-  assert.deepEqual(cfg, { updates: 'notify', lastCheck: null, installedVersion: '0.1.0' });
+  assert.deepEqual(cfg, { updates: 'notify', lastCheck: null, installedVersion: PKG_VERSION });
 
   assert.equal(run(sb, ['update', '--updates', 'off', '--yes']).code, 0);
   assert.deepEqual(readJson(settings), { theme: 'dark' });

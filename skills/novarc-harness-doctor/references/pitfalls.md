@@ -28,6 +28,11 @@ finding or declaring a fix done.
 - **A running app rewrites its config from memory.** An edit to a desktop app's config file can
   be undone minutes later. Such an edit needs the app quit first; say so and queue it.
 
+- **A tool can rewrite the file you manage.** `codex mcp add` rewrites the MCP tables of
+  `config.toml` and drops comments; an app that owns a JSON state file rewrites it whole. Never
+  rely on marker comments surviving in a file another program writes: record what you manage
+  (name and content hash) somewhere of your own.
+
 ## Secrets
 
 - **Tokens sit in config files and one-off scripts**, including MCP server definitions, shell

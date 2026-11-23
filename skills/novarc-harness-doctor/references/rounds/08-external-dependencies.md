@@ -19,6 +19,10 @@ new machine.
 
 ## Fix
 
+The run's own changes are a dependency too: every file the review edits is in the ledger with
+its hashes and a backup, so `run.mjs undo` restores a single item or the whole run. Say so in
+the report; it is what makes approving easy.
+
 | Finding | Proposal | Class |
 |---|---|---|
 | Third-party source following a branch, auto-updating | Pin to a version, or switch to notify-then-update | `reversible` |

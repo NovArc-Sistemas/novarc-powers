@@ -1,7 +1,7 @@
 {
   "name": "novarc-powers",
-  "version": "0.1.0",
-  "description": "Installer for the NovArc Powers collection of agent skills (Claude Code, Codex and AGENTS.md-compatible tools).",
+  "version": "0.2.0",
+  "description": "Agent skills for Claude Code, Codex and other coding agents, with an installer. Home of novarc-harness-doctor.",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { countOccurrences, read, readJson, run, sandbox } from './helpers.js';
+import { PKG_VERSION, countOccurrences, read, readJson, run, sandbox } from './helpers.js';
 
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 
@@ -16,7 +16,7 @@ test('copy install writes files and a manifest with matching hashes', (t) => {
   assert.ok(fs.existsSync(path.join(target, 'SKILL.md')));
   assert.ok(fs.existsSync(path.join(target, 'references', 'notes.md')));
   const m = readJson(path.join(sb.home, '.novarc-powers', 'manifest.json'));
-  assert.equal(m.packageVersion, '0.1.0');
+  assert.equal(m.packageVersion, PKG_VERSION);
   assert.equal(m.updates, 'notify');
   const e = m.entries.find((x) => x.skill === 'beta');
   assert.equal(e.profile, 'user');
@@ -40,15 +40,15 @@ test('on-demand install writes one pointer block; removing the last skill remove
   let text = read(claudeMd);
   assert.ok(text.startsWith('# Personal rules\r\n\r\nKeep it short.\r\n'));
   assert.equal(countOccurrences(text, '<!-- novarc-powers:start -->'), 1);
-  assert.match(text, /fetch alpha/);
-  assert.match(text, /fetch gamma/);
+  assert.match(text, /- `alpha`: /);
+  assert.match(text, /- `gamma`: /);
   assert.equal(text.replace(/\r\n/g, '').includes('\n'), false, 'CRLF preserved');
   const backups = path.join(sb.home, '.novarc-powers', 'backups');
   assert.ok(fs.readdirSync(backups).length >= 1, 'pre-existing file was backed up');
   assert.equal(run(sb, ['remove', 'alpha', '--yes']).code, 0);
   text = read(claudeMd);
-  assert.doesNotMatch(text, /fetch alpha/);
-  assert.match(text, /fetch gamma/);
+  assert.doesNotMatch(text, /- `alpha`: /);
+  assert.match(text, /- `gamma`: /);
   assert.equal(run(sb, ['remove', 'gamma', '--yes']).code, 0);
   assert.equal(read(claudeMd), '# Personal rules\r\n\r\nKeep it short.\r\n');
   assert.equal(fs.existsSync(path.join(sb.home, '.novarc-powers', 'manifest.json')), false);
@@ -139,7 +139,7 @@ test('fetch prints exactly one absolute path to SKILL.md', (t) => {
   assert.equal(lines.length, 1);
   assert.equal(r.stdout, lines[0] + '\n');
   assert.ok(path.isAbsolute(lines[0]));
-  assert.equal(lines[0], path.join(sb.home, '.novarc-powers', 'cache', 'alpha@0.1.0', 'SKILL.md'));
+  assert.equal(lines[0], path.join(sb.home, '.novarc-powers', 'cache', `alpha@${PKG_VERSION}`, 'SKILL.md'));
   assert.match(read(lines[0]), /name: alpha/);
   // Overwrites on a second call.
   fs.writeFileSync(lines[0], 'tampered');

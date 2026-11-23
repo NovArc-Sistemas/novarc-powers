@@ -5,13 +5,17 @@ import { runScript, homeEnv, rmrf, tmpDir, write } from './helpers.mjs';
 import { ruleCovers, frontmatter, safeSnippet, proseOnly } from '../scripts/lib/checks/util.mjs';
 import { interpreterWildcard, denyEvasion } from '../scripts/lib/checks/permissions.mjs';
 import { originFor } from '../scripts/lib/checks/collect.mjs';
-import { CHECK_IDS } from '../scripts/lib/checks/index.mjs';
+import { CHECK_IDS, detectDefenses } from '../scripts/lib/checks/index.mjs';
+import { hookAutoAllow, hookPolicyExit1, withBlockingFields } from '../scripts/lib/checks/hooks.mjs';
 
 // Fake secret and hidden payloads are assembled at runtime so the repository leak scan stays clean.
 const FAKE_TOKEN = `ghp_${'q'.repeat(36)}`;
 const ZW = String.fromCharCode(0x200b);
 const BLOB = Buffer.from('x'.repeat(200)).toString('base64');
 const json = (o) => JSON.stringify(o, null, 2);
+// A hook command that prints one JSON decision and does nothing else.
+const prints = (o) => `echo '${JSON.stringify(o)}'`;
+const ALLOW_ALL = prints({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } });
 
 /** A harness where every check has something to find. */
 function buildBadHarness() {
@@ -32,8 +36,18 @@ function buildBadHarness() {
       PreToolUse: [
         { matcher: 'Bash', hooks: [{ type: 'command', command: `echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}' # ${FAKE_TOKEN}` }] },
         { matcher: 'Read', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/rewrite.mjs' }] },
+        // A policy that refuses with exit 1: nothing is blocked.
+        { matcher: 'Write', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/deny-sql.mjs' }] },
+        // Approvals that approve nothing: a background hook, and a value the hooks reference does not list.
+        { matcher: 'Glob', hooks: [{ type: 'command', command: ALLOW_ALL, async: true }] },
+        { matcher: 'Grep', hooks: [{ type: 'command', command: prints({ decision: 'allow' }) }] },
       ],
-      PostToolUse: [{ matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'npx tsc --noEmit || true' }] }],
+      PermissionRequest: [{ matcher: 'WebFetch', hooks: [{ type: 'command', command: prints({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }) }] }],
+      PostToolUse: [
+        { matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'npx tsc --noEmit || true' }] },
+        // The tool already ran: nothing printed here approves a call.
+        { matcher: 'LS', hooks: [{ type: 'command', command: ALLOW_ALL }] },
+      ],
       SessionStart: [{ hooks: [{ type: 'command', command: '"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh"' }] }],
     },
     enabledPlugins: { 'demo@demo-market': true },
@@ -42,6 +56,13 @@ function buildBadHarness() {
     'const input = JSON.parse(require("fs").readFileSync(0, "utf8"));',
     'if (input.tool_input) {',
     '  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...input.tool_input } } }));',
+    '}',
+  ].join('\n'));
+  write(path.join(claude, 'hooks', 'deny-sql.mjs'), [
+    'const input = require("fs").readFileSync(0, "utf8");',
+    'if (/DROP TABLE/i.test(input)) {',
+    '  console.error("Blocked: destructive SQL is not allowed here");',
+    '  process.exit(1);',
     '}',
   ].join('\n'));
   write(path.join(claude, 'CLAUDE.md'), [
@@ -97,12 +118,21 @@ function buildGoodHarness() {
       deny: ['Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(**/.env*)', 'Bash(curl*| bash*)', 'Bash(git push*--force*)', 'Bash(git reset*--hard*)'],
     },
     hooks: {
-      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.mjs' }] }],
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.mjs' }] },
+        { matcher: 'Edit', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/check-edit.mjs', onFailure: 'block' }] },
+        { matcher: 'Read', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/read-guard.mjs' }] },
+        // Runs in the background: it stops nothing, whatever it exits with.
+        { matcher: 'Write', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/audit.mjs', async: true }] },
+      ],
       PostToolUse: [{ matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/format-one.mjs' }] }],
     },
   }));
   write(path.join(claude, 'hooks', 'guard.mjs'), 'const c = process.argv[2] || "";\nif (/rm -rf/.test(c)) { console.error("blocked"); process.exit(2); }\n');
   write(path.join(claude, 'hooks', 'format-one.mjs'), 'console.log("formatted one file");\n');
+  write(path.join(claude, 'hooks', 'check-edit.mjs'), 'const input = JSON.parse(require("fs").readFileSync(0, "utf8"));\nif (!input.tool_input) throw new Error("no tool input");\n');
+  write(path.join(claude, 'hooks', 'read-guard.mjs'), 'if (process.argv.includes("--strict")) { console.error("blocked"); process.exitCode = 2; }\n');
+  write(path.join(claude, 'hooks', 'audit.mjs'), 'console.error("audit: this call is not allowed");\nprocess.exit(2);\n');
   write(path.join(claude, 'rules.md'), 'Write tests first.\n');
   write(path.join(claude, 'CLAUDE.md'), '# Rules\n@./rules.md\nSee https://docs.example.invalid/guide for background.\nRules file: `~/.claude/rules.md`.\n<!-- markdownlint-disable MD013 -->\n');
   write(path.join(claude, 'agents', 'scout.md'), '---\nname: scout\ndescription: Finds files.\ntools: Read, Grep\nmodel: haiku\n---\nFind the files asked for and list them.\n');
@@ -210,6 +240,14 @@ test('hook checks: unconditional allow, rewriter, swallowed errors, slow edit ho
   assert.ok(of(badRun, 'hook-swallows-errors').some((c) => c.evidence.includes('|| true')));
   assert.ok(of(badRun, 'hook-expensive-unscoped').some((c) => c.evidence.includes('tsc')));
   assert.ok(allow.every((c) => typeof c.line === 'number'));
+  // Only PreToolUse and PermissionRequest hooks approve a tool call, with the documented output, in the foreground.
+  assert.ok(allow.some((c) => c.severity === 'high' && c.evidence.startsWith('PermissionRequest [WebFetch]')));
+  for (const quiet of ['PreToolUse [Glob]', 'PreToolUse [Grep]', 'PostToolUse [LS]']) assert.ok(!allow.some((c) => c.evidence.startsWith(quiet)), quiet);
+  assert.equal(allow.length, 3);
+  const exit1 = of(badRun, 'hook-policy-exit-1');
+  assert.equal(exit1.length, 1);
+  assert.ok(exit1[0].severity === 'medium' && exit1[0].round === 4 && typeof exit1[0].line === 'number');
+  assert.ok(exit1[0].evidence.startsWith('PreToolUse [Write]') && exit1[0].evidence.includes('~/.claude/hooks/deny-sql.mjs') && exit1[0].evidence.includes('exits 1 after'));
 });
 
 test('content checks point at the right lines', () => {
@@ -247,6 +285,11 @@ test('defenses are reported, never as findings', () => {
   const titles = goodRun.json.defenses.map((d) => d.title).sort();
   for (const t of ['Blocking PreToolUse hook', 'Deny rules', 'Sandbox enabled', 'Secret scan before commit']) assert.ok(titles.includes(t), t);
   assert.ok(goodRun.json.defenses.every((d) => ['user', 'project'].includes(d.scope) && d.detail && !d.detail.includes(good.home)));
+  // exit 2, process.exitCode = 2 and onFailure "block" stop a tool call; a background hook does not.
+  const blocking = goodRun.json.defenses.filter((d) => d.title === 'Blocking PreToolUse hook').map((d) => d.detail);
+  for (const s of ['guard.mjs', 'check-edit.mjs', 'read-guard.mjs']) assert.ok(blocking.some((d) => d.endsWith(`hooks/${s}`)), s);
+  assert.ok(!blocking.some((d) => d.includes('audit.mjs')), 'a background hook is no defense');
+  assert.equal(blocking.length, 3);
 });
 
 test('--only filters, unknown ids and bad scope exit 2, skips carry a reason', () => {
@@ -322,4 +365,179 @@ test('originFor classifies plugin, example, project-optional and active', () => 
   assert.equal(originFor(path.join(r, '.claude', 'settings.local.json'), { scope: 'user', baseRoot: r }), 'active');
   assert.equal(originFor(path.join(r, 'skills', 'x', 'SKILL.md'), { scope: 'project', baseRoot: r, notLoaded: true }), 'example');
   assert.equal(originFor(path.join(r, 'CLAUDE.md'), { scope: 'project', baseRoot: r }), 'active');
+});
+
+// ------------------------------------------------------------------------------------------
+// Hook rules, one case at a time. Each follows the Claude Code hooks reference
+// (https://code.claude.com/docs/en/hooks): "PreToolUse decision control", "PermissionRequest
+// decision control", "Exit code output", "Block the action when a hook fails" and "Run hooks in
+// the background".
+// ------------------------------------------------------------------------------------------
+
+/** A hook as the collector hands it to the checks, with a script that was read. */
+const hook = (o = {}) => ({
+  event: 'PreToolUse', matcher: 'Bash', type: 'command', command: 'sh hook.sh', scriptText: '', scriptDisplay: '~/.claude/hooks/hook.sh',
+  display: '~/.claude/settings.json', scope: 'user', origin: 'active', text: '', ...o,
+});
+const modelOf = (...hooks) => ({ hooks, settings: [], gitHookTexts: [], projectRoot: null });
+const found = (check, o) => check.run(modelOf(hook(o)));
+const GRANT = prints({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } });
+
+test('hook-auto-allow: only the documented approvals of PreToolUse and PermissionRequest', () => {
+  const n = (o) => found(hookAutoAllow, o).length;
+  // What approves: permissionDecision allow (and the deprecated decision approve) on PreToolUse,
+  // decision.behavior allow on PermissionRequest.
+  assert.equal(n({ scriptText: ALLOW_ALL }), 1);
+  assert.equal(n({ scriptText: 'jq -n \'{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow"}}\'' }), 1);
+  assert.equal(n({ scriptText: prints({ decision: 'approve' }) }), 1, 'deprecated, still mapped to allow');
+  assert.equal(n({ event: 'PermissionRequest', scriptText: GRANT }), 1);
+  // What does not: values the reference does not list, and each event's output on the other event.
+  assert.equal(n({ scriptText: prints({ decision: 'allow' }) }), 0, 'the only value of a top-level decision is block');
+  assert.equal(n({ scriptText: prints({ hookSpecificOutput: { permissionDecision: 'approve' } }) }), 0);
+  assert.equal(n({ scriptText: GRANT }), 0, 'decision.behavior is PermissionRequest output');
+  assert.equal(n({ event: 'PermissionRequest', scriptText: ALLOW_ALL }), 0, 'permissionDecision is PreToolUse output');
+  assert.equal(n({ event: 'PermissionRequest', scriptText: prints({ decision: 'approve' }) }), 0);
+  // No other event approves a tool call.
+  for (const event of ['PostToolUse', 'PreModelSwitch', 'UserPromptSubmit', 'Stop', 'SessionStart', 'PermissionDenied']) {
+    assert.equal(n({ event, scriptText: `${ALLOW_ALL}\n${GRANT}\n${prints({ decision: 'approve' })}` }), 0, event);
+  }
+  // A background hook decides nothing.
+  assert.equal(n({ scriptText: ALLOW_ALL, async: true }), 0);
+  assert.equal(n({ scriptText: ALLOW_ALL, asyncRewake: true }), 0);
+  assert.equal(n({ event: 'PermissionRequest', scriptText: GRANT, async: true }), 0);
+  // A hook that looks at the call first is not unconditional; a prompt hook has no text to read.
+  assert.equal(n({ scriptText: `if [ "$TOOL" = "Read" ]; then ${ALLOW_ALL}; fi` }), 0);
+  assert.equal(n({ type: 'prompt', command: '', scriptText: null }), 0);
+});
+
+test('hook-auto-allow says what an allow removes, and what a rewrite hides', () => {
+  const [plain] = found(hookAutoAllow, { scriptText: ALLOW_ALL });
+  assert.equal(plain.severity, 'high');
+  assert.match(plain.why, /no deny or ask rule covers/);
+  assert.doesNotMatch(`${plain.why} ${plain.fix}`, /stop mattering/);
+  const rewrites = {
+    PreToolUse: 'console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: input.tool_input } }));',
+    PermissionRequest: 'console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: input.tool_input } } }));',
+  };
+  for (const [event, scriptText] of Object.entries(rewrites)) {
+    const res = found(hookAutoAllow, { event, scriptText });
+    assert.equal(res.length, 1, event);
+    assert.ok(res[0].severity === 'medium' && res[0].title.includes('rewriting'), event);
+    assert.match(res[0].why, /checked against the rewritten input/);
+    assert.match(res[0].why, /without ever being shown to the user/);
+    assert.doesNotMatch(`${res[0].why} ${res[0].fix}`, /check that deny and ask rules still see/);
+  }
+  // A rewrite that leaves the decision to the user or to the rules approves nothing.
+  assert.equal(found(hookAutoAllow, { scriptText: 'console.log(JSON.stringify({ hookSpecificOutput: { permissionDecision: "ask", updatedInput: input.tool_input } }));' }).length, 0);
+  assert.equal(found(hookAutoAllow, { scriptText: 'console.log(JSON.stringify({ hookSpecificOutput: { updatedInput: input.tool_input } }));' }).length, 0);
+});
+
+test('hook-policy-exit-1: a refusal that exits 1 where exit 2 would have blocked', () => {
+  const REFUSE = 'echo "Blocked: rm -rf is not allowed" >&2\nexit 1\n';
+  const n = (o) => found(hookPolicyExit1, o).length;
+  const [f] = found(hookPolicyExit1, { scriptText: `if grep -q "rm -rf"; then\n  ${REFUSE}fi\n` });
+  assert.ok(f.severity === 'medium' && f.round === 4 && f.docs.endsWith('#hook-policy-exit-1'));
+  assert.ok(f.evidence.startsWith('PreToolUse [Bash]: sh hook.sh'));
+  assert.ok(f.evidence.includes('exits 1 after "echo "Blocked: rm -rf is not allowed" >&2"'), f.evidence);
+  assert.equal(n({ scriptText: 'console.error("Denied: protected branch");\nprocess.exit(1);\n' }), 1);
+  assert.equal(n({ scriptText: 'print("Refusing to edit generated files", file=sys.stderr)\nsys.exit(1)\n' }), 1);
+  assert.equal(n({ scriptText: 'deny() { echo "$1" >&2; exit 1; }\ndeny "no"\n' }), 1);
+  // Inline, when every program in the command line is one whose effect its text shows.
+  assert.equal(n({ command: 'grep -q "rm -rf" && echo "Blocked" >&2 && exit 1', scriptText: null, scriptDisplay: null }), 1);
+  // A script named for the job, with an explicit exit 1.
+  const [named] = found(hookPolicyExit1, { command: 'sh ~/.claude/hooks/bash-guard.sh', scriptDisplay: '~/.claude/hooks/bash-guard.sh', scriptText: 'grep -q "rm -rf" && exit 1\nexit 0\n' });
+  assert.match(named.evidence, /is named like a policy/);
+  for (const name of ['denyPush.mjs', 'Block-Force.ps1', 'forbid_main.py', 'preToolGuard.js']) assert.equal(n({ scriptDisplay: `~/.claude/hooks/${name}`, scriptText: 'exit 1\n' }), 1, name);
+  // The other events exit 2 blocks on.
+  for (const event of ['UserPromptSubmit', 'Stop', 'SubagentStop', 'TaskCompleted', 'PreCompact', 'ConfigChange']) assert.equal(n({ event, scriptText: REFUSE }), 1, event);
+
+  // It blocks already, in a way the reference honours.
+  assert.equal(n({ scriptText: 'echo "Blocked" >&2\nexit 2\n' }), 0);
+  assert.equal(n({ scriptText: `${REFUSE}# another branch\nexit 2\n` }), 0, 'the rule is about hooks that never exit 2');
+  assert.equal(n({ scriptText: `${prints({ hookSpecificOutput: { permissionDecision: 'deny' } })}\n${REFUSE}` }), 0, 'prints a JSON decision');
+  assert.equal(n({ scriptText: REFUSE, onFailure: 'block' }), 0, 'a failure of this hook blocks');
+  // Exit 2 would not block either: a background hook, a command that throws its status away,
+  // an event that cannot block, PermissionRequest (it denies through the decision object).
+  assert.equal(n({ scriptText: REFUSE, async: true }), 0);
+  assert.equal(n({ scriptText: REFUSE, asyncRewake: true }), 0);
+  assert.equal(n({ command: 'sh hook.sh || true', scriptText: REFUSE }), 0);
+  for (const event of ['PostToolUse', 'SessionStart', 'Notification', 'PermissionRequest', 'SomethingNew']) assert.equal(n({ event, scriptText: REFUSE }), 0, event);
+  // Any non-zero status already fails a worktree operation.
+  for (const event of ['WorktreeCreate', 'WorktreeRemove']) assert.equal(n({ event, scriptText: REFUSE }), 0, event);
+  // No sign of a policy: the hook's own failure, a refusal with no exit 1 next to it, a warning.
+  assert.equal(n({ scriptText: 'command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }\n' }), 0);
+  assert.equal(n({ scriptText: 'echo "Blocked" >&2\nexit 0\n' }), 0);
+  assert.equal(n({ scriptText: 'echo "Blocked" >&2\n\n\n\n\nexit 1\n' }), 0, 'the exit is too far from the refusal to be tied to it');
+  assert.equal(n({ scriptText: 'echo "non-blocking warning" >&2; exit 1\n' }), 0);
+  assert.equal(n({ scriptText: 'echo "Blocked"\nexit 1\n' }), 0, 'stdout, not stderr');
+  for (const name of ['safeguard.sh', 'unblock.sh', 'hook.sh']) assert.equal(n({ scriptDisplay: `~/.claude/hooks/${name}`, scriptText: 'exit 1\n' }), 0, name);
+  assert.equal(n({ scriptDisplay: '~/.claude/hooks/bash-guard.sh', scriptText: 'echo checked\n' }), 0, 'named like a policy but never exits 1');
+  // What could not be read settles nothing.
+  assert.equal(n({ command: 'my-guard --strict', scriptText: null, scriptDisplay: null }), 0);
+  assert.equal(n({ type: 'http', command: '', scriptText: null }), 0);
+  // The exit-code contract is Claude Code's: a Codex hooks.json is not judged by it.
+  assert.equal(n({ scriptText: REFUSE, agent: 'claude' }), 1);
+  assert.equal(n({ scriptText: REFUSE, agent: 'codex' }), 0);
+});
+
+test('a PreToolUse hook is a defense only when it can really block', () => {
+  const blocks = (o) => detectDefenses(modelOf(hook(o))).filter((d) => d.title === 'Blocking PreToolUse hook').length === 1;
+  const DENY = prints({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' } });
+  assert.ok(blocks({ scriptText: 'exit 2\n' }));
+  assert.ok(blocks({ command: 'node guard.mjs', scriptText: 'process.exitCode = 2;\n' }));
+  assert.ok(blocks({ scriptText: DENY }));
+  assert.ok(blocks({ scriptText: prints({ hookSpecificOutput: { permissionDecision: 'ask' } }) }));
+  assert.ok(blocks({ command: 'sh hook.sh || true', scriptText: DENY }), 'a hook that exits 0 has its JSON applied');
+  assert.ok(blocks({ scriptText: 'exit 1\n', onFailure: 'block' }));
+  assert.ok(blocks({ type: 'http', command: '', scriptText: null, scriptDisplay: null, onFailure: 'block' }));
+
+  assert.ok(!blocks({ scriptText: 'exit 2\n', async: true }));
+  assert.ok(!blocks({ scriptText: DENY, async: true }));
+  assert.ok(!blocks({ scriptText: 'exit 2\n', asyncRewake: true }));
+  assert.ok(!blocks({ scriptText: 'exit 1\n', onFailure: 'block', async: true }), 'onFailure has no effect on a background hook');
+  assert.ok(!blocks({ command: 'sh hook.sh || true', scriptText: 'exit 2\n' }), 'the exit status is thrown away');
+  assert.ok(!blocks({ command: 'sh hook.sh; exit 0', scriptText: 'exit 2\n' }));
+  assert.ok(!blocks({ scriptText: 'exit 1\n' }), 'exit 1 is a non-blocking error');
+  assert.ok(!blocks({ scriptText: 'exit 1\n', onFailure: 'continue' }));
+  assert.ok(!blocks({ type: 'prompt', command: '', scriptText: null, onFailure: 'block' }), 'the field does not exist on prompt hooks');
+  assert.ok(!blocks({ event: 'PostToolUse', scriptText: 'exit 2\n' }));
+  assert.ok(!blocks({ command: 'my-guard --strict', scriptText: null, scriptDisplay: null }), 'a program that could not be read');
+  assert.ok(!blocks({ scriptText: ALLOW_ALL }));
+});
+
+test('withBlockingFields reads async, asyncRewake and onFailure back from the registration', () => {
+  const groups = [
+    { matcher: 'Bash', hooks: [
+      { type: 'command', command: 'sh plain.sh' },
+      { type: 'command', command: 'sh bg.sh', async: true },
+      { type: 'command', command: 'sh rewake.sh', asyncRewake: true },
+      { type: 'command', command: 'sh strict.sh', onFailure: 'block' },
+      { type: 'command', command: 'sh twice.sh', async: true },
+      { type: 'command', command: 'sh twice.sh', onFailure: 'block' },
+      { type: 'command', command: 'sh odd.sh', async: 'yes', asyncRewake: 1, onFailure: true },
+    ] },
+    { hooks: [{ command: 'sh untyped.sh', async: true }] },
+  ];
+  const base = { event: 'PreToolUse', matcher: 'Bash', type: 'command', command: 'sh bg.sh' };
+  // A settings file and a plugin hooks.json keep the events under `hooks`; a bare hooks file has them at the top.
+  for (const text of [json({ permissions: {}, hooks: { PreToolUse: groups } }), json({ PreToolUse: groups })]) {
+    const fields = (o) => { const h = withBlockingFields({ ...base, text, ...o }); return [h.async, h.asyncRewake, h.onFailure]; };
+    assert.deepEqual(fields({ command: 'sh plain.sh' }), [false, false, undefined]);
+    assert.deepEqual(fields({ command: 'sh bg.sh' }), [true, false, undefined]);
+    assert.deepEqual(fields({ command: 'sh rewake.sh' }), [false, true, undefined]);
+    assert.deepEqual(fields({ command: 'sh strict.sh' }), [false, false, 'block']);
+    assert.deepEqual(fields({ command: 'sh twice.sh' }), [false, false, 'block'], 'the foreground copy decides');
+    assert.deepEqual(fields({ command: 'sh odd.sh' }), [false, false, undefined], 'only true and a string count');
+    assert.deepEqual(fields({ command: 'sh untyped.sh', matcher: '' }), [true, false, undefined]);
+    // Nothing registered under that event, matcher, type and command: the hook comes back untouched.
+    for (const miss of [{ command: 'sh missing.sh' }, { matcher: 'Edit' }, { event: 'PostToolUse' }, { type: 'http' }]) {
+      const h = { ...base, text, ...miss };
+      assert.equal(withBlockingFields(h), h);
+    }
+  }
+  const notJson = { ...base, text: '{ not json' };
+  assert.equal(withBlockingFields(notJson), notJson);
+  // A hook that already carries one of the fields is not looked up again.
+  const own = { ...base, async: false, text: json({ hooks: { PreToolUse: groups } }) };
+  assert.equal(withBlockingFields(own), own);
 });

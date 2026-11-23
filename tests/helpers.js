@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const BIN = path.join(ROOT, 'bin', 'novarc-powers.js');
 export const FIXTURE_SKILLS = path.join(ROOT, 'tests', 'fixtures', 'skills');
+export const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
 /** Fresh sandbox: `{base, home, cwd}` under the OS temp dir, removed by `cleanup`. */
 export function sandbox({ claude = true, codex = false, agents = false } = {}) {
