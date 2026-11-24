@@ -197,6 +197,45 @@ test('install-check: a settings.json with names nobody recorded is refused, with
   assert.deepEqual([read(settings), read(one)], [installed, installed]);
 });
 
+test('install-check: what its own write had to say reaches its notes', (t) => {
+  const HARD = { NOVARC_POWERS_NO_SYMLINK: '1' }; // settings.json is one file under two names
+  const world = () => {
+    const h = buildHome({ codex: false, agents: false });
+    t.after(() => rmrf(h.root));
+    assert.equal(planAndApply(h, 'claude-1', ['--resolve', 'claude-2:CLAUDE.md=replace-with-primary'], HARD).apply.code, 0);
+    const P = path.join(h.claude, 'settings.json');
+    const S = path.join(h.acc, 'settings.json');
+    assert.equal(fs.statSync(P).nlink, 2, 'the fixture did not produce a hardlinked settings.json');
+    return { h, P, S, before: read(P) };
+  };
+  const other = '~/.hostapp/host/harness-accounts/claude-code/acc-1/settings.json';
+
+  // Another program writes the second name right after the file itself was replaced.
+  let w = world();
+  let r = acc(w.h.home, ['install-check', '--yes'], { ...HARD, NOVARC_POWERS_TEST_EDIT: `committed=${w.S}` });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.json.notes, [`~/.claude/settings.json was written, but 1 other name of the file had been changed by something else in the meantime and was left as it is: ${other} (it was edited)`]);
+  assert.equal(read(w.S), 'EDITED BY ANOTHER PROGRAM\n', 'an edit made in the meantime was replaced');
+  assert.equal(sessionStart(w.P).length, 1);
+  assert.equal(fs.statSync(w.P).nlink, 1);
+
+  // The second name cannot be switched over just now (as when an app holds it open, on Windows).
+  w = world();
+  r = acc(w.h.home, ['install-check', '--yes'], { ...HARD, NOVARC_POWERS_TEST_FAULT: 'peer' });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.json.notes, ['~/.claude/settings.json was written, but 1 other name of the file could not be switched over to it yet (ENOSPC): the next sync check, or the next command that writes, finishes that']);
+  assert.equal(read(w.S), w.before, 'the name that could not be switched does not hold its complete old bytes');
+  assert.equal(sessionStart(w.P).length, 1);
+  // The next session start finishes it.
+  assert.equal(check(w.h.home, ['--repair'], { extra: HARD }).stdout, 'novarc-harness-doctor account sync: recovered 1 (~/.claude/settings.json: an interrupted write had gone through; 1 other name of the file now follows it).\n');
+  assert.deepEqual([read(w.S) === read(w.P), fs.statSync(w.P).nlink], [true, 2]);
+
+  // Nothing to say: no extra note.
+  w = world();
+  r = acc(w.h.home, ['install-check', '--yes'], HARD);
+  assert.deepEqual([r.code, r.json.notes], [0, []]);
+});
+
 test('install-check: a settings file with a secret is not copied into the backups', (t) => {
   const h = buildHome({ second: false, codex: false, agents: false });
   t.after(() => rmrf(h.root));

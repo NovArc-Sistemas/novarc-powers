@@ -22,13 +22,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeInputPath } from '../common.mjs';
-import { RunError, UsageError, Plain, readJson, readJsonl, readText, readTextCapped, writeTextAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
+import { RunError, UsageError, Plain, readJson, readJsonl, readText, writeTextAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
 import { runPaths, runsDir, latestRunId, historyDir, historyIndexPath, historyMutex, homeBase, RUN_ID_RE } from './paths.mjs';
 import { isDateTime } from './schema.mjs';
 import { loadFindings, loadItems, loadStatus, resolveGroups, resolveRunId, loadRun, inputsFingerprint } from './model.mjs';
 import { assembleCurrent } from './build.mjs';
 import { markClosed } from './init.mjs';
-import { limits, harnessKeyOf, ownsPath, harnessKeys, indexedPaths, listRecords, ignoredRecords, starved, forgetRecords, recheckRecords, validateRecord, recordBaseName, sanitizeRecord } from './records.mjs';
+import { limits, harnessKeyOf, ownsPath, harnessKeys, readIndexText, indexedPaths, holdsText, listRecords, ignoredRecords, starved, forgetRecords, recheckRecords, validateRecord, recordBaseName, sanitizeRecord } from './records.mjs';
 import { makeRecord, slimRecord, loadThresholds } from './followup.mjs';
 import { recordMarkdown, historyText } from './text.mjs';
 
@@ -37,9 +37,13 @@ const INDEX_SCHEMA = 1;
 /** How often the records are made again because the run changed meanwhile, before the mutex is held throughout. */
 const OPTIMISTIC_TRIES = 3;
 
-/** Write `text` to `file` unless it already holds exactly that. True when it was written. */
+/**
+ * Write `text` to `file` unless it already holds exactly that. True when it was written. What is
+ * there is read only when it has the size of `text` (`holdsText`): a file of the history folder
+ * is never read whole just to be replaced.
+ */
 function put(file, text) {
-  if (readText(file) === text) return false;
+  if (holdsText(file, text) === 'same') return false;
   writeTextAtomic(file, text);
   return true;
 }
@@ -109,12 +113,12 @@ function pathOf(key, records, hints, indexed) {
 /**
  * index.json as the records say it should be. Nothing of the index on disk is trusted but the
  * absolute path of each harness, and that only after `ownsPath` (see `pathOf`). `hints` gives
- * the path of the harnesses a run is writing right now. null when this command could not read
- * every record (a history larger than one command reads): an index is then not made at all,
- * rather than made from a part.
+ * the path of the harnesses a run is writing right now, `indexText` the index as it is on disk
+ * (`readIndexText`). null when this command could not read every record (a history larger than
+ * one command reads): an index is then not made at all, rather than made from a part.
  */
-function expectedIndex(hints = new Map()) {
-  const indexed = indexedPaths();
+function expectedIndex(hints, indexText) {
+  const indexed = indexedPaths(indexText);
   const harnesses = {};
   for (const key of harnessKeys()) {
     const records = listRecords(key);
@@ -134,22 +138,28 @@ function languageOfRun(runId) {
   } catch { return null; }
 }
 
-/** What the history folder lacks or holds differently from what its records say: `{ md, index }`. */
+/**
+ * What the history folder lacks or holds differently from what its records say: `{ md, index }`.
+ * A `.md` is compared without being read unless it has the size it should have, and the index is
+ * read once; both count against what a command may read. What cannot be told for lack of that
+ * budget is left for the next command.
+ */
 function pendingRepairs() {
   const md = [];
   for (const key of harnessKeys()) {
     for (const { file, record } of listRecords(key)) {
       const mdFile = file.replace(/\.json$/, '.md');
-      const have = readTextCapped(mdFile, limits().recordBytes);
       // A record that says its language gets its `.md` back whenever it differs; an older one
       // only when it is missing, in the language of its run when that can still be told.
-      if (have.reason === 'missing') md.push({ file: mdFile, text: recordMarkdown(record, record.language || languageOfRun(record.runId) || 'en') });
-      else if (record.language && have.text !== recordMarkdown(record, record.language)) md.push({ file: mdFile, text: recordMarkdown(record, record.language) });
+      const text = recordMarkdown(record, record.language || languageOfRun(record.runId) || 'en');
+      const have = holdsText(mdFile, text);
+      if (have === 'missing' || (have === 'differs' && record.language)) md.push({ file: mdFile, text });
     }
   }
-  const index = expectedIndex();
-  const current = readTextCapped(historyIndexPath(), limits().indexBytes);
-  return { md, index: index === null || current.text === index ? null : index };
+  const current = readIndexText();
+  const index = expectedIndex(new Map(), current.text);
+  // An index that could not be read for lack of budget is not known to differ.
+  return { md, index: index === null || current.reason === 'over-total-budget' || current.text === index ? null : index };
 }
 
 /**
@@ -302,7 +312,7 @@ function commit({ run, records }) {
     // The index is made from the records, every time: another run may have written since this
     // process last looked at a harness.
     for (const key of harnessKeys()) if (!hints.has(key)) recheckRecords(key);
-    const index = expectedIndex(hints);
+    const index = expectedIndex(hints, readIndexText().text);
     if (index !== null) put(historyIndexPath(), index);
     crashForTests('index');
     return out;

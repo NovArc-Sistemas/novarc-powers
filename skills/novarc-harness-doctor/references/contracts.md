@@ -173,7 +173,13 @@ under `sync/recovery/` before the first byte lets the next run that may write (`
 so the session-start check, `apply`, `undo`, `install-check`, `uninstall-check`) finish the
 switch or clear the temporary files, and it says what it did: `recovered: [{ file, outcome }]`,
 with `outcome` one of `completed`, `rolled-back`, `abandoned`, `waiting`, `removed`,
-`pending`. Read-only commands only report `pending`. A file with a hardlink the tool has no
+`pending`, `conflict`. Read-only commands only report `pending`. Right before each rename the
+file, and each other name, is looked at once more: one that changed since the write was
+prepared is left exactly as it is and reported (`left`), and when the file itself changed
+nothing is written. A path counts as the same place only while its folder is the same real
+folder: recovery, undo and the unattended repair do nothing in a folder that was moved,
+replaced or redirected since it was recorded (`conflict`, `foreign`, or a "needs attention"
+line asking for a new plan and apply). A file with a hardlink the tool has no
 record of is not written at all: the command reports it with the count (`unknownNames`), and
 the user removes that name or turns it into a symlink.
 
@@ -195,7 +201,10 @@ TOML, YAML, `KEY=value` lines and command flags, whatever its length, descendant
 then by known token shapes. Under such a key a value stays readable only when ALL of it is a
 reference (`${VAR}`, `$VAR` in upper case, `$(command)`, `%VAR%`, `<placeholder>`, code that
 reads the environment); a reference with any literal around it, and a number, are masked. When
-in doubt it masks: a lower-case `$token` in a script shows masked too. A masked value keeps its first four characters and its length
+in doubt it masks: a lower-case `$token` in a script shows masked too. A key is judged as it
+reads, not as it is spelled (`"pass\u0077ord"` is `password`), and an expression is exempt only
+when it can be shown to carry no literal of its own (`$(op read ...)` yes, `$(echo text)` no;
+`process.env.X` yes, `process.env.X || "text"` no). A masked value keeps its first four characters and its length
 (`abcd…29`), or only the length when it is short (`…7`). Caps: 256 KB per file, 3 MB per
 harness; over budget, lower-priority files keep their metadata and get `"omitted": "budget"`.
 Priority: instruction files and their imports, settings, hook registrations and the scripts they

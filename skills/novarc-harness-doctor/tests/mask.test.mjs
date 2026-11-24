@@ -74,7 +74,7 @@ test('JSON: every string under a secret key is hidden, whatever its length, dept
 
 test('JSON: the four shapes the line patterns missed, with no format hint', () => {
   assert.equal(masked(JSON.stringify({ credentials: { value: LONG } })), '{"credentials":{"value":"Wm4n…21"}}');
-  assert.equal(masked(JSON.stringify({ password: `ab"${LONG}` })), '{"password":"…25"}');
+  assert.equal(masked(JSON.stringify({ password: `ab"${LONG}` })), '{"password":"ab…25"}');
   assert.equal(masked(JSON.stringify({ password: PW7 })), '{"password":"…7"}');
   assert.equal(masked(`api_key = """\n${LONG}\n"""`), 'api_key = """\n…21\n"""');
   assert.equal(masked(`api_key = '''\n${LONG}\n'''`), "api_key = '''\n…21\n'''");
@@ -322,20 +322,21 @@ test('a value that is a reference from end to end stays readable', () => {
 });
 
 test('a reference with a literal around it is masked whole', () => {
-  // [the value, what is left of it]. Values of 16 characters and more keep their first four.
+  // [the value, what is left of it]. Values of 16 characters and more keep their first four, up
+  // to the first bracket, quote, `$`, backslash or space: none of those is ever shown.
   const cases = [
-    ['${EXAMPLE}' + LIT, '${EX…30'],
-    ['$ABC ' + LIT, '$ABC…25'],
+    ['${EXAMPLE}' + LIT, '…30'],
+    ['$ABC ' + LIT, '…25'],
     [LIT + '${SUFFIX}', 'real…29'],
-    ['${DB_PASSWORD:-' + LIT + '}', '${DB…36'],
-    ['${A:-${B:-' + PW7 + '}}', '${A:…19'],
-    ['${server.password:' + PW7 + '}', '${se…26'],
-    ['${not-a-reference}' + PW7, '${no…25'],
+    ['${DB_PASSWORD:-' + LIT + '}', '…36'],
+    ['${A:-${B:-' + PW7 + '}}', '…19'],
+    ['${server.password:' + PW7 + '}', '…26'],
+    ['${not-a-reference}' + PW7, '…25'],
     ['$' + 'ecret123', '…9'],
     ['$' + 'ecret123!', '…10'],
     ['$TOKEN/' + PW7, '…14'],
     ['$TOKEN ' + PW7, '…14'],
-    ['$(echo x)' + PW7, '$(ec…16'],
+    ['$(echo x)' + PW7, '…16'],
     ['%VAR%' + PW7, '…12'],
     ['<token>' + PW7, '…14'],
     ['{{ x }}' + PW7, '…14'],
@@ -348,8 +349,8 @@ test('a reference with a literal around it is masked whole', () => {
     assert.equal(masked(JSON.stringify({ secrets: { any: [value] } }), 'json'), `{"secrets":{"any":["${left}"]}}`, value);
   }
   // Unquoted, where a value can be written without quotes.
-  assert.equal(masked(`password: $ABC ${LIT}\ntoken: \${TOKEN}${PW7}\napi_key: $lower_case`, 'yaml'), 'password: $ABC…25\ntoken: …15\napi_key: …11');
-  assert.equal(masked(`export DB_PASSWORD=\${PREFIX}${PW7}\nTOKEN=$token\nAPI_KEY=$(cat key)${PW7}`, 'shell'), 'export DB_PASSWORD=${PR…16\nTOKEN=…6\nAPI_KEY=$(ca…17');
+  assert.equal(masked(`password: $ABC ${LIT}\ntoken: \${TOKEN}${PW7}\napi_key: $lower_case`, 'yaml'), 'password: …25\ntoken: …15\napi_key: …11');
+  assert.equal(masked(`export DB_PASSWORD=\${PREFIX}${PW7}\nTOKEN=$token\nAPI_KEY=$(cat key)${PW7}`, 'shell'), 'export DB_PASSWORD=…16\nTOKEN=…6\nAPI_KEY=…17');
 });
 
 test('a number under a secret name is a credential; true, false and null are not', () => {
@@ -446,7 +447,7 @@ test('what the masker wrote is left alone, in every format and in none', () => {
   for (const lang of ['json', 'yaml', 'javascript', 'markdown', null]) assert.equal(maskText(src, lang ? { lang } : undefined), src, String(lang));
   // A line the masker wrote, read again as the file it came from and as a text of no known format.
   const lines = [
-    ['password = …8', 'toml'], ['PASSWORD="$PREFIX"…7', 'shell'], ["API_KEY=\"${A}\"'…7'", 'shell'], ['export DB_PASSWORD=${PR…16', 'shell'],
+    ['password = …8', 'toml'], ['PASSWORD="$PREFIX"…7', 'shell'], ["API_KEY=\"${A}\"'…7'", 'shell'], ['export DB_PASSWORD=…16', 'shell'],
     ['password: &pw …7', 'yaml'], ['token: prefix + "…7" + suffix', 'javascript'], ['apiKey: `key-…17`,', 'javascript'],
   ];
   for (const [line, lang] of lines) for (const hint of [lang, null]) assert.equal(maskText(line, hint ? { lang: hint } : undefined), line, `${line} (${hint})`);

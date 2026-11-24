@@ -172,47 +172,68 @@ test('recovery never touches a name that changed since the death', (t) => {
   assert.deepEqual(strays(v.root), []);
 });
 
-test('recovery acts only on temp files of the tool, whatever a record says', (t) => {
+test('recovery acts only on temp files of the tool, in a folder the record proves, whatever a record says', (t) => {
   const root = tmpDir('hd-crash-');
   t.after(() => rmrf(root));
   const home = path.join(root, 'home');
   const dir = recoveryDir(home);
-  const precious = ['a.txt', 'b.txt', 'c.txt', path.join('tree', 'kept.md')].map((n) => path.join(root, 'user', n));
+  const user = path.join(root, 'user');
+  const precious = ['a.txt', 'b.txt', path.join('tree', 'kept.md')].map((n) => path.join(user, n));
   for (const p of precious) write(p, `precious ${path.basename(p)}\n`);
-  const target = path.join(root, 'user', 'target.txt');
-  const victim = path.join(root, 'user', 'victim.txt');
+  /** What a genuine record says about where a path is: its real folder and that folder's identity. */
+  const place = (p) => { const s = fs.statSync(path.dirname(p), { bigint: true }); return { parent: path.dirname(p), parentId: `${s.dev}:${s.ino}` }; };
+  const target = path.join(user, 'target.txt');
+  const victim = path.join(user, 'victim.txt');
   write(target, NEW);
   write(victim, 'something else entirely\n');
-  // Two real leftovers: a temp file, and a temp folder that holds a file and a link to the user's folder.
-  const realTemp = path.join(root, 'user', 'tree', 'copy.md.nhd-4242-0a1b2c3d.tmp');
+  // Real leftovers: a temp file, and a temp folder that holds a file and a link into the user's tree.
+  const realTemp = path.join(user, 'tree', 'copy.md.nhd-4242-0a1b2c3d.tmp');
   write(realTemp, 'half a copy');
-  const realTempDir = path.join(root, 'user', 'styles.nhd-4242-0a1b2c3e.tmp');
+  const realTempDir = path.join(user, 'styles.nhd-4242-0a1b2c3e.tmp');
   write(path.join(realTempDir, 'inner', 'half.md'), 'half a folder');
-  fs.symlinkSync(path.join(root, 'user', 'tree'), path.join(realTempDir, 'into-the-users-tree'), 'junction');
+  fs.symlinkSync(path.join(user, 'tree'), path.join(realTempDir, 'into-the-users-tree'), 'junction');
+  const victimTemp = `${victim}.nhd-4242-0a1b2c40.tmp`;
+  write(victimTemp, 'a link the dead run never finished');
+  // Files that merely have a temp name, in folders no record proves.
+  const lookalikes = ['one.md.nhd-4242-0a1b2c3f.tmp', 'two.md.nhd-4242-0a1b2c41.tmp', 'far.txt.nhd-4242-0a1b2c42.tmp'].map((n) => path.join(user, 'elsewhere', n));
+  for (const p of lookalikes) write(p, 'named like a temp, not one\n');
   const record = (name, body) => write(path.join(dir, name), JSON.stringify({ version: 1, tool: 'novarc-harness-doctor', pid: 4242, startedAt: '2026-01-01T00:00:00.000Z', state: 'writing', ...body }));
-  // Not temp names (a file, a folder of the user's), a relative path, and the two real leftovers.
-  record('1.json', { cleanup: [precious[0], path.join(root, 'user', 'tree'), 'relative.nhd-1-0a1b2c3d.tmp', realTemp, realTempDir] });
-  // A write whose temp files are named after the user's files, and whose other name holds other bytes.
-  record('2.json', { target, tmp: precious[1], before: sha256(OLD), after: sha256(NEW), peers: [{ path: victim, tmp: precious[2] }, { path: 'relative', tmp: precious[2] }] });
-  record('3.json', { target: 'relative.txt', tmp: 7, before: null, after: 12, peers: 'nonsense' });
-  write(path.join(dir, '4.json'), '{ not json');
+  // 1. Things to "clean up": the user's file and folder, a bare path, a temp name with no proof
+  //    of its folder, one with the proof of another folder, and the two real leftovers.
+  record('1.json', { cleanup: [
+    { path: precious[0], ...place(precious[0]) }, { path: path.join(user, 'tree'), ...place(path.join(user, 'tree')) }, realTemp,
+    { path: lookalikes[0] }, { path: lookalikes[1], ...place(target) },
+    { path: realTemp, ...place(realTemp) }, { path: realTempDir, ...place(realTempDir) },
+  ] });
+  // 2. A write that "went through", whose other names are a file with other bytes, and a file
+  //    in a folder the record does not prove.
+  const far = path.join(user, 'elsewhere', 'far.txt');
+  write(far, OLD);
+  record('2.json', { target, tmp: `${target}.nhd-4242-0a1b2c43.tmp`, before: sha256(OLD), after: sha256(NEW), id: null, ...place(target), peers: [
+    { path: victim, tmp: victimTemp, ...place(victim) }, { path: far, tmp: lookalikes[2], ...place(target) }, { path: 'relative', tmp: precious[1] },
+  ] });
+  // 3. A write whose "temp file" is the user's file. 4. Nonsense. 5. Not JSON.
+  record('3.json', { target, tmp: precious[1], before: sha256(OLD), after: sha256(NEW), ...place(target), peers: [] });
+  record('4.json', { target: 'relative.txt', tmp: 7, before: null, after: 12, peers: 'nonsense' });
+  write(path.join(dir, '5.json'), '{ not json');
   write(path.join(dir, 'notes.txt'), 'not a record: not this tool\'s to remove\n');
 
   const shown = (p) => p.replace(/\\/g, '/');
-  const before = snapshot(path.join(root, 'user'));
-  assert.equal(recoverWrites({ home, repair: false }).length, 3, 'three of the four records leave something to report');
-  assert.deepEqual(snapshot(path.join(root, 'user')), before, 'a read-only look changed something');
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['1.json', '2.json', '3.json', '4.json', 'notes.txt']);
+  const before = snapshot(user);
+  assert.equal(recoverWrites({ home, repair: false }).length, 4, 'four of the five records leave something to report');
+  assert.deepEqual(snapshot(user), before, 'a read-only look changed something');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['1.json', '2.json', '3.json', '4.json', '5.json', 'notes.txt']);
 
   assert.deepEqual(recoverWrites({ home }), [
-    { file: shown(realTemp), outcome: 'removed', leftovers: 2 },
-    { file: shown(target), outcome: 'completed', left: 1 },
-    { file: '~/.novarc-powers/novarc-harness-doctor/sync/recovery/4.json', outcome: 'removed', note: 'a record that cannot be read' },
+    { file: shown(lookalikes[0]), outcome: 'conflict', note: 'its folder is not the one the write was made in (moved, replaced or redirected since)', leftovers: 2 },
+    { file: shown(target), outcome: 'completed', left: 1, foreign: 1 },
+    { file: '~/.novarc-powers/novarc-harness-doctor/sync/recovery/3.json', outcome: 'removed', note: 'a record that cannot be used' },
+    { file: '~/.novarc-powers/novarc-harness-doctor/sync/recovery/5.json', outcome: 'removed', note: 'a record that cannot be read' },
   ]);
   for (const p of precious) assert.equal(read(p), `precious ${path.basename(p)}\n`, `${path.basename(p)} was touched`);
-  assert.deepEqual([read(target), read(victim)], [NEW, 'something else entirely\n']);
-  assert.ok(!exists(realTemp) && !exists(realTempDir), 'a real leftover was not removed');
-  assert.equal(read(precious[3]), 'precious kept.md\n', 'a link inside a temp folder was followed');
+  for (const p of lookalikes) assert.equal(read(p), 'named like a temp, not one\n', 'a file was removed for its name alone');
+  assert.deepEqual([read(target), read(victim), read(far), fs.statSync(far).nlink], [NEW, 'something else entirely\n', OLD, 1]);
+  assert.ok(!exists(realTemp) && !exists(realTempDir) && !exists(victimTemp), 'a real leftover was not removed');
   assert.deepEqual(fs.readdirSync(dir), ['notes.txt'], 'the records were not cleared, or a foreign file was');
 });
 

@@ -52,9 +52,10 @@ export function setOwn(obj, key, value) {
 }
 
 /**
- * The text of a file of at most `maxBytes`, read through one handle: `{ text }`, or `{ reason }`
- * with `missing`, `not-a-file`, `too-large` or `unreadable`. Nothing larger than the cap is ever
- * read into memory, whatever the file became between a listing and the read.
+ * The text of a file of at most `maxBytes`, read through one handle: `{ text, bytes }`, or
+ * `{ reason }` with `missing`, `not-a-file`, `too-large` (with the `size` of the file) or
+ * `unreadable`. Nothing larger than the cap is ever read into memory, whatever the file became
+ * between a listing and the read: a file over the cap is opened and measured, and not read.
  */
 export function readTextCapped(file, maxBytes) {
   let fd;
@@ -62,7 +63,7 @@ export function readTextCapped(file, maxBytes) {
   try {
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return { reason: 'not-a-file' };
-    if (st.size > maxBytes) return { reason: 'too-large' };
+    if (st.size > maxBytes) return { reason: 'too-large', size: st.size };
     const buf = Buffer.alloc(st.size);
     let got = 0;
     while (got < buf.length) {

@@ -193,7 +193,7 @@ test('limits: the newest records are read, up to a number and a size; the rest i
   assert.deepEqual([runs(tiny), tiny.json.ignored.map((x) => x.reason)], [[], ['too-large', 'too-large']]);
   // The seam only ever lowers a limit.
   assert.deepEqual(runs(limited({ recordsPerHarness: 100000, recordBytes: 1e12 })), [first.runId, second]);
-  // None of this wrote anything: the index still lists both.
+  // The index is made from what is read: with the limits back, it lists both again.
   assert.deepEqual(rec.history.index().harnesses[first.key].reviews.map((r) => r.runId), [first.runId, second]);
 
   // In process: the same cap on what one command reads.
@@ -203,6 +203,161 @@ test('limits: the newest records are read, up to a number and a size; the rest i
   forgetRecords();
   assert.deepEqual(listRecords(first.key).map((e) => e.record.runId), [first.runId, second]);
   assert.deepEqual(listRecords('../../etc'), [], 'a key that is not a harness key names no folder');
+});
+
+/**
+ * Run `history --json` under lowered limits with the read log on. Returns the answer and what
+ * was opened of the history folder, in order: `[file, bytes read]`, `file` relative to it.
+ */
+function watched(sb, limits, args = []) {
+  const log = path.join(sb.home, 'history-reads.jsonl');
+  fs.rmSync(log, { force: true });
+  const r = sb.run(['history', '--json', ...args], { ...clock('2026-03-01T00:00:00.000Z'), NOVARC_HD_TEST_HISTORY_LIMITS: JSON.stringify(limits), NOVARC_HD_TEST_HISTORY_READS: log });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const opened = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).map((x) => [x.file, x.bytes]) : [];
+  return { json: r.json, opened, bytes: opened.reduce((sum, [, n]) => sum + n, 0) };
+}
+
+test('the limits are on bytes read, whatever they turn out to be: damaged files spend the budget, and the rest is not opened', (t) => {
+  const sb = one(t);
+  const history = historyOf(sb);
+  // Ten files of 1000 bytes that are not JSON, in the folder of a harness.
+  const key = 'sample-12345678';
+  const dir = path.join(history.dir, key);
+  fs.mkdirSync(dir, { recursive: true });
+  const names = Array.from({ length: 10 }, (_, i) => `20260101-a${i}.json`);
+  for (const name of names) fs.writeFileSync(path.join(dir, name), '!'.repeat(1000));
+  const reasons = (r) => Object.fromEntries(r.json.ignored.map((x) => [x.file, x.reason]));
+  const all = (list, reason) => Object.fromEntries(list.map((n) => [n, reason]));
+
+  // A record may have 1500 bytes; a harness and a command may read 2000. Two files are read,
+  // newest first, and the budget is spent: the other eight are not opened.
+  const two = watched(sb, { recordBytes: 1500, harnessBytes: 2000, totalBytes: 2000 });
+  assert.deepEqual(two.opened, [[`${key}/20260101-a9.json`, 1000], [`${key}/20260101-a8.json`, 1000]]);
+  assert.equal(two.bytes, 2000, 'what was read is the budget, not the folder');
+  assert.deepEqual(reasons(two), { ...all(names.slice(0, 8), 'over-budget'), ...all(names.slice(8), 'not-json') });
+  assert.deepEqual(two.json.harnesses, []);
+  assert.ok(two.json.ignored.every((x) => x.harness === key));
+  assert.ok(!fs.existsSync(path.join(history.dir, 'index.json')), 'and nothing is written from a part of the folder nobody could read');
+
+  // The budget of the command is the smaller one: the third file is measured, found too big for
+  // what is left, and not read; from there on nothing is opened.
+  const command = watched(sb, { recordBytes: 1500, harnessBytes: 5000, totalBytes: 2500 });
+  assert.deepEqual(command.opened, [[`${key}/20260101-a9.json`, 1000], [`${key}/20260101-a8.json`, 1000], [`${key}/20260101-a7.json`, 0]]);
+  assert.deepEqual(reasons(command), { ...all(names.slice(0, 8), 'over-total-budget'), ...all(names.slice(8), 'not-json') });
+  // A budget that ends exactly at the end of a file: the next one is not opened to find out.
+  const exact = watched(sb, { recordBytes: 1500, harnessBytes: 3000, totalBytes: 1000000 });
+  assert.deepEqual([exact.opened, Object.values(reasons(exact)).filter((x) => x === 'over-budget').length], [[[`${key}/20260101-a9.json`, 1000], [`${key}/20260101-a8.json`, 1000], [`${key}/20260101-a7.json`, 1000]], 7]);
+  // (This command could read the whole folder as far as its limits go, found no record in it,
+  // and left the index that says so.)
+  assert.deepEqual(history.index(), { schema: 1, harnesses: {} });
+  const ofHarness = (r) => r.opened.filter(([file]) => file.startsWith(`${key}/`));
+
+  // Where the limit is a number of files, it counts files, good or bad: the newest two by name.
+  const counted = watched(sb, { recordsPerHarness: 2 });
+  assert.deepEqual(ofHarness(counted).map(([file]) => file), [`${key}/20260101-a9.json`, `${key}/20260101-a8.json`]);
+  assert.deepEqual(counted.json.ignored, [
+    { harness: key, file: null, count: 8, reason: 'too-many' },
+    { harness: key, file: '20260101-a8.json', reason: 'not-json' }, { harness: key, file: '20260101-a9.json', reason: 'not-json' },
+  ]);
+  // A file over the size a record may have is measured, never read, and does not end the reading.
+  fs.writeFileSync(path.join(dir, '20260102-big0.json'), '!'.repeat(5000));
+  const big = watched(sb, { recordBytes: 1500, harnessBytes: 2000, totalBytes: 2000 });
+  assert.deepEqual(big.opened, [[`${key}/20260102-big0.json`, 0], [`${key}/20260101-a9.json`, 1000], [`${key}/20260101-a8.json`, 1000]]);
+  assert.equal(reasons(big)['20260102-big0.json'], 'too-large');
+  // Without lowered limits every file is read, once.
+  fs.rmSync(path.join(dir, '20260102-big0.json'));
+  const free = watched(sb, {});
+  assert.deepEqual([ofHarness(free).length, ofHarness(free).reduce((sum, [, n]) => sum + n, 0), reasons(free)], [10, 10000, all(names, 'not-json')]);
+});
+
+test('every way a file fails to be a record costs its bytes: the good record behind four bad ones is left unread when they spend the budget', (t) => {
+  const sb = one(t);
+  const first = firstReview(sb);
+  const rec = recordOf(sb, first);
+  const good = `${first.runId}.json`;
+  // Four files with newer names: not JSON, JSON that is no record, the record of another harness, a record under a name that is not its own.
+  const other = JSON.parse(rec.text);
+  other.runId = '20270103-bad3';
+  other.harnessKey = 'someone-else-00000000';
+  const bad = {
+    '20270101-bad1.json': '!'.repeat(3000),
+    '20270102-bad2.json': JSON.stringify({ harnessKey: first.key, pad: 'x'.repeat(3000) }),
+    '20270103-bad3.json': JSON.stringify(other),
+    '20270104-bad4.json': rec.text,
+  };
+  for (const [name, text] of Object.entries(bad)) fs.writeFileSync(path.join(rec.dir, name), text);
+  const sizeOf = (name) => fs.statSync(path.join(rec.dir, name)).size;
+  const badBytes = Object.keys(bad).reduce((sum, name) => sum + sizeOf(name), 0);
+  const rel = (name) => `${first.key}/${name}`;
+  const records = (r) => r.opened.filter(([file]) => file.endsWith('.json') && file !== 'index.json');
+  const why = { '20270101-bad1.json': 'not-json', '20270102-bad2.json': 'invalid', '20270103-bad3.json': 'other-harness', '20270104-bad4.json': 'misnamed' };
+  const reasons = (r) => Object.fromEntries(r.json.ignored.map((x) => [x.file, x.reason]));
+
+  // A harness budget of exactly the four bad files: each is read whole and answered for what it
+  // is, and the real record, older than all of them, is not opened.
+  const spent = watched(sb, { harnessBytes: badBytes });
+  assert.deepEqual(records(spent), Object.keys(bad).reverse().map((name) => [rel(name), sizeOf(name)]), 'newest first, each one read whole');
+  assert.deepEqual(reasons(spent), { ...why, [good]: 'over-budget' });
+  assert.deepEqual(spent.json.harnesses, [], 'so the review is not listed: the limit is on what is read, not on what is good');
+  // One byte less: the oldest bad file no longer fits. It is measured, not read, and ends the reading.
+  const short = watched(sb, { harnessBytes: badBytes - 1 });
+  assert.deepEqual(records(short), [...Object.keys(bad).reverse().slice(0, 3).map((name) => [rel(name), sizeOf(name)]), [rel('20270101-bad1.json'), 0]]);
+  assert.deepEqual(reasons(short), { ...why, '20270101-bad1.json': 'over-budget', [good]: 'over-budget' });
+  // The same through the budget of the command.
+  const command = watched(sb, { totalBytes: badBytes });
+  assert.deepEqual(reasons(command), { ...why, [good]: 'over-total-budget' });
+  assert.ok(command.bytes <= badBytes, `read ${command.bytes} of ${badBytes}`);
+  // With room for all five, the record is read and the review is there.
+  const room = watched(sb, { harnessBytes: badBytes + sizeOf(good) });
+  assert.deepEqual([reasons(room), room.json.harnesses.map((h) => h.reviews.map((x) => x.runId))], [why, [[first.runId]]]);
+});
+
+test('the .md beside a record and index.json are compared without being read whole, and what is read of them counts', (t) => {
+  const sb = one(t);
+  const first = firstReview(sb);
+  const rec = recordOf(sb, first);
+  const mdName = `${first.key}/${first.runId}.md`;
+  const mdFile = path.join(rec.dir, `${first.runId}.md`);
+  const indexFile = path.join(rec.history.dir, 'index.json');
+  const good = { md: fs.readFileSync(mdFile, 'utf8'), index: fs.readFileSync(indexFile, 'utf8') };
+  const recordBytes = fs.statSync(rec.file).size;
+  const of = (r, file) => r.opened.filter(([name]) => name === file).map(([, bytes]) => bytes);
+
+  // Nothing to put right: the record, its .md and the index are each read once, and no more than they hold.
+  const calm = watched(sb, {});
+  assert.deepEqual(calm.opened, [[`${first.key}/${first.runId}.json`, recordBytes], [mdName, Buffer.byteLength(good.md)], ['index.json', Buffer.byteLength(good.index)]]);
+  assert.ok(!('healed' in calm.json));
+
+  // A .md of another size is not the .md of this record: it is replaced without one byte of it being read.
+  fs.writeFileSync(mdFile, 'x'.repeat(3 * 1024 * 1024));
+  const huge = watched(sb, {});
+  assert.deepEqual([huge.json.healed, of(huge, mdName)], [{ index: false, md: 1 }, []], 'never opened');
+  assert.equal(fs.readFileSync(mdFile, 'utf8'), good.md);
+  // One of the same size is read, up to that size and no further.
+  fs.writeFileSync(mdFile, good.md.replace(/[a-z]/g, 'x'));
+  const same = watched(sb, {});
+  assert.deepEqual(same.json.healed, { index: false, md: 1 });
+  assert.ok(of(same, mdName).length > 0 && of(same, mdName).every((n) => n === Buffer.byteLength(good.md)), JSON.stringify(same.opened));
+  assert.equal(fs.readFileSync(mdFile, 'utf8'), good.md);
+
+  // An index over the size an index may have is measured and replaced, not read.
+  fs.writeFileSync(indexFile, 'x'.repeat(5 * 1024 * 1024));
+  const bigIndex = watched(sb, {});
+  assert.deepEqual([bigIndex.json.healed, new Set(of(bigIndex, 'index.json'))], [{ index: true, md: 0 }, new Set([0])]);
+  assert.equal(fs.readFileSync(indexFile, 'utf8'), good.index);
+
+  // What a command may read covers these too: with the budget spent on the record, a .md and an
+  // index that cannot be compared are left as they are, for the next command.
+  fs.writeFileSync(mdFile, good.md.replace(/[a-z]/g, 'x'));
+  fs.writeFileSync(indexFile, good.index.replace(/[a-z]/g, 'x'));
+  const broke = watched(sb, { totalBytes: recordBytes + 10 });
+  assert.deepEqual(broke.opened, [[`${first.key}/${first.runId}.json`, recordBytes], ['index.json', 0]], 'the .md is not opened; the index is measured and does not fit');
+  assert.ok(!('healed' in broke.json) && broke.bytes <= recordBytes + 10);
+  assert.deepEqual(broke.json.harnesses.map((h) => h.key), [first.key], 'the answer does not depend on them');
+  const next = watched(sb, {});
+  assert.deepEqual(next.json.healed, { index: true, md: 1 });
+  assert.deepEqual([fs.readFileSync(mdFile, 'utf8'), fs.readFileSync(indexFile, 'utf8')], [good.md, good.index]);
 });
 
 test('a record over the size that is read back loses the text of its changes, the unapplied ones first; one that still does not fit is not written', (t) => {

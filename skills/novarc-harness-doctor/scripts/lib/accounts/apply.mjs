@@ -20,7 +20,7 @@ import {
   scrub, lstatSafe, isDir, readBuf, readText, parseJson, sha256, hashFile, canon, mkdirp, isInside,
   writeKeepingLinks, writeAtomic, linkStatus, linkOrCopy, linkRecord, removeLink, generateInstructions,
   readServers, rewriteCodexServers, reconcileServers, readManifest, writeManifest, manifestText,
-  destIdentity, destinationProblem, manifestPaths, testFault,
+  destIdentity, destinationProblem, manifestPaths, testFault, placeOf, placeHolds, pathKey, folderIdentity,
 } from '../../sync-check.mjs';
 import { detectAccounts } from './detect.mjs';
 import { manifestIsFor, liveSignature, serverSignature, instructionSignature } from './diff.mjs';
@@ -104,6 +104,9 @@ export class Run {
    * entry, nobody takes its word for it: undo and the next apply look at the disk.
    */
   intend(o) {
+    // Where the step works: the real folder and its identity. Undo acts there only while the
+    // path still leads to that very folder (see undoOp).
+    if (o.path || o.from) o.where = placeOf(o.path || o.from);
     this.journal.ops.push(o);
     this.save(true);
     testFault(`${o.op}-intended`);
@@ -155,6 +158,7 @@ export class Run {
   write(file, data) {
     const r = writeKeepingLinks(file, data, { home: this.home, peers: this.peersOf(file) });
     if (r.pending.length) this.notes.push(pendingNote(file, r, this.home));
+    if (r.left) this.notes.push(leftNote(file, r, this.home));
     return r;
   }
 
@@ -170,6 +174,12 @@ export class Run {
 export function pendingNote(file, r, home) {
   const n = r.pending.length;
   return `${displayPath(file, home)} was written, but ${n} other name${n === 1 ? '' : 's'} of the file could not be switched over to it yet (${scrub(String(r.why), home)}): the next sync check, or the next command that writes, finishes that`;
+}
+
+/** What to tell the user when another name of a written file was changed by something else meanwhile. */
+export function leftNote(file, r, home) {
+  const n = r.left.length;
+  return `${displayPath(file, home)} was written, but ${n} other name${n === 1 ? '' : 's'} of the file had been changed by something else in the meantime and ${n === 1 ? 'was left as it is' : 'were left as they are'}: ${r.left.map((x) => `${displayPath(x.path, home)} (${x.note})`).join(', ')}`;
 }
 
 /**
@@ -192,7 +202,9 @@ function accountRecord(manifest, settings) {
   const key = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
   let rec = manifest.accounts.find((x) => x.pathAbs && key(x.pathAbs) === key(a.pathAbs));
   if (!rec) { rec = { id: a.id, provider: a.provider, pathAbs: a.pathAbs, mode: settings.mode, elements: [], exceptions: [] }; manifest.accounts.push(rec); }
-  Object.assign(rec, { id: a.id, provider: a.provider, pathAbs: a.pathAbs, mode: settings.mode });
+  // `dir`: where the account folder really is, with this plan approved. The unattended check
+  // repairs nothing in an account whose name leads to another folder (see accountMoved).
+  Object.assign(rec, { id: a.id, provider: a.provider, pathAbs: a.pathAbs, mode: settings.mode, dir: folderIdentity(a.pathAbs) });
   for (const k of ['imports', 'skills', 'mcp']) { if (settings[k]) rec[k] = settings[k]; else delete rec[k]; }
   // Where the account's MCP file is, with this plan approved. The unattended check writes that
   // file only while it is still a plain file there (see destinationProblem).
@@ -504,7 +516,10 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
       if (step.kind === 'except') { except(rec, step.name); continue; }
       if (step.kind === 'record') {
         const e = step.e;
-        if (!rec.elements.some((x) => x.name === step.name)) upsert(rec, linkRecord(step.name, e.linkKind === 'hardlink' ? 'hardlink' : 'symlink', e.S, e.P, !!e.dir));
+        const known = rec.elements.find((x) => x.name === step.name);
+        if (!known) upsert(rec, linkRecord(step.name, e.linkKind === 'hardlink' ? 'hardlink' : 'symlink', e.S, e.P, !!e.dir));
+        // The link is there and resolves to the primary: this, with the plan approved, is where it is.
+        else if (known.kind !== 'generated' && known.kind !== 'managed-block') known.place = placeOf(e.S);
         continue;
       }
       let r;
@@ -520,7 +535,8 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
     } catch (err) {
       failed++;
       // `decide`: the file has names (hardlinks) nobody recorded; only the user can say what they are.
-      const why = err && err.stale ? { stale: true } : err && err.code === 'EUNKNOWNNAMES' ? { decide: true, unknownNames: err.unknownNames } : {};
+      // `stale` also when the file was changed by something else while its write was being prepared.
+      const why = err && (err.stale || err.code === 'ECHANGED') ? { stale: true } : err && err.code === 'EUNKNOWNNAMES' ? { decide: true, unknownNames: err.unknownNames } : {};
       done.push({ ...entry, result: 'failed', ...why, error: scrub(String(err && err.message ? err.message : err), home) });
     }
   }
@@ -623,7 +639,22 @@ function undoOp(op, dryRun, seen, { home = homeDir(), peers, finished = false, i
   const put = (file, data) => {
     const r = writeKeepingLinks(file, data, { home, peers: peers ? peers(file) : undefined });
     if (r.pending.length) (seen.notes ||= []).push(pendingNote(file, r, home));
+    if (r.left) (seen.notes ||= []).push(leftNote(file, r, home));
   };
+  // The journal names a path; what counts is the place. The entry recorded the real folder of
+  // that path and its identity (`where`). When the path now leads to another folder (it was
+  // moved away and a link or a new folder took its name), whatever sits there under the same
+  // name is not this run's, equal bytes or not: nothing is read, removed or restored there.
+  // `gone`: the same real folder, which no longer exists (nothing of the run can be in it).
+  const at = op.path || op.from;
+  let folder = 'same';
+  if (op.where && typeof op.where.parent === 'string' && at) {
+    const now = placeOf(at);
+    if (!now.parent || pathKey(now.parent) !== pathKey(op.where.parent)) folder = 'other';
+    else if (!lstatSafe(now.parent)) folder = 'gone';
+    else if (!placeHolds(op.where, at)) folder = 'other';
+  }
+  if (folder === 'other') return { ok: false, reason: 'its folder is not the one this run worked in (moved, replaced or redirected since); left as it is' };
   const key = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
   const present = (p) => !!lstatSafe(p) && !(dryRun && seen.gone.has(key(p)));
   const now = (p) => (dryRun && seen.back.get(key(p))) || p; // where a moved-back original sits
@@ -644,6 +675,7 @@ function undoOp(op, dryRun, seen, { home = homeDir(), peers, finished = false, i
     const kept = !!lstatSafe(op.to);
     if (!present(op.from)) {
       if (!kept) return conflict('the backup is missing');
+      if (folder === 'gone') return conflict('its folder is gone; the original stays in the backup');
       if (dryRun) { seen.gone.delete(key(op.from)); seen.back.set(key(op.from), op.to); return { ok: true }; }
       return act(() => { if (intend) intend(op); movePath(op.to, op.from, { home }); });
     }

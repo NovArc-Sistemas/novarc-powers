@@ -16,7 +16,7 @@ import {
 import { scanText } from '../../secret-scan.mjs';
 import { detectAccounts } from './detect.mjs';
 import { primaryFromManifest } from './diff.mjs';
-import { Run, peerCandidates, pendingNote } from './apply.mjs';
+import { Run, peerCandidates, pendingNote, leftNote } from './apply.mjs';
 import { appendIn, removeIn, removeItem, makePatch, revertPatch } from './jsonedit.mjs';
 
 const RECORD_VERSION = 1;
@@ -159,17 +159,19 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
     throw err;
   }
   run.did(edit);
-  notes.push(...run.notes);
   const check = parseJson(readText(target.file));
   if (!check.ok || !findHooks(check.value, home).length) {
     run.write(target.file, buf);
     run.unop();
-    return { code: 1, out: { ok: false, ...base, file: shown, error: 'verification failed; the file was restored' } };
+    return { code: 1, out: { ok: false, ...base, file: shown, error: 'verification failed; the file was restored', ...(run.notes.length ? { notes: [...run.notes] } : {}) } };
   }
   run.journal.finishedAt = new Date().toISOString();
   run.save();
   writeAtomic(recordFile(home), JSON.stringify({ ...record, afterHash, patch }, null, 2) + '\n');
-  return { code: 0, out: { ok: true, installed: true, changed: true, ...base, file: shown, backup, stamp: run.stamp, notes } };
+  // What the writes themselves had to say goes out with the result, read after the last of
+  // them: another name of the file left alone because something else changed it meanwhile, or
+  // one that could not be switched over yet.
+  return { code: 0, out: { ok: true, installed: true, changed: true, ...base, file: shown, backup, stamp: run.stamp, notes: [...notes, ...run.notes] } };
 }
 
 export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env = process.env }) {
@@ -216,6 +218,7 @@ export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env =
       if (refusal) return refusal;
       const r = writeKeepingLinks(file, next, { home, peers });
       if (r.pending.length) out.notes = [pendingNote(file, r, home)];
+      if (r.left) (out.notes ||= []).push(leftNote(file, r, home));
       out.changed = true;
     }
   }

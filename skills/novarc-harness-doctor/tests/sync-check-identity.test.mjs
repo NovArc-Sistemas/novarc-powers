@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
-  buildHome, acc, check, rmrf, write, read, json, exists, isLink, planAndApply, tmpDir, atomicSave, CAN_SYMLINK,
+  buildHome, acc, check, rmrf, write, read, json, exists, isLink, planAndApply, tmpDir, atomicSave, dropLink, CAN_SYMLINK,
 } from './accounts-fixture.mjs';
 import { runCheck, summaryLine } from '../scripts/sync-check.mjs';
 
@@ -161,8 +161,13 @@ test('identity: a redirected folder above the file is never followed', (t) => {
   fs.symlinkSync(moved, c.codex, 'junction');
   write(c.src, NEW);
   const r = c.run();
-  assert.deepEqual([r.el('AGENTS.md').state, r.el('AGENTS.md').note, r.el('AGENTS.md').decide], ['drift', 'its folder now leads somewhere else; not rewritten', true]);
-  assert.equal(read(path.join(moved, 'AGENTS.md')), OLD);
+  // Nothing at all is repaired in an account whose name leads to another folder: one entry says so.
+  assert.deepEqual(r.report.accounts[0].elements, [{
+    name: '(account)', state: 'drift', decide: true, path: '~/.codex',
+    note: 'the account folder was moved, replaced or redirected since it was synced; nothing in it is repaired (plan and apply again)',
+  }]);
+  assert.equal(r.line, 'novarc-harness-doctor account sync: needs attention 1 (codex-1 (account): the account folder was moved, replaced or redirected since it was synced; nothing in it is repaired (plan and apply again)).');
+  assert.deepEqual([read(path.join(moved, 'AGENTS.md')), read(path.join(moved, 'docs', 'extra.md'))], [OLD, OLD]);
 
   // The same with a manifest that never recorded a place: it cannot be confirmed, so it is refused.
   const d = crafted(t);
@@ -171,9 +176,103 @@ test('identity: a redirected folder above the file is never followed', (t) => {
   fs.symlinkSync(moved2, d.codex, 'junction');
   write(d.src, NEW);
   const legacy = d.run();
-  assert.equal(legacy.el('AGENTS.md').note, 'its place was never recorded and cannot be confirmed (plan and apply again); not rewritten');
+  assert.equal(legacy.el('(account)').note, 'the account folder is a link, and where it led when it was synced was never recorded; nothing in it is repaired (plan and apply again)');
   assert.equal(read(path.join(moved2, 'AGENTS.md')), OLD);
   assert.equal(d.recorded('AGENTS.md').identity, undefined, 'an unconfirmed place was recorded');
+});
+
+test('identity: the check repairs no link behind a folder that now leads elsewhere, identical files or not', (t) => {
+  const HARD = { NOVARC_POWERS_NO_SYMLINK: '1' }; // files are hardlinks, as where symbolic links are refused
+  const h = buildHome({ codex: false, agents: false });
+  t.after(() => rmrf(h.root));
+  assert.equal(planAndApply(h, 'claude-1', ['--resolve', 'claude-2:CLAUDE.md=replace-with-primary'], HARD).apply.code, 0);
+  const manifest = () => json(path.join(h.sync, 'manifest.json')).accounts[0];
+  const real = fs.realpathSync.native(h.acc);
+  assert.equal(manifest().dir.real, real);
+  assert.match(manifest().dir.id, /^\d+:\d+$/);
+  assert.equal(manifest().elements.find((e) => e.name === 'docs/extra.md').place.parent, path.join(real, 'docs'));
+  const settings = read(path.join(h.claude, 'settings.json'));
+
+  // 1. A sub-folder of the account now leads to another folder: the link that was in it is not made there.
+  const docs = path.join(h.acc, 'docs');
+  const otherDocs = path.join(h.root, 'other-docs');
+  fs.renameSync(docs, `${docs}-moved`);
+  fs.mkdirSync(otherDocs);
+  fs.symlinkSync(otherDocs, docs, 'junction');
+  let report = acc(h.home, ['check', '--repair'], HARD).json;
+  assert.deepEqual(report.accounts[0].elements.filter((e) => e.state !== 'ok'), [{
+    name: 'docs/extra.md', state: 'drift', note: 'its folder was moved, replaced or redirected; not repaired', decide: true,
+    path: '~/.hostapp/host/harness-accounts/claude-code/acc-1/docs/extra.md', source: '~/.claude/docs/extra.md',
+  }]);
+  assert.deepEqual(fs.readdirSync(otherDocs), [], 'a link was made in another folder');
+  dropLink(docs);
+  fs.renameSync(`${docs}-moved`, docs);
+  assert.equal(acc(h.home, ['check', '--repair'], HARD).json.status, 'ok');
+
+  // 2. The account folder itself: moved away, and behind its name a folder that holds a
+  //    settings.json with the very bytes of the primary's (an "identical copy nobody edited").
+  const other = path.join(h.root, 'another-folder');
+  write(path.join(other, 'settings.json'), settings);
+  fs.renameSync(h.acc, `${h.acc}-moved`);
+  fs.symlinkSync(other, h.acc, 'junction');
+  for (let i = 0; i < 2; i++) {
+    const line = check(h.home, ['--repair'], { extra: HARD }).stdout;
+    assert.equal(line, 'novarc-harness-doctor account sync: needs attention 1 (claude-2 (account): the account folder was moved, replaced or redirected since it was synced; nothing in it is repaired (plan and apply again)).\n');
+    assert.deepEqual(fs.readdirSync(other), ['settings.json'], 'links to the primary were made in another folder');
+    assert.deepEqual([read(path.join(other, 'settings.json')), fs.statSync(path.join(other, 'settings.json')).nlink], [settings, 1], 'an unrelated file was linked to the primary');
+  }
+  dropLink(h.acc);
+  fs.renameSync(`${h.acc}-moved`, h.acc);
+  assert.equal(check(h.home, ['--repair'], { extra: HARD }).stdout, '');
+
+  // 3. A manifest from before places were recorded gets them at the first healthy repair.
+  const file = path.join(h.sync, 'manifest.json');
+  const old = json(file);
+  for (const a of old.accounts) { delete a.dir; for (const e of a.elements) delete e.place; }
+  fs.writeFileSync(file, JSON.stringify(old, null, 2));
+  assert.equal(check(h.home, [], { extra: HARD }).stdout, '');
+  assert.equal(manifest().dir, undefined, 'a check without --repair wrote the manifest');
+  assert.equal(check(h.home, ['--repair'], { extra: HARD }).stdout, '');
+  assert.equal(manifest().dir.real, real);
+  assert.equal(manifest().elements.find((e) => e.name === 'settings.json').place.parent, real);
+});
+
+test('identity: a new import or skill whose folder leads out of the account is reported, never linked and never skipped in silence', (t) => {
+  const h = buildHome({ codex: false });
+  t.after(() => rmrf(h.root));
+  assert.equal(planAndApply(h, 'claude-1', ['--resolve', 'claude-2:CLAUDE.md=replace-with-primary']).apply.code, 0);
+  // The second account's `docs` folder, and the shared skills folder, now lead to other folders.
+  const docs = path.join(h.acc, 'docs');
+  const skills = path.join(h.agentsDir, 'skills');
+  const outside = { docs: path.join(h.root, 'outside-docs'), skills: path.join(h.root, 'outside-skills') };
+  for (const [dir, other] of [[docs, outside.docs], [skills, outside.skills]]) {
+    fs.renameSync(dir, `${dir}-moved`);
+    fs.mkdirSync(other);
+    fs.symlinkSync(other, dir, 'junction');
+  }
+  // The primary gains an import in `docs` and a skill.
+  write(path.join(h.claude, 'docs', 'new.md'), 'A new imported file.\n');
+  fs.appendFileSync(path.join(h.claude, 'CLAUDE.md'), '\n@docs/new.md\n');
+  write(path.join(h.claude, 'skills', 'gamma', 'SKILL.md'), '---\nname: gamma\n---\nGamma.\n');
+
+  const note = 'new in the primary, but its folder now leads outside the account folder; not linked';
+  const fresh = (report) => report.accounts.flatMap((a) => a.elements.filter((e) => e.note === note).map((e) => ({ account: a.id, ...e })));
+  for (const args of [['check'], ['check', '--repair'], ['check', '--repair']]) {
+    assert.deepEqual(fresh(acc(h.home, args).json), [
+      { account: 'claude-2', name: 'docs/new.md', state: 'drift', note, decide: true, path: '~/.hostapp/host/harness-accounts/claude-code/acc-1/docs/new.md', source: '~/.claude/docs/new.md' },
+      { account: 'agents-1', name: 'skills/gamma', state: 'drift', note, decide: true, path: '~/.agents/skills/gamma', source: '~/.claude/skills/gamma' },
+    ], args.join(' '));
+    assert.deepEqual([fs.readdirSync(outside.docs), fs.readdirSync(outside.skills)], [[], []], 'a link was made in a folder outside the account');
+  }
+  assert.match(check(h.home, ['--repair']).stdout, /claude-2 docs\/new\.md: new in the primary, but its folder now leads outside the account folder; not linked \(~\/\.hostapp\/[^ ]*\/docs\/new\.md vs ~\/\.claude\/docs\/new\.md\)/);
+
+  // With the folders back, the same check links both.
+  for (const dir of [docs, skills]) { dropLink(dir); fs.renameSync(`${dir}-moved`, dir); }
+  const fixed = acc(h.home, ['check', '--repair']).json;
+  assert.deepEqual(fresh(fixed), []);
+  assert.deepEqual(fixed.accounts.flatMap((a) => a.elements.filter((e) => e.repaired).map((e) => `${a.id} ${e.name}`)), ['claude-2 docs/new.md', 'agents-1 skills/gamma']);
+  assert.equal(read(path.join(h.acc, 'docs', 'new.md')), 'A new imported file.\n');
+  assert.equal(read(path.join(h.agentsDir, 'skills', 'gamma', 'SKILL.md')), '---\nname: gamma\n---\nGamma.\n');
 });
 
 test('identity: a missing file is re-created, and a file replaced by an identical plain file is still repaired', (t) => {

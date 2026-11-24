@@ -5,10 +5,15 @@
 // by anything. So a record is trusted for what it says about an earlier review and for nothing
 // else, and reading one is where that line is drawn:
 //
-//   limits      a file is opened once and read only up to `LIMITS.recordBytes`; a harness gives
-//               at most `recordsPerHarness` records (the newest) and `harnessBytes` in all, one
-//               command at most `totalBytes`. Nothing over a limit is parsed. The harnesses of a
-//               run are read before anything else, so the budget of a command goes to them first.
+//   limits      a file is opened once and read only up to `LIMITS.recordBytes`; of a harness
+//               folder at most `recordsPerHarness` files are opened (the newest by name) and
+//               `harnessBytes` read, and one command reads at most `totalBytes` of the whole
+//               history folder. The limits are on what is read, whatever it turns out to be:
+//               a file that is not JSON, not a record, or someone else's costs its bytes like a
+//               good one. Records are read newest first, and the first one that does not fit
+//               what is left ends the reading: it and everything older are not opened. The
+//               harnesses of a run are read before anything else, so the budget of a command
+//               goes to them first.
 //   shape       the file must fit templates/record.schema.json (which bounds every string and
 //               list), belong to the folder it is in, and carry the name its run id gives it.
 //   barrier     what is kept then passes the barriers of the state on the way in: home paths
@@ -176,45 +181,84 @@ export function sanitizeRecord(record) {
 // ---------------------------------------------------------------------------------------------
 
 const cache = new Map();
+/**
+ * Bytes this process has read of the history folder: records, whatever they turned out to be,
+ * index.json, and each `.md` it compared. It only grows: reading a harness again costs again.
+ */
 let totalRead = 0;
 
-/** Forget what was read (after a write). Without a key, everything. */
+/**
+ * Forget what was read (after a write), so that it is read again. Without a key, everything, and
+ * the count of bytes read starts over (a new command, as far as the limits go).
+ */
 export function forgetRecords(key) {
   if (key === undefined) { cache.clear(); totalRead = 0; return; }
-  if (cache.has(key)) totalRead = Math.max(0, totalRead - cache.get(key).bytes);
   cache.delete(key);
+}
+
+/** What one command may still read of the history folder, in bytes. */
+function totalLeft() { return limits().totalBytes - totalRead; }
+
+/**
+ * Every read of the history folder goes through here: at most `maxBytes` of `file`, counted
+ * against what one command may read whatever the bytes turn out to be.
+ * Test seam: NOVARC_HD_TEST_HISTORY_READS names a file that gets one JSON line per file opened,
+ * `{ file, bytes }`, `file` relative to the history folder and `bytes` what was read of it.
+ */
+function readHistoryFile(file, maxBytes) {
+  const got = readTextCapped(file, maxBytes);
+  totalRead += got.bytes || 0;
+  const log = process.env.NOVARC_HD_TEST_HISTORY_READS;
+  if (log && got.reason !== 'missing') {
+    try { fs.appendFileSync(log, `${JSON.stringify({ file: path.relative(historyDir(), file).split(path.sep).join('/'), bytes: got.bytes || 0 })}\n`); } catch { /* a seam must not fail a command */ }
+  }
+  return got;
 }
 
 /** A file name as it may be printed: one that looks like a credential is not. */
 const printable = (name) => (hasCredential(name) ? null : name);
 
 /**
- * One record file: `{ record, bytes }`, or `{ reason }`. `budget` is how many bytes may still be
- * read. The reason never says anything of what the file holds.
+ * One record file: `{ record, bytes }`, or `{ reason, bytes }`. `budget` is how many bytes may
+ * still be read; `bytes` is what was read, record or not. A file within the size a record may
+ * have that does not fit the budget is `over-budget` and is not read. The reason never says
+ * anything of what the file holds.
  */
 function readRecordFile(file, key, name, budget) {
-  if (budget <= 0) return { reason: 'over-budget' };
-  const got = readTextCapped(file, Math.min(limits().recordBytes, budget));
-  if (got.reason) return { reason: got.reason === 'too-large' && budget < limits().recordBytes ? 'over-budget' : got.reason };
+  const max = limits().recordBytes;
+  const got = readHistoryFile(file, Math.min(max, budget));
+  if (got.reason) return { reason: got.reason === 'too-large' && got.size <= max ? 'over-budget' : got.reason, bytes: 0 };
+  return { ...recordOf(got.text, key, name), bytes: got.bytes };
+}
+
+/** The record that the text of a file of `key` named `name` is: `{ record }`, or `{ reason }`. */
+function recordOf(text, key, name) {
   let raw = null;
-  try { raw = JSON.parse(got.text.replace(/^\uFEFF/, '')); } catch { return { reason: 'not-json' }; }
+  try { raw = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { return { reason: 'not-json' }; }
   if (!isObject(raw)) return { reason: 'invalid' };
   if (raw.harnessKey !== key) return { reason: 'other-harness' };
   if (validateRecord(raw).length) return { reason: 'invalid' };
   if (`${recordBaseName(raw.runId, raw.startedAt)}.json` !== name) return { reason: 'misnamed' };
-  return { record: sanitizeRecord(raw), bytes: got.bytes };
+  return { record: sanitizeRecord(raw) };
 }
 
-/** The `.json` files of a harness folder, and a stamp of their names, sizes and times. */
+/**
+ * A harness folder as far as it is looked at: the record names that may be opened (`kept`, the
+ * newest `recordsPerHarness` by name), how many `.json` files are left out by name or by number,
+ * and a stamp of what may be opened (names, sizes, times) and of those counts. Only `kept` is
+ * ever given a system call of its own.
+ */
 function folderOf(key) {
   const dir = path.join(historyDir(), key);
   let names = [];
   try { names = fs.readdirSync(dir); } catch { names = []; }
-  const json = names.filter((n) => /\.json$/i.test(n)).sort();
-  const stamp = sha256(json.map((n) => {
+  const json = names.filter((n) => /\.json$/i.test(n));
+  const candidates = json.filter((n) => RECORD_FILE_RE.test(n)).sort();
+  const kept = candidates.slice(Math.max(0, candidates.length - limits().recordsPerHarness));
+  const stamp = sha256([`${json.length}:${candidates.length}`, ...kept.map((n) => {
     try { const s = fs.statSync(path.join(dir, n)); return `${n}:${s.size}:${Math.round(s.mtimeMs)}`; } catch { return `${n}:-`; }
-  }).join('\n'));
-  return { dir, json, stamp };
+  })].join('\n'));
+  return { dir, strange: json.length - candidates.length, older: candidates.length - kept.length, kept, stamp };
 }
 
 /**
@@ -231,30 +275,32 @@ function readRecords(key) {
   const out = { records: [], ignored: [], bytes: 0, stamp: '' };
   cache.set(key, out);
   if (typeof key !== 'string' || !HARNESS_KEY_RE.test(key)) return out;
-  const { dir, json, stamp } = folderOf(key);
+  const { dir, strange, older, kept, stamp } = folderOf(key);
   out.stamp = stamp;
-  const candidates = json.filter((n) => RECORD_FILE_RE.test(n));
-  if (json.length > candidates.length) out.ignored.push({ file: null, count: json.length - candidates.length, reason: 'not-a-record-name' });
+  if (strange) out.ignored.push({ file: null, count: strange, reason: 'not-a-record-name' });
+  if (older) out.ignored.push({ file: null, count: older, reason: 'too-many' });
   const lim = limits();
-  const kept = candidates.slice(Math.max(0, candidates.length - lim.recordsPerHarness));
-  if (candidates.length > kept.length) out.ignored.push({ file: null, count: candidates.length - kept.length, reason: 'too-many' });
-  // Newest first: when a budget runs dry, what is left out is the oldest.
+  // Newest first: when a budget runs dry, what is left out is the oldest. `spent` names the
+  // budget that ran dry; from there on nothing is opened.
+  let spent = null;
   for (const name of kept.reverse()) {
-    const file = path.join(dir, name);
-    const harnessLeft = lim.harnessBytes - out.bytes;
-    const totalLeft = lim.totalBytes - totalRead;
-    const r = readRecordFile(file, key, name, Math.min(harnessLeft, totalLeft));
-    if (!r.record) {
-      out.ignored.push({ file: printable(name), reason: r.reason === 'over-budget' && totalLeft < harnessLeft ? 'over-total-budget' : r.reason });
-      continue;
+    if (!spent) {
+      const harnessLeft = lim.harnessBytes - out.bytes;
+      const commandLeft = totalLeft();
+      const left = Math.min(harnessLeft, commandLeft);
+      const file = path.join(dir, name);
+      const r = left > 0 ? readRecordFile(file, key, name, left) : { reason: 'over-budget', bytes: 0 };
+      // What was read counts, record or not.
+      out.bytes += r.bytes;
+      if (r.record) { out.records.push({ file, name, record: r.record }); continue; }
+      if (r.reason !== 'over-budget') { out.ignored.push({ file: printable(name), reason: r.reason }); continue; }
+      spent = commandLeft < harnessLeft ? 'over-total-budget' : 'over-budget';
     }
-    out.records.push({ file, name, record: r.record });
-    out.bytes += r.bytes;
-    totalRead += r.bytes;
+    out.ignored.push({ file: printable(name), reason: spent });
   }
   out.records.sort((a, b) => Date.parse(a.record.reviewedAt) - Date.parse(b.record.reviewedAt) || a.record.runId.localeCompare(b.record.runId));
   // Counts first, then file by file in name order: the same folder always gives the same list.
-  out.ignored.sort((a, b) => (a.file === null) - (b.file === null) || String(a.file).localeCompare(String(b.file)) || a.reason.localeCompare(b.reason));
+  out.ignored.sort((a, b) => (b.file === null) - (a.file === null) || String(a.file).localeCompare(String(b.file)) || a.reason.localeCompare(b.reason));
   return out;
 }
 
@@ -265,9 +311,10 @@ export function listRecords(key) { return readRecords(key).records; }
  * What was found under history/<key>/ and is not a record this tool reads:
  * `[{ file, reason, count? }]`. `file` is a file name, or null for a count of files (names that
  * are not record names are never repeated). Reasons: `not-a-record-name`, `too-many` (older than
- * the newest `recordsPerHarness`), `over-budget` (the bytes of this harness), `over-total-budget`
- * (the bytes of this command), `too-large`, `not-a-file`, `unreadable`, `missing`, `not-json`,
- * `invalid` (does not fit the schema), `other-harness`, `misnamed`.
+ * the newest `recordsPerHarness`), `over-budget` (the bytes of this harness were spent, on good
+ * records or bad files alike: not opened), `over-total-budget` (the same for the bytes of this
+ * command), `too-large`, `not-a-file`, `unreadable`, `missing`, `not-json`, `invalid` (does not
+ * fit the schema), `other-harness`, `misnamed`.
  */
 export function ignoredRecords(key) { return readRecords(key).ignored; }
 
@@ -286,16 +333,43 @@ export function harnessKeys() {
 }
 
 /**
- * The absolute path index.json gives for each harness key, as it was read: a candidate, to be
- * checked with `ownsPath` before any use. Nothing else of the index is ever read: the rest is
- * made again from the records.
+ * index.json as text, within the limits: `{ text }`, or `{ reason }` (`missing`, `too-large`,
+ * `over-total-budget` when this command has read its fill, `not-a-file`, `unreadable`). Its
+ * bytes count against what a command may read, like any other file of the history folder.
  */
-export function indexedPaths() {
+export function readIndexText() {
+  const max = limits().indexBytes;
+  const left = totalLeft();
+  if (left <= 0) return { reason: 'over-total-budget' };
+  const got = readHistoryFile(historyIndexPath(), Math.min(max, left));
+  if (got.reason === 'too-large' && got.size <= max) return { reason: 'over-total-budget' };
+  return got.reason ? { reason: got.reason } : { text: got.text };
+}
+
+/**
+ * Does `file` hold exactly `text`? `same`, `differs`, `missing`, or `unknown` when this command
+ * has read its fill. The file is read only when it has the size of `text`, so at most the bytes
+ * of `text` are read, whatever the file is.
+ */
+export function holdsText(file, text) {
+  const size = Buffer.byteLength(text);
+  let st = null;
+  try { st = fs.statSync(file); } catch (e) { return e && e.code === 'ENOENT' ? 'missing' : 'differs'; }
+  if (!st.isFile() || st.size !== size) return 'differs';
+  if (totalLeft() < size) return 'unknown';
+  return readHistoryFile(file, size).text === text ? 'same' : 'differs';
+}
+
+/**
+ * The absolute path index.json (given as text, see `readIndexText`) holds for each harness key:
+ * a candidate, to be checked with `ownsPath` before any use. Nothing else of the index is ever
+ * used: the rest is made again from the records.
+ */
+export function indexedPaths(text) {
   const out = new Map();
-  const got = readTextCapped(historyIndexPath(), limits().indexBytes);
-  if (got.reason) return out;
+  if (typeof text !== 'string') return out;
   let index = null;
-  try { index = JSON.parse(got.text.replace(/^\uFEFF/, '')); } catch { return out; }
+  try { index = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { return out; }
   if (!isObject(index) || !isObject(index.harnesses)) return out;
   for (const [key, entry] of Object.entries(index.harnesses)) {
     if (HARNESS_KEY_RE.test(key) && isObject(entry) && typeof entry.pathAbs === 'string') out.set(key, entry.pathAbs);

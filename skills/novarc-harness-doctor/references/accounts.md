@@ -241,6 +241,25 @@ Rules:
   complete new bytes at every moment. The only in-between state is "one name already new,
   another still old", and it lasts until the switch is done. Known names are the ones the
   manifest records and the same file in another account's folder.
+- **Nothing is replaced on the strength of what it was a moment ago.** Right before the rename
+  over the file, and again right before each other name is switched, that path is looked at
+  once more: it must still be a plain file in the same real folder, holding the same bytes as
+  when the write was prepared. When the file itself changed (an app saved it meanwhile),
+  nothing is written and the step fails saying so ("the file changed while this write was being
+  prepared"; in `apply` the entry carries `"stale": true`): plan again. When another name
+  changed, that name is left exactly as it is and the result says so (`warnings` of `apply`,
+  `notes` of `install-check`, `note` of `undo`: "... had been changed by something else in the
+  meantime and was left as it is"), and the session-start check then reports it as edited by
+  hand. Between that last look and the rename there are two system calls and no lock: an app
+  that writes that very path in that instant can still lose its edit. The window cannot be made
+  zero with renames; it is the reason to apply with the agent apps closed.
+- **A path is a place only while its folder is the same folder.** Whatever is recorded for
+  later (a write in progress, the journal of a run, a link or generated file in the manifest)
+  comes with the real path of the folder it sits in and that folder's identity on disk. Before
+  anything is linked, renamed, rewritten or removed there later, both are checked again. A
+  folder that was moved away, with a link or another folder now under its name, is another
+  place: nothing in it is touched, even when it holds a file with the very same bytes or a file
+  named like one of this tool's temp files. The user gets a conflict to decide.
 
 ### When a run dies in the middle of a write
 
@@ -253,6 +272,14 @@ and:
 - when the rename had gone through, switches over the other names that still hold the old bytes
   (`completed`, with how many in `relinked`);
 - when it had not, removes the temp files: every name is as it was (`rolled-back`);
+- switches another name only when it is still, provably, the name the dead run was about to
+  switch: in its recorded folder, still a name of the old file, still holding the old bytes,
+  with the link the dead run made for it waiting beside it. A name that was replaced by another
+  file is `left`, even one with identical bytes;
+- touches nothing in a folder that is not the one the write was made in. For another name of
+  the file, that name is left alone and counted in `foreign`, said once. For the file itself,
+  nothing at all is settled and the outcome is `conflict`, with the record kept (`record`): it is
+  reported at every run until the folder is back where it was, or the user deletes that record;
 - never touches a name whose content changed since the death (`abandoned` for the file itself,
   `left` for another name), and never removes or renames anything that is not a temp file of
   this tool, whatever the record says.
@@ -317,6 +344,10 @@ What to do, and what to tell the user:
   the new run's links for its own. Undone in the wrong order, the older run reports "something
   else is at the original place now" for what the newer one put there, and waits.
 - `undo` is safe to kill too: run it again and it finishes.
+- `undo` acts on a step only in the folder the run worked in (see "A path is a place" above).
+  When an account folder was moved or replaced since, each of its steps is a conflict ("its
+  folder is not the one this run worked in") and nothing behind the new folder is removed,
+  rewritten or restored; with the folder back, the same undo finishes.
 
 What a death can still leave that `undo` does not take back:
 
@@ -379,6 +410,15 @@ also trust it once through `/hooks`. When the hook reports something, tell the u
 says before doing anything else.
 
 ### Where the check is allowed to write
+
+The check repairs nothing in an account whose folder is not the one that was synced. `apply`
+records where each account folder really is. When its name leads to another folder (the folder
+was moved and a link left behind, or another folder took the name), the check reports one line
+for the account, "the account folder was moved, replaced or redirected since it was synced;
+nothing in it is repaired (plan and apply again)", and touches nothing there: no link is made, no
+"identical copy" is linked again, no file is regenerated. The same holds for one link whose own
+sub-folder now leads elsewhere ("its folder was moved, replaced or redirected; not repaired").
+A user who moved an account on purpose plans and applies again: that records the new place.
 
 The check runs unattended, so it never writes to a place nobody approved. `apply` records where
 each generated file is: the real path of the file and of its folder, that it is a plain file
