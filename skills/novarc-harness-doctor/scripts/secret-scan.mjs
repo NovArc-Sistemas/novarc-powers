@@ -5,7 +5,7 @@
 // It never prints the matched line or the full value: `masked` is the first 4 characters, an
 // ellipsis and the value's length. Skips node_modules, .git, binary files and files over 2 MB by
 // default. Symlinked directories are not followed (config dirs often link to large trees such
-// as transcripts); symlinked files are scanned once, by real path.
+// as transcripts); symlinked files are scanned once, by real path. `--help` prints the usage.
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs, isMain, printJson, warn, displayPath, normalizeInputPath, lstatSafe, statSafe, realpathSafe, IS_WIN } from './lib/common.mjs';
@@ -46,29 +46,63 @@ function isBinary(buf) {
   return false;
 }
 
-/** Scan one text; returns [{ line, pattern, masked }]. Pure: used by the CLI and by tests. */
-export function scanText(text) {
+// The same patterns with match indices, so a match can be replaced where it stands.
+const INDEXED = PATTERNS.map((p) => ({ id: p.id, re: new RegExp(p.re.source, p.re.flags.includes('d') ? p.re.flags : `${p.re.flags}d`) }));
+
+/** Matches on one line: [{ pattern, value, start, end }], `start..end` being the secret itself. */
+function lineMatches(line) {
+  const out = [];
+  const taken = [];
+  for (const p of INDEXED) {
+    p.re.lastIndex = 0;
+    let m;
+    while ((m = p.re.exec(line)) !== null) {
+      if (m[0].length === 0) { p.re.lastIndex++; continue; }
+      const a = m.index;
+      const b = m.index + m[0].length;
+      if (taken.some(([x, y]) => a < y && b > x)) continue;
+      taken.push([a, b]);
+      const [start, end] = m.indices.groups && m.indices.groups.v ? m.indices.groups.v : m.indices[0];
+      out.push({ pattern: p.id, value: line.slice(start, end), start, end });
+    }
+  }
+  return out;
+}
+
+/**
+ * Scan one text; returns [{ line, pattern, masked }]. Pure: used by the CLI and by tests.
+ * Lines longer than `maxLineLength` are skipped (minified blobs; not config); pass Infinity to
+ * scan everything.
+ */
+export function scanText(text, { maxLineLength = 100000 } = {}) {
   const out = [];
   const lines = text.split(/\r?\n/);
   for (let ln = 0; ln < lines.length; ln++) {
     const line = lines[ln];
-    if (line.length > 100000) continue; // minified blobs; not config
-    const taken = [];
-    for (const p of PATTERNS) {
-      p.re.lastIndex = 0;
-      let m;
-      while ((m = p.re.exec(line)) !== null) {
-        if (m[0].length === 0) { p.re.lastIndex++; continue; }
-        const start = m.index;
-        const end = m.index + m[0].length;
-        if (taken.some(([a, b]) => start < b && end > a)) continue;
-        taken.push([start, end]);
-        const value = m.groups && m.groups.v ? m.groups.v : m[0];
-        out.push({ line: ln + 1, pattern: p.id, masked: mask(value) });
-      }
-    }
+    if (line.length > maxLineLength) continue;
+    for (const m of lineMatches(line)) out.push({ line: ln + 1, pattern: m.pattern, masked: mask(m.value) });
   }
   return out;
+}
+
+/**
+ * `text` with every match replaced by its masked form. The number of lines never changes. Only
+ * the marker line of a private key matches a pattern: its body is the job of
+ * lib/snapshot/mask.mjs, which knows where a key block ends.
+ */
+export function redactText(text) {
+  return String(text).split('\n').map((line) => {
+    const spans = lineMatches(line).sort((x, y) => x.start - y.start);
+    if (!spans.length) return line;
+    let out = '';
+    let pos = 0;
+    for (const s of spans) {
+      if (s.start < pos) continue;
+      out += line.slice(pos, s.start) + mask(s.value);
+      pos = s.end;
+    }
+    return out + line.slice(pos);
+  }).join('\n');
 }
 
 export function scanPaths(inputs, { maxBytes = DEFAULT_MAX_BYTES, projectRoot } = {}) {
@@ -121,10 +155,19 @@ export function scanPaths(inputs, { maxBytes = DEFAULT_MAX_BYTES, projectRoot } 
   return { filesScanned, findings, truncated, skipped };
 }
 
-if (isMain(import.meta.url)) {
+const USAGE = 'usage: secret-scan.mjs <path...> [--max-bytes N] [--project-root <dir>]';
+
+function main() {
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    process.stdout.write(`${USAGE}
+
+Reports likely credentials in files and folders as { file, line, pattern, masked }. It never prints a value.
+`);
+    return;
+  }
   const args = parseArgs();
   if (!args._.length) {
-    warn('usage: secret-scan.mjs <path...> [--max-bytes N] [--project-root <dir>]');
+    warn(USAGE);
     process.exit(2);
   }
   const maxBytes = args['max-bytes'] ? Number(args['max-bytes']) : DEFAULT_MAX_BYTES;
@@ -133,3 +176,5 @@ if (isMain(import.meta.url)) {
   const res = scanPaths(args._, { maxBytes, projectRoot });
   printJson({ scannedAt: new Date().toISOString(), patterns: PATTERNS.map((p) => p.id), ...res });
 }
+
+if (isMain(import.meta.url)) main();

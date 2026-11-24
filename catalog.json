@@ -3,9 +3,9 @@
   "skills": [
     {
       "name": "novarc-harness-doctor",
-      "version": "0.1.0",
-      "summary": "Inventories, scores and fixes your AI coding agent harness (user, project or both), guided or automatic.",
-      "summary_pt": "Inventaria, dá nota e corrige o harness do seu agente de código (usuário, projeto ou ambos), em modo guiado ou automático.",
+      "version": "0.2.0",
+      "summary": "Finds every agent harness on your machine (each account, each project), measures what it cost over the last 30 days, and explains and fixes it on one interactive board.",
+      "summary_pt": "Encontra todos os harness de agente da sua máquina (cada conta, cada projeto), mede o que custaram nos últimos 30 dias, e explica e corrige tudo num painel interativo.",
       "profile": {
         "recommended": "on-demand",
         "supported": [
@@ -17,20 +17,21 @@
       "environments": [
         "claude-code",
         "codex",
-        "traycer"
+        "opencode",
+        "cursor"
       ],
-      "requires": [],
+      "requires": [
+        "node>=20"
+      ],
       "workspace": {
         "shared": [
-          "state.json",
-          "board.md",
           "reports/"
         ],
         "local": [
-          "backups/",
-          "logs/",
-          "drafts/",
-          "board.html"
+          "runs/",
+          "history/",
+          "sync/",
+          "latest.json"
         ]
       },
       "path": "skills/novarc-harness-doctor"

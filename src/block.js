@@ -18,16 +18,17 @@ export function detectEol(text) {
  * `{name, summary}`; `version` is the package version used in the fetch command.
  */
 export function renderBlockBody(skills, version) {
+  // The GitHub form is the fallback for a version that is not on the npm registry.
   const lines = [
     '## NOVARC Powers (on-demand skills)',
     '',
-    'These skills are not installed. Fetch one only when the task calls for it.',
+    'These skills are not installed. Fetch one only when the task calls for it:',
+    `\`npx -y novarc-powers@${version} fetch <skill>\` prints the path of its SKILL.md; read that file and follow it.`,
+    `If npm cannot find that version, use \`npx -y github:NovArc-Sistemas/novarc-powers#v${version} fetch <skill>\`.`,
     '',
   ];
   for (const s of [...skills].sort((a, b) => a.name.localeCompare(b.name))) {
-    lines.push(
-      `- \`${s.name}\`: ${s.summary} Not installed — to run it: \`npx -y novarc-powers@${version} fetch ${s.name}\`, then read the SKILL.md at the printed path and follow it.`,
-    );
+    lines.push(`- \`${s.name}\`: ${s.summary}`);
   }
   return lines.join('\n');
 }

@@ -193,6 +193,29 @@ test('discover finds config dirs, imports, settings counts and links without lea
   assert.ok(p.docs.files.every((d) => d.lastCommitAt), 'last commit date per doc');
 });
 
+test('discover --provider --config-dir describes one account and opens no other', () => {
+  const r = runScript('discover.mjs', ['--scope', 'user', '--provider', 'claude-code', '--config-dir', fx.second], { env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json.account.provider, 'claude-code');
+  assert.equal(r.json.account.supported, true);
+  const u = r.json.user;
+  assert.deepEqual([u.configDirs.length, u.codex.length, u.agentsDirs.length, u.desktopConfigs.length], [1, 0, 0, 0]);
+  const only = u.configDirs[0];
+  assert.equal(only.source, 'argument');
+  assert.equal(only.instructionFiles.find((f) => f.path.endsWith('CLAUDE.md')).brokenImports, 1);
+  // What this dir links to is its own business and is still said; what links to it from another
+  // account is not looked for, so a hardlink names no peer outside the dir.
+  const hl = only.links.find((l) => l.name === 'shared.md');
+  assert.deepEqual([hl.type, hl.nlink, hl.peers], ['hardlink', 2, []]);
+  if (fx.fileSymlink) assert.equal(only.links.find((l) => l.name === 'linked-good.md').target, '~/.claude/good.md');
+  for (const foreign of ['alpha-skill', 'localtool', 'remotetool', 'local_one', 'shared-skill', '"desk"', 'harness-accounts']) {
+    assert.ok(!r.stdout.includes(foreign), `${foreign} belongs to another account`);
+  }
+  const codex = runScript('discover.mjs', ['--scope', 'user', '--provider', 'codex', '--config-dir', path.join(fx.home, '.codex')], { env });
+  assert.deepEqual(codex.json.user.codex[0].config.mcpServers, [{ name: 'local_one', transport: 'local' }, { name: 'remote_one', transport: 'remote' }]);
+  assert.deepEqual([codex.json.user.configDirs.length, codex.json.user.agentsDirs.length], [0, 0]);
+});
+
 // ------------------------------------------------------------------------------------------
 // transcript-signals.mjs
 // ------------------------------------------------------------------------------------------
@@ -234,6 +257,94 @@ test('transcript-signals honours --config-dirs', () => {
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.json.sources.claude.sessions, 0);
   assert.equal(r.json.sources.claude.configDirs, 1);
+});
+
+test('transcript-signals keeps its output keys', () => {
+  const r = runScript('transcript-signals.mjs', ['--cwd', fx.project, '--days', '60'], { env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(Object.keys(r.json), [
+    'generatedAt', 'cwd', 'project', 'days', 'sources', 'sessions', 'dateRange', 'unparsableLines', 'toolCalls', 'shellFailures',
+    'commandNotFound', 'hookBlocks', 'retries', 'userMessages', 'userCorrections', 'sessionsEndingOnError', 'skillInvocations',
+    'slashCommands', 'topFailureSessions', 'durationMs',
+  ]);
+  assert.deepEqual(Object.keys(r.json.sources), ['claude', 'codex']);
+  assert.deepEqual(Object.keys(r.json.sources.claude), ['configDirs', 'projectDirsMatched', 'sessions']);
+  assert.deepEqual(Object.keys(r.json.sources.codex), ['sessionFilesScanned', 'sessions']);
+});
+
+test('transcript-signals re-exports the shared helpers other scripts import from it', async () => {
+  const signals = await import('../scripts/transcript-signals.mjs');
+  const lib = await import('../scripts/lib/transcripts.mjs');
+  for (const name of ['commandHead', 'codexCommandString', 'matchesProjectDir', 'matchesProjectCwd', 'projectRoots']) {
+    assert.equal(typeof signals[name], 'function', name);
+    assert.equal(signals[name], lib[name], `${name} is the shared one, not a private copy`);
+  }
+  assert.equal(typeof signals.collect, 'function');
+});
+
+test('transcript-signals reads subagent threads into their parent session', async () => {
+  // Its own home and project, so the counts of the tests above stay as they are.
+  const { tmpDir } = await import('./helpers.mjs');
+  const home2 = tmpDir('hd-signals-home-');
+  const proj2 = tmpDir('hd-signals-proj-');
+  try {
+    const pdir = path.join(home2, '.claude', 'projects', encodeProjectPath(proj2));
+    const now = Date.now();
+    const at = (s) => new Date(now - 3600000 + s * 1000).toISOString();
+    const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+    const asst = (s, blocks, side = false) => ({ type: 'assistant', isSidechain: side, timestamp: at(s), message: { role: 'assistant', content: blocks } });
+    const result = (s, id, isError, side = false) => ({ type: 'user', isSidechain: side, timestamp: at(s), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: `out ${MARKER}` }] } });
+    const say = (s, text, side = false) => ({ type: 'user', isSidechain: side, timestamp: at(s), message: { role: 'user', content: text } });
+    const jsonl = (rows) => rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
+
+    // Top-level thread: two messages from the person, one failing command, and it ends on a success.
+    write(path.join(pdir, 'sess-a.jsonl'), jsonl([
+      // Opens with the Portuguese "no" (em + o): a user message, not a correction.
+      say(0, `no arquivo principal, troca o nome ${MARKER}`),
+      asst(1, [use('m1', 'Bash', { command: `npm test ${MARKER}` })]),
+      result(2, 'm1', true),
+      // A raw U+2028 inside a JSON string is legal; a line reader that splits on it loses the entry.
+      say(3, `roda de novo agora ${MARKER}`),
+      asst(4, [use('m2', 'Bash', { command: 'git status' })]),
+      result(5, 'm2', false),
+    ]));
+    // Subagent thread of the same session: its prompt reads like a correction but the parent
+    // agent wrote it; three failures of one head (a retry) and it ends on an error.
+    write(path.join(pdir, 'sess-a', 'subagents', 'agent-x1.jsonl'), jsonl([
+      say(10, `no, wrong again ${MARKER}`, true),
+      asst(11, [use('s1', 'Bash', { command: `pnpm lint ${MARKER}` }), use('s2', 'Read', { file_path: `src/${MARKER}.js` })], true),
+      result(12, 's1', true, true),
+      asst(13, [use('s3', 'Bash', { command: 'pnpm lint --fix' })], true),
+      result(14, 's3', true, true),
+      asst(15, [use('s4', 'Bash', { command: 'pnpm lint' })], true),
+      result(16, 's4', true, true),
+    ]));
+    // A subagent of a subagent run, deeper under subagents/.
+    write(path.join(pdir, 'sess-a', 'subagents', 'workflows', 'w1', 'agent-y2.jsonl'), jsonl([
+      say(20, `stop ${MARKER}`, true),
+      asst(21, [use('d1', 'Grep', { pattern: MARKER })], true),
+    ]));
+    // Not a transcript: only agent-*.jsonl files under subagents/ are read.
+    write(path.join(pdir, 'sess-a', 'tool-results', 'big.jsonl'), jsonl([asst(30, [use('x1', 'Bash', { command: 'make' })])]));
+
+    const r = runScript('transcript-signals.mjs', ['--cwd', proj2, '--days', '7'], { env: homeEnv(home2) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!(r.stdout + r.stderr).includes(MARKER), 'no message text, command argument or tool output printed');
+    const j = r.json;
+    assert.equal(j.sessions, 1, 'subagent files belong to their parent session');
+    assert.deepEqual(j.sources.claude, { configDirs: 1, projectDirsMatched: 1, sessions: 1 });
+    assert.equal(j.unparsableLines, 0, 'the line with U+2028 is read whole');
+    assert.deepEqual(j.toolCalls, { Bash: 5, Grep: 1, Read: 1 }); // 2 top-level + 3 subagent Bash
+    assert.deepEqual(j.shellFailures, { 'pnpm lint': 3, 'npm test': 1 });
+    assert.deepEqual(j.retries, [{ head: 'pnpm lint', sessions: 1 }]);
+    assert.equal(j.userMessages, 2, 'subagent prompts are not user messages');
+    assert.equal(j.userCorrections, 1, '"de novo" counts; "no arquivo ..." and the subagent prompts do not');
+    assert.equal(j.sessionsEndingOnError, 0, 'the top-level thread ended on a success');
+    assert.deepEqual(j.topFailureSessions, [{ source: 'claude', id: 'sess-a', failures: 4 }]);
+  } finally {
+    rmrf(home2);
+    rmrf(proj2);
+  }
 });
 
 // ------------------------------------------------------------------------------------------
@@ -282,4 +393,94 @@ test('probe-clis falls back to the built-in list when the catalog is missing', (
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.json.catalog.source, 'builtin');
   assert.ok(r.json.tools.some((t) => t.id === 'git' && t.installed === true));
+});
+
+// A catalog whose only binary is not installed anywhere: nothing is run, so these stay quick.
+const GHOST_BIN = 'hd-definitely-not-installed-xyz';
+const PACKAGE_MANAGER_NAMES = ['winget', 'scoop', 'choco', 'brew', 'apt', 'npm', 'pnpm', 'pipx', 'uv', 'cargo'];
+function ghostCatalog(name, tools) {
+  const file = path.join(fx.root, name);
+  write(file, JSON.stringify({ tools }));
+  return file;
+}
+
+test('probe-clis --provider --config-dir reads the MCP servers of one account', () => {
+  const catalog = ghostCatalog('tools-account.json', [
+    { id: 'ghost', kind: 'cli', bin: GHOST_BIN, versionArgs: ['--version'], signals: [{ type: 'mcp', value: 'localtool' }, { type: 'mcp', value: 'local_one' }, { type: 'mcp', value: 'desk' }] },
+  ]);
+  const codex = path.join(fx.home, '.codex');
+  // The package managers come from a file, so that a dozen runs do not each look for ten of them.
+  const machine = path.join(fx.root, 'machine-clis.json');
+  write(machine, JSON.stringify({ tools: [], packageManagers: PACKAGE_MANAGER_NAMES.map((name) => ({ name, present: false, paths: [] })) }));
+  const run = (args) => runScript('probe-clis.mjs', [...args, '--catalog', catalog, '--tools-from', machine], { env });
+  const seen = (r) => [r.json.context.mcpServers, r.json.tools[0].signalsMatched.map((s) => s.value)];
+
+  // The default account: its settings and the state file in the home folder, which is its own.
+  const main = run(['--cwd', fx.claude, '--provider', 'claude-code', '--config-dir', fx.claude]);
+  assert.equal(main.code, 0, main.stderr);
+  assert.deepEqual(main.json.account, { provider: 'claude-code', path: '~/.claude', supported: true });
+  assert.deepEqual(seen(main), [['localtool', 'remotetool'], ['localtool']]);
+  // Another Claude account: that state file is not its own, and it has no server of its own.
+  for (const dir of [fx.second, fx.hostAcc]) assert.deepEqual(seen(run(['--cwd', dir, '--provider', 'claude-code', '--config-dir', dir])), [[], []]);
+  assert.deepEqual(seen(run(['--cwd', codex, '--provider', 'codex', '--config-dir', codex])), [['local_one', 'remote_one'], ['local_one']]);
+  // A provider whose MCP config has no reader: nothing of anybody else's is read in its place.
+  const none = run(['--cwd', codex, '--provider', 'gemini', '--config-dir', codex]);
+  assert.deepEqual([none.json.account.supported, ...seen(none)], [false, [], []]);
+  // The project's own files are read whoever asks, and nothing changes when nobody does.
+  assert.deepEqual(seen(run(['--cwd', fx.project, '--provider', 'codex', '--config-dir', codex]))[0], ['local_one', 'remote_one', 'supabase']);
+  const all = run(['--cwd', fx.claude]);
+  assert.ok(!('account' in all.json));
+  assert.deepEqual(seen(all), [['desk', 'local_one', 'localtool', 'remote_one', 'remotetool'], ['localtool', 'local_one', 'desk']]);
+
+  for (const bad of [['--provider', 'codex'], ['--config-dir', codex], ['--provider', 'nobody', '--config-dir', codex], ['--provider', 'codex', '--config-dir', path.join(fx.root, 'nope')]]) {
+    const r = run(['--cwd', fx.claude, ...bad]);
+    assert.equal(r.code, 2, bad.join(' '));
+    assert.equal(r.stdout, '');
+  }
+});
+
+test('probe-clis --tools-from reuses what an earlier run found on the machine, and nothing else', () => {
+  const tool = (id, bin, signals = []) => ({ id, kind: 'cli', bin, versionArgs: ['--version'], signals });
+  const catalog = ghostCatalog('tools-reuse.json', [
+    tool('kept', GHOST_BIN, [{ type: 'mcp', value: 'local_one' }, { type: 'mcp', value: 'localtool' }]),
+    tool('moved', `${GHOST_BIN}-2`), tool('odd', GHOST_BIN), tool('new', GHOST_BIN),
+  ]);
+  const codex = path.join(fx.home, '.codex');
+  const earlier = path.join(fx.root, 'earlier-clis.json');
+  const answer = { kind: 'cli', installed: true, version: 'from the earlier run 9.9', paths: ['~/bin/kept'], collision: false, distinctBinaries: 1, verify: null };
+  write(earlier, JSON.stringify({
+    cwd: './', os: 'elsewhere', account: { provider: 'claude-code', path: '~/.claude', supported: true },
+    tools: [
+      // Taken as it is, but for its signals and for what probeTool() never writes.
+      { id: 'kept', bin: GHOST_BIN, ...answer, versionExit: 0, signalsMatched: [{ type: 'mcp', value: 'localtool' }], unknownSignalTypes: ['weird'], note: 'not a field of this script' },
+      { id: 'moved', bin: 'some-other-binary', ...answer }, // the catalog names another binary now
+      { id: 'odd', bin: GHOST_BIN, ...answer, installed: 'yes' }, // not an entry of this script
+    ],
+    packageManagers: PACKAGE_MANAGER_NAMES.map((name) => ({ name, present: name === 'brew', paths: [] })),
+    context: { mcpServers: ['localtool', 'remotetool'] },
+  }));
+  const r = runScript('probe-clis.mjs', ['--cwd', codex, '--provider', 'codex', '--config-dir', codex, '--catalog', catalog, '--tools-from', earlier], { env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json.toolsReused, 1);
+  assert.equal(r.json.os, process.platform);
+  const byId = Object.fromEntries(r.json.tools.map((t) => [t.id, t]));
+  assert.deepEqual(byId.kept, { id: 'kept', bin: GHOST_BIN, ...answer, versionExit: 0, signalsMatched: [{ type: 'mcp', value: 'local_one' }] });
+  for (const id of ['moved', 'odd', 'new']) assert.deepEqual([byId[id].installed, byId[id].version], [false, null], `${id} is probed here`);
+  assert.deepEqual(r.json.packageManagers.filter((p) => p.present).map((p) => p.name), ['brew'], 'the package managers are the earlier ones');
+  assert.deepEqual(r.json.context.mcpServers, ['local_one', 'remote_one'], 'the context is this account, not the earlier one');
+
+  // A list of package managers that is not the whole list is not taken: that part is probed again.
+  write(earlier, JSON.stringify({ tools: [], packageManagers: [{ name: 'brew', present: true, paths: [] }] }));
+  const again = runScript('probe-clis.mjs', ['--cwd', codex, '--catalog', catalog, '--tools-from', earlier], { env });
+  assert.equal(again.json.toolsReused, 0);
+  assert.deepEqual(again.json.packageManagers.map((p) => p.name), PACKAGE_MANAGER_NAMES);
+
+  // A file that is not an output of this script is a bad argument.
+  write(earlier, JSON.stringify({ checks: [] }));
+  for (const file of [earlier, path.join(fx.root, 'no-such-clis.json')]) {
+    const bad = runScript('probe-clis.mjs', ['--cwd', codex, '--catalog', catalog, '--tools-from', file], { env });
+    assert.equal(bad.code, 2);
+    assert.equal(bad.stdout, '');
+    assert.ok(!norm(bad.stderr).includes(norm(fx.root)));
+  }
 });

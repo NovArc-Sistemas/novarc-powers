@@ -1,0 +1,91 @@
+{
+  "$comment": "Factors behind savings that are NOT measured. scripts/impact-estimates.mjs multiplies a number measured by session-impact.mjs by one of these factors and reports the result apart from measured waste; an estimate is never added into a measured total. `kind` says what a factor stands on: `project-claim` (a number the tool's own project publishes, kept in `quote`), `documented` (behaviour the vendor's documentation describes, kept in `quote`) or `assumption` (no published number exists; `source` states the assumption and `quote` is null). `id` is the stable id printed with each estimate. `label` and `basis` are English; `pt` holds the same two texts in Brazilian Portuguese (`--lang pt`). `basis` is the one sentence printed as the estimate's `source`, with no \"source:\" prefix: the board adds it. Every entry was checked against its source on `verifiedAt`; entries older than 90 days are re-checked before use. A factor without `source`, `verifiedAt` and `basis` (and a `quote`, unless it is an assumption) is ignored.",
+  "verifiedAt": "2026-11-23",
+  "estimates": [
+    {
+      "id": "rtk-output",
+      "kind": "project-claim",
+      "tool": "rtk",
+      "label": "Command output a filter would cut",
+      "appliesWhen": "The rtk CLI is not installed, according to probe-clis.mjs. When it is installed, or when the probe has no answer, no estimate is made.",
+      "base": "toolOutput.shellResultTokensApprox",
+      "factor": 0.2,
+      "weighting": "input",
+      "source": "https://github.com/rtk-ai/rtk",
+      "verifiedAt": "2026-11-23",
+      "quote": "Built by 200+ contributors, written against real command output, and every filter has to cut at least 20% to ship.",
+      "basis": "rtk's own README says every filter it ships has to cut at least 20% of a command's output, and that floor is applied here to all the shell output measured in the window: the project's claim, not a measurement.",
+      "pt": {
+        "label": "Saída de comandos que um filtro cortaria",
+        "basis": "O README do próprio rtk diz que todo filtro que ele publica precisa cortar pelo menos 20% da saída de um comando, e esse piso é aplicado aqui a toda a saída de shell medida na janela: é a afirmação do projeto, não uma medição."
+      },
+      "caveats": [
+        "The same README gives the other end of its range as \"up to 90% less command output\"; the low end is used.",
+        "rtk leaves a command it has no filter for untouched, so the floor does not hold for every command head in the window.",
+        "The weighted figure counts each token once at the base input rate: command output is input to the model. Cache writes and later re-reads of the same output are not added."
+      ]
+    },
+    {
+      "id": "graph-exploration",
+      "kind": "assumption",
+      "tool": "graphify",
+      "label": "Exploration a knowledge graph could answer",
+      "appliesWhen": "Project scope, the project holds code, and it has no graphify-out/ folder. When the snapshot does not say whether the folder exists, no estimate is made.",
+      "base": "waste[kind=exploration].tokens",
+      "factor": 0.25,
+      "source": "assumption: a quarter of the exploration before the first edit is structural lookup (where something is defined, what uses it) that a knowledge graph could answer",
+      "verifiedAt": "2026-11-23",
+      "quote": null,
+      "basis": "Assumption, not a measurement: a quarter of the measured exploration before the first edit is structural lookup that a knowledge graph could answer.",
+      "pt": {
+        "label": "Exploração que um grafo de conhecimento poderia responder",
+        "basis": "Suposição, não medição: um quarto da exploração medida antes da primeira edição é busca estrutural que um grafo de conhecimento poderia responder."
+      },
+      "caveats": [
+        "No published number was found for this share, so none is cited.",
+        "The share is kept below one half on purpose: reading the files that are then edited is part of the same measured exploration, and a graph does not replace it. A graph query also costs a model call of its own, which is not subtracted."
+      ]
+    },
+    {
+      "id": "unused-skill-descriptions",
+      "kind": "documented",
+      "tool": null,
+      "label": "Descriptions of skills never invoked",
+      "appliesWhen": "A skill listed in unusedContext.skillsNeverInvoked has a descriptionChars in the snapshot's elements.skills.",
+      "base": "elements.skills[].descriptionChars, counted as characters / 4, times the sessions in the window",
+      "maxDescriptionChars": 1536,
+      "source": "https://code.claude.com/docs/en/skills",
+      "verifiedAt": "2026-11-23",
+      "quote": [
+        "In a regular session, skill descriptions are loaded into context so Claude knows what's available, but full skill content only loads when invoked.",
+        "the combined `description` and `when_to_use` text is truncated at 1,536 characters in the skill listing to reduce context usage.",
+        "When the listing overflows, Claude Code drops descriptions starting with the skills you invoke least, so the skills you use most keep their full text."
+      ],
+      "basis": "Description length of each skill never invoked in the window (capped at 1,536 characters, counted as characters / 4) times the sessions in the window, because Claude Code's documentation says skill descriptions are loaded into context in every session; it is an upper bound, since an overflowing skill listing drops the least-invoked descriptions first.",
+      "pt": {
+        "label": "Descrições de skills nunca invocadas",
+        "basis": "Tamanho da descrição de cada skill nunca invocada na janela (limitado a 1.536 caracteres, contado como caracteres / 4) vezes as sessões da janela, porque a documentação do Claude Code diz que as descrições das skills são carregadas no contexto em toda sessão; é um limite superior, já que uma lista de skills que estoura o orçamento descarta primeiro as descrições das menos invocadas."
+      },
+      "caveats": [
+        "Characters / 4 is the same token approximation session-impact.mjs uses for tool output; it is a convention, not a tokenizer.",
+        "The documentation cited is Claude Code's. Whether another agent loads skill descriptions the same way was not checked.",
+        "No weighted figure is given: the listing is mostly read from the prompt cache, and how often it is written or read is not measured."
+      ]
+    },
+    {
+      "id": "unused-mcp-servers",
+      "kind": "unmeasured",
+      "tool": null,
+      "label": "MCP server never called",
+      "appliesWhen": "A server is listed in unusedContext.mcpServersNeverCalled.",
+      "source": "session-impact.mjs: unusedContext.mcpServersNeverCalled",
+      "verifiedAt": "2026-11-23",
+      "quote": null,
+      "basis": "Configured, but none of its tools was called in the window; no token number is given because the size of its tool schemas is not in any probe.",
+      "pt": {
+        "label": "Servidor MCP nunca chamado",
+        "basis": "Configurado, mas nenhuma de suas ferramentas foi chamada na janela; não há número de tokens porque o tamanho dos esquemas das ferramentas não aparece em nenhuma sondagem."
+      }
+    }
+  ]
+}

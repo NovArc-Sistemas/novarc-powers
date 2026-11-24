@@ -1,11 +1,20 @@
 #!/usr/bin/env node
-// probe-clis.mjs --cwd <dir> [--catalog <path>]
+// probe-clis.mjs --cwd <dir> [--catalog <path>] [--provider <p> --config-dir <dir>] [--tools-from <clis.json>]
 //
 // For every catalog tool with a `bin`: every match on PATH, version (first line, 120 chars),
 // whether more than one distinct binary answers to the name, and whether `verifyArgs` exits 0.
 // Also lists the package managers present and evaluates each tool's `signals` against the
 // project. Never runs auth or login commands; never runs anything that is not a catalog
 // version/verify call.
+//
+// The output has two parts. What is installed (`tools[]` without their signals, and
+// `packageManagers`) is about the machine; the signals and `context` are about `--cwd` and about
+// whose MCP servers are read.
+//   --provider, --config-dir  read the user-level MCP servers of that one account and of no
+//                             other; without them, of every account on the machine
+//   --tools-from              take the machine part from an earlier output of this script
+//                             instead of running every binary again; signals and context are
+//                             always worked out anew
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +22,7 @@ import {
   IS_WIN, parseArgs, isMain, printJson, warn, displayPath, scrubText, normalizeInputPath,
   readJsonSafe, readTextSafe, isFile, isDir, statSafe, realpathSafe, readdirSafe, run, git, home,
 } from './lib/common.mjs';
-import { claudeConfigDirs, codexDirs, desktopConfigFiles } from './lib/locations.mjs';
+import { userLocations, accountFromArgs } from './lib/locations.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CATALOG = path.join(HERE, '..', 'references', 'catalog', 'tools.json');
@@ -210,20 +219,32 @@ export function codexMcpNames(tomlText) {
   return names;
 }
 
-/** MCP server names configured anywhere this probe can see: project and user level. Names only. */
-export function mcpServerNames(cwd) {
+/**
+ * MCP server names configured where this probe looks: the project files under `cwd`, and the
+ * user level. Names only. Without `account` the user level is every account on the machine;
+ * with `account` (`{ provider, configDir }`) it is that config dir alone: the state file in the
+ * home folder (`~/.claude.json`) belongs to the default Claude account and is read only for it,
+ * and the desktop app and the other providers are somebody else's.
+ */
+export function mcpServerNames(cwd, account = null) {
   const names = new Set();
   for (const f of ['.mcp.json', '.claude/settings.json', '.claude/settings.local.json', '.cursor/mcp.json']) {
     const r = readJsonSafe(path.join(cwd, f));
     if (r.ok) mcpNamesFromObject(r.value, names);
   }
-  for (const d of claudeConfigDirs()) {
+  const loc = userLocations(account);
+  const h = home();
+  const key = (p) => { const real = realpathSafe(p) || p; return IS_WIN ? real.toLowerCase() : real; };
+  const defaultDir = key(path.join(h, '.claude'));
+  let homeState = !account;
+  for (const d of loc.claude) {
     for (const f of ['settings.json', 'settings.local.json', '.claude.json']) {
       const r = readJsonSafe(path.join(d.path, f));
       if (r.ok) mcpNamesFromObject(r.value, names);
     }
+    if (key(d.path) === defaultDir) homeState = true;
   }
-  const userJson = readJsonSafe(path.join(home(), '.claude.json'));
+  const userJson = homeState ? readJsonSafe(path.join(h, '.claude.json')) : { ok: false };
   if (userJson.ok && userJson.value) {
     mcpNamesFromObject(userJson.value, names);
     const projects = userJson.value.projects;
@@ -234,8 +255,8 @@ export function mcpServerNames(cwd) {
       }
     }
   }
-  for (const d of codexDirs()) for (const n of codexMcpNames(readTextSafe(path.join(d.path, 'config.toml')))) names.add(n);
-  for (const f of desktopConfigFiles()) { const r = readJsonSafe(f); if (r.ok) mcpNamesFromObject(r.value, names); }
+  for (const d of loc.codex) for (const n of codexMcpNames(readTextSafe(path.join(d.path, 'config.toml')))) names.add(n);
+  for (const f of loc.desktop) { const r = readJsonSafe(f); if (r.ok) mcpNamesFromObject(r.value, names); }
   return names;
 }
 
@@ -274,24 +295,64 @@ export function loadCatalog(p) {
   return { source: 'catalog', tools };
 }
 
-export function probe({ cwd, catalogPath = DEFAULT_CATALOG }) {
+const isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/**
+ * The machine part of an earlier output of this script, to be used again: what each tool's
+ * binary answered and which package managers are present. Entries are rebuilt field by field,
+ * so nothing but what probeTool() writes is carried over, and an entry that does not look like
+ * one is left out (its tool is probed again). Signals are never taken: they depend on where and
+ * for whom the probe runs.
+ */
+export function machinePart(earlier) {
+  const tools = new Map();
+  for (const t of earlier && Array.isArray(earlier.tools) ? earlier.tools : []) {
+    if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !(t.installed === null || typeof t.installed === 'boolean')) continue;
+    if (!(t.bin === null || typeof t.bin === 'string') || !isStrings(t.paths)) continue;
+    const e = {
+      id: t.id, kind: typeof t.kind === 'string' ? t.kind : null, bin: t.bin, installed: t.installed,
+      version: typeof t.version === 'string' ? t.version : null, paths: t.paths, collision: t.collision === true,
+      distinctBinaries: Number.isInteger(t.distinctBinaries) ? t.distinctBinaries : 0, verify: typeof t.verify === 'string' ? t.verify : null,
+    };
+    if (typeof t.versionError === 'string') e.versionError = t.versionError;
+    for (const k of ['versionExit', 'verifyExit']) if (k in t && (t[k] === null || Number.isInteger(t[k]))) e[k] = t[k];
+    tools.set(t.id, e);
+  }
+  const pms = earlier && Array.isArray(earlier.packageManagers) ? earlier.packageManagers : [];
+  const managers = PACKAGE_MANAGERS.map((name) => pms.find((p) => p && p.name === name && typeof p.present === 'boolean' && isStrings(p.paths)));
+  return { tools, packageManagers: managers.every(Boolean) ? managers.map((p) => ({ name: p.name, present: p.present, paths: p.paths })) : null };
+}
+
+/**
+ * `account` (`{ provider, configDir, supported }`) narrows the user-level MCP servers to one
+ * account. `reuse` is an earlier output of this function: its machine part is used again for
+ * every tool the catalog still names with the same binary.
+ */
+export function probe({ cwd, catalogPath = DEFAULT_CATALOG, account = null, reuse = null }) {
   const cat = loadCatalog(catalogPath);
-  const ctx = { cwd, deps: packageDeps(cwd), remotes: gitRemoteText(cwd), mcp: mcpServerNames(cwd) };
+  const ctx = { cwd, deps: packageDeps(cwd), remotes: gitRemoteText(cwd), mcp: mcpServerNames(cwd, account) };
+  const earlier = reuse ? machinePart(reuse) : null;
+  let reused = 0;
   const tools = cat.tools.map((t) => {
-    const pr = probeTool(t);
+    const known = earlier ? earlier.tools.get(t.id) : null;
+    const same = !!known && known.bin === (t.bin || null);
+    if (same) reused++;
+    const pr = same ? known : probeTool(t);
     const sig = evaluateSignals(t, ctx);
     const out = { ...pr, signalsMatched: sig.matched };
     if (sig.unknown.length) out.unknownSignalTypes = [...new Set(sig.unknown)];
     return out;
   });
-  const packageManagers = PACKAGE_MANAGERS.map((pm) => {
+  const packageManagers = (earlier && earlier.packageManagers) || PACKAGE_MANAGERS.map((pm) => {
     const m = whichAll(pm);
     return { name: pm, present: m.length > 0, paths: m.map((x) => displayPath(x)) };
   });
   return {
     cwd: displayPath(cwd, cwd),
     os: process.platform,
+    ...(account ? { account: { provider: account.provider, path: displayPath(account.configDir), supported: account.supported } } : {}),
     catalog: { source: cat.source, path: displayPath(catalogPath), ...(cat.reason ? { reason: cat.reason } : {}) },
+    ...(earlier ? { toolsReused: reused } : {}),
     tools,
     packageManagers,
     context: { mcpServers: [...ctx.mcp].sort(), hasPackageJson: isFile(path.join(cwd, 'package.json')), gitRemoteHosts: remoteHosts(ctx.remotes) },
@@ -308,7 +369,15 @@ if (isMain(import.meta.url)) {
   const args = parseArgs();
   const cwd = normalizeInputPath(args.cwd || process.cwd());
   if (!isDir(cwd)) { warn('--cwd is not a directory'); process.exit(2); }
+  const { account, error } = accountFromArgs(args);
+  if (error) { warn(error); process.exit(2); }
+  let reuse = null;
+  if (args['tools-from'] !== undefined) {
+    const r = typeof args['tools-from'] === 'string' ? readJsonSafe(normalizeInputPath(args['tools-from'])) : { ok: false, error: 'needs a file path' };
+    if (!r.ok || !r.value || typeof r.value !== 'object' || !Array.isArray(r.value.tools)) { warn(`--tools-from: ${r.ok ? 'not an output of this script' : r.error}`); process.exit(2); }
+    reuse = r.value;
+  }
   const catalogPath = args.catalog ? normalizeInputPath(args.catalog) : DEFAULT_CATALOG;
   if (args.catalog && !fs.existsSync(catalogPath)) warn('catalog not found; using the built-in list');
-  printJson(probe({ cwd, catalogPath }));
+  printJson(probe({ cwd, catalogPath, account, reuse }));
 }

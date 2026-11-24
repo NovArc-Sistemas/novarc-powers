@@ -22,10 +22,14 @@ existing gates working, and which gates would have prevented the problems this u
 
 Do not propose gates from a generic list. Propose them from evidence.
 
-1. Run `scripts/transcript-signals.mjs --cwd <project root>`. It reads past session transcripts
-   for this project locally and prints counts only: failed commands grouped by command, hook
-   blocks, user corrections, repeated retries, and sessions that ended on an error. It never
-   prints message text.
+1. Read `probes/<harness>/impact.json` (from `session-impact.mjs`). It was built from this
+   project's past sessions, locally, and holds counts only, never message text: commands
+   repeated after failing, tools that do not exist, work redone after a correction, hook
+   blocks, sessions that ended on an error, each with the tokens it cost (`waste[]`, with the
+   command heads involved). A gate that prevents 9 million tokens of retries a month is an easy
+   decision; one that prevents 50 thousand may not be worth its friction. Put that number in
+   the item's `saves`. (`transcript-signals.mjs --cwd <project root>` gives the same patterns
+   as plain counts per command, when you need more detail.)
 2. Read the project's own record of trouble: recent `fix`/`revert`/`hotfix` commits
    (`git log --oneline -200`), reverted PRs, a pendings or incidents file, CI failures on the
    default branch.

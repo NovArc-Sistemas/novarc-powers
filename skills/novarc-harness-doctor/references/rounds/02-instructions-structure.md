@@ -21,6 +21,25 @@ What the agent is told before the user speaks, and whether it actually arrives.
 - **Rules without a reason.** A rule that states why is followed in the cases its author did not
   foresee; one that does not is followed literally or ignored.
 
+## Rules that never fire, and rules the user keeps repeating
+
+Two things the transcripts show that the files cannot:
+
+- **Dead rules.** A rule about a tool, path or flow that left no trace in the last five sessions
+  that did real work (five or more tool calls each) is a candidate for removal. Search for what
+  the rule names before calling it dead, and say what you searched.
+- **Corrections that should be rules.** `session-impact` counts the times the user corrected
+  the agent. Read two or three of those sessions yourself: when the user says the same thing
+  more than once ("use pnpm, not npm", "tests live in `spec/`"), that sentence belongs in the
+  instruction file. Propose it as an `additive` item with the count as evidence
+  ("corrected 6 times in 30 days") and the tokens those corrections cost as `saves`. A
+  correction seen in two or more projects belongs in the user harness, not in each project.
+
+Also check what is **always loaded against what is read on demand**. An instruction file enters
+every session whole; a file it merely points to costs nothing until needed. Reference material
+(checklists, long examples, rarely used procedures) moves behind a one-line pointer that says
+when to read it.
+
 ## Language of agent-facing files
 
 Recommended practice, installed when missing: **files written for agents are in English**,

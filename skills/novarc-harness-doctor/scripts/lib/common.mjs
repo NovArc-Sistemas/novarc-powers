@@ -113,7 +113,7 @@ export function readTextSafe(p, maxBytes = 4 * 1024 * 1024) {
  */
 export function parseJsonSafe(text) {
   if (typeof text !== 'string') return { ok: false, error: 'unreadable' };
-  try { return { ok: true, value: JSON.parse(text.replace(/^﻿/, '')) }; } catch { return { ok: false, error: 'invalid JSON' }; }
+  try { return { ok: true, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) }; } catch { return { ok: false, error: 'invalid JSON' }; }
 }
 
 export function readJsonSafe(p) {

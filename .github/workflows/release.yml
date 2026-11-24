@@ -29,4 +29,11 @@ jobs:
         run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
       - run: npm test
       - run: npm run validate
-      - run: npm publish --access public
+      # Set the repository variable NPM_PUBLISH to "true" once the trusted publisher is
+      # configured on npmjs.com. Until then a tag only validates the release.
+      - name: Publish to npm
+        if: vars.NPM_PUBLISH == 'true'
+        run: npm publish --access public
+      - name: Publishing is off
+        if: vars.NPM_PUBLISH != 'true'
+        run: echo "::notice::NPM_PUBLISH is not set to true; skipped npm publish."

@@ -2,84 +2,113 @@
 
 [Português](README.md) · **English**
 
-Reviews your coding agent's harness, scores it from 0 to 100, and fixes it with you.
+Finds every agent harness on your machine, measures what it cost over the last 30 days, explains
+what is wrong and fixes what you approve, on an interactive board.
 
-The harness is everything that shapes a session before you type: instruction files,
+The **harness** is everything that shapes a session before you type: instruction files,
 permissions, hooks, skills, plugins, MCP servers, CLIs, the project's docs, and the gates that
-stop mistakes.
+stop mistakes. You have one user harness **per account** (each Claude Code account, Codex, and
+so on) and one project harness **per repository**.
 
 ## How to use it
 
 Without installing anything, ask your agent:
 
-> Run `npx -y novarc-powers fetch novarc-harness-doctor`, read the SKILL.md at the path it
-> prints and follow it to review my harness.
+> Run `npx -y github:NovArc-Sistemas/novarc-powers fetch novarc-harness-doctor`, read the SKILL.md
+> at the path it prints and follow it to review my harnesses.
 
-Or install the pointer with `npx novarc-powers add novarc-harness-doctor`, then just ask
-"review my harness" in any session.
+Or install the pointer with `npx github:NovArc-Sistemas/novarc-powers add novarc-harness-doctor`,
+then just ask "review my harnesses" in any session. It needs Node 20+ and git.
 
-## What it does
+## What happens
 
-1. **Asks** for the scope (user harness, project harness or both) and the mode.
-2. **Discovers**, changing nothing: every config dir of every account, imports that do not
-   resolve, exposed secrets (always masked), installed CLIs, docs, hooks and, for a project,
-   where past sessions tend to fail.
-3. **Builds a board** with a score per scope, the full inventory (including what is fine, with
-   an opinion on each entry) and the decision queue.
-4. **Works through eight rounds**: security and permissions; instructions and structure;
-   documentation; gates and automation; cleanup; skills and knowledge; CLIs, MCP servers and tools; external
-   dependencies.
-5. **Fixes item by item**: backup, change, verification after the change, and a record of what
-   could not be verified.
+1. **Find.** It lists the agent accounts on the machine and the git repositories with agent
+   activity. You choose what enters the review and, with more than one account, which is the
+   primary.
+2. **Measure.** It reads the last 30 days of sessions, on your machine only, and returns
+   numbers only: tokens in the period, context loaded before you type, commands repeated after
+   failing, work redone after a correction, exploration before the first edit, skills and MCP
+   servers loaded and never used.
+3. **Review in eight rounds**: security and permissions; instructions and structure;
+   documentation; gates and automation; cleanup; skills and knowledge; CLIs, MCP servers and
+   tools; external dependencies. A rule engine raises candidates; the agent confirms each one
+   in the real file before it becomes a finding.
+4. **Show the board**, with one tab per harness.
+5. **Apply what you approve**, with a backup, verification after the change and a record of
+   what could not be verified. `run.mjs undo` reverts one item or the whole review.
+6. **Record, and come back to check.** On close, each harness gets a record of the review: what
+   was decided, what changed, what each change promised to save, and the measurements of the
+   day. Ask for the review again a month later: it measures the period since, says per
+   measurement whether the expected effect was confirmed, checks on disk that each fix is still
+   in place, shows what came back, and reviews the harness again. What you declined is not
+   proposed again without a reason.
+
+## The board
+
+- **Overview:** the before and after score of every harness, what the fleet spent on measured
+  inefficiencies, the accounts found, and the decisions that cover several harnesses at once.
+- **One tab per harness**, in three parts:
+  - **Impact:** where the tokens went over the last 30 days, with measured apart from estimated.
+  - **Explorer:** the harness files (instructions, settings and permissions, hooks, support
+    scripts, project gates, skills, MCP servers, CLIs, docs). Open a file and see every
+    proposed change in place: what goes in red, what arrives in green, and the why beside it.
+    Switch between changes, before and after.
+  - **Diagnosis:** each finding with why it is a problem, what it costs, how it gets better and
+    the rule to keep.
+- **Decide:** one decision at a time, most severe first, with approve, decline, later or ask.
+
+The board opens as a private page on claude.ai (if you use Claude Code and agree) or as a local
+page on `127.0.0.1`. The content is the same.
+
+## Accounts
+
+If the machine has more than one account, each gets its own tab and you choose one as the
+primary. The other accounts of the same provider then point at the primary's files; other
+providers get what can be replicated (instructions, skills, MCP servers), and the board says
+what is not portable and why. A check at session start keeps everything in step and never
+overwrites a file you edited by hand. Credentials and sessions are never touched.
 
 ## The two modes
 
 | | Guided review | Doctor |
 |---|---|---|
-| Reversible fixes with backup | you decide | applied |
-| Additions (missing rule, skills index) | you decide | applied |
-| Translating agent files to English | you decide | drafted for your approval |
+| Reversible fixes with backup | you decide | applied, shown afterwards |
+| Additions (missing rule, skills index) | you decide | applied, shown afterwards |
 | Turning on an opt-in feature confirmed for your version | you decide | applied and checked |
-| Permissions, secrets, deletions, installs, gates, MCP servers | you decide | queued for you |
+| Translating agent files to English | you decide | drafted for your approval |
+| Permissions, secrets, deletions, installs, gates, MCP servers, accounts | you decide | you decide |
 
 ## What it recommends
 
-Only what was verified at the source, with a date. Today:
+Only what was verified at the source, with a date:
 
-- **Superpowers** as a methodology that triggers on its own, plus a short skills index in
-  `CLAUDE.md` so skills fire without being named.
-- **rtk**, **caveman** and **ponytail** to spend fewer tokens, with a note on where they overlap.
-- **Graphify** for code projects, checking that the graph's update hooks work without slowing
-  development and that the agent is told to query the graph.
+- **CLI before MCP.** An MCP server stays at user level only if nearly every session uses it
+  and it does something a CLI cannot. The rest moves to the project or becomes a CLI, with the
+  login guided without asking for a token in chat.
 - **Agent-facing files in English**, which cost fewer tokens.
-- **Gates** built from the problems you actually had in the project, not a generic list.
-- **CLI before MCP.** Every MCP server becomes your decision, with the options laid out: replace
-  it with the official CLI, move it to project level, keep it at user level (only what nearly
-  every conversation needs) or turn it off. The skill suggests the missing CLIs, walks you
-  through each login without asking for a token in chat, and writes the CLI preference into
-  `CLAUDE.md`.
-- **Hidden and experimental features** that help, such as Claude Code's Code Mode: confirmed for
-  your installed version, turned on when every condition holds, and checked right after.
+- **Gates** built from the failures you actually had, weighed by what they cost.
+- **Superpowers** and a short skills index; **Graphify** for code projects, checking that the
+  graph stays fresh without slowing work; **rtk**, **caveman** and **ponytail**, with a note on
+  where they overlap.
+- **Hidden features** of your agent, confirmed for the installed version.
 
 ## Privacy
 
-Everything runs on your machine. Reading past sessions returns counts only (failed commands,
-corrections, hook blocks), never conversation text. Secrets show only their first 4 characters.
+Everything runs on your machine. Reading sessions returns counts only, never conversation
+text. Secrets show only their first 4 characters. The board contains the text of the harness
+files (secrets masked); it goes to claude.ai only if you ask.
 
-## Files it creates
+## Where files live
 
 ```text
-.novarc-powers/novarc-harness-doctor/
-├── state.json      # review state
-├── board.html      # the board
-├── board.md        # the same board as text
-├── reports/        # one report per run
-├── drafts/         # translations waiting for approval
-├── backups/        # local, never committed
-└── logs/           # local, never committed
+~/.novarc-powers/novarc-harness-doctor/
+├── runs/<id>/     # one folder per review: measurements, findings, decisions, backups, board
+├── history/       # one record per harness and review, which the next review compares against
+├── sync/          # record and check of linked accounts
+└── latest.json
 ```
 
-## Requirements
+## Credits
 
-Node 20 or newer for the diagnostic scripts (no dependencies). Without Node, the skill follows
-the manual steps and reports the review as not scored.
+The rule engine and the scoring model were inspired by
+[AgentShield](https://github.com/affaan-m/agentshield) (MIT), re-implemented here.

@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "novarc-harness-doctor/record.schema.json",
+  "title": "novarc-harness-doctor review record (v1)",
+  "description": "What one review left for one harness: what was found, decided and changed, what each change was expected to save, and the measurements of that moment. Written by `run.mjs close` and `run.mjs history --write` under history/<harnessKey>/, read by the next run on the same harness. It holds display paths and masked text only. Every string and every list has a limit: a record is a file anyone can edit, and nothing over a limit is read (the whole file is at most 4 MB). See references/follow-up.md.",
+  "type": "object",
+  "required": ["schema", "skillVersion", "harnessKey", "runId", "kind", "provider", "name", "path", "startedAt", "reviewedAt", "changesAppliedAt", "followUpAfter", "scores", "measure", "elements", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "skillVersion": { "type": "string", "maxLength": 64 },
+    "harnessKey": { "type": "string", "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$", "description": "The folder this record lives in: the slug of the harness name, a dash, and 8 hex characters of a SHA-256 over its kind, provider and real absolute path." },
+    "runId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,40}$", "description": "The run that made this review. The file is named after it." },
+    "language": { "enum": ["pt", "en"], "description": "The language of the run: what the `.md` beside the record is written in, and made again in when it is missing." },
+    "kind": { "enum": ["user", "project"] },
+    "provider": { "type": ["string", "null"], "maxLength": 64 },
+    "name": { "type": "string", "maxLength": 300 },
+    "path": { "type": "string", "maxLength": 32767, "description": "Display path: `~` for home. The absolute path of a harness under the home is in history/index.json alone." },
+    "startedAt": { "type": "string", "format": "date-time", "description": "When the run started." },
+    "reviewedAt": { "type": "string", "format": "date-time", "description": "When the review ended: the moment the run was closed, or the record was written for a run that is still open. Writing the record of a closed run again keeps it." },
+    "changesAppliedAt": { "type": ["string", "null"], "format": "date-time", "description": "When the last change of this harness was applied; null when nothing was." },
+    "followUpAfter": { "type": "string", "format": "date-time", "description": "reviewedAt plus followUpAfterDays (references/catalog/follow-up.json)." },
+    "followUpOf": {
+      "type": "object",
+      "description": "The record this review was compared with, when the harness had one.",
+      "required": ["runId", "reviewedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "type": "string", "maxLength": 60 },
+        "reviewedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "required": ["baseline", "current", "projected", "grade", "rounds"],
+      "additionalProperties": false,
+      "properties": {
+        "baseline": { "type": ["number", "null"], "description": "The harness as it was found." },
+        "current": { "type": ["number", "null"], "description": "The harness as this review left it." },
+        "projected": { "type": ["number", "null"], "description": "Where it lands once what was approved is applied." },
+        "grade": { "type": ["string", "null"], "maxLength": 8 },
+        "rounds": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["round", "status", "score"],
+            "additionalProperties": false,
+            "properties": {
+              "round": { "$ref": "#/$defs/round" },
+              "status": { "enum": ["pending", "done", "skipped", "not-applicable"] },
+              "score": { "type": ["number", "null"], "description": "null for a round that is not done." }
+            }
+          }
+        }
+      }
+    },
+    "measure": {
+      "type": ["object", "null"],
+      "description": "The measurement of this review's window; null when the harness was not measured (see measureSkipped).",
+      "required": ["window", "sessions", "metrics"],
+      "additionalProperties": false,
+      "properties": {
+        "window": {
+          "type": "object",
+          "required": ["days"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string", "format": "date-time" },
+            "to": { "type": "string", "format": "date-time" },
+            "days": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "sessions": { "type": "integer", "minimum": 0 },
+        "activeDays": { "type": "integer", "minimum": 0 },
+        "metrics": {
+          "type": "object",
+          "description": "The comparable numbers, per session (references/follow-up.md, \"Comparable metrics\"). A metric that was not measured is absent, never 0. `waste-share` is on the base `wasteShare.base` names.",
+          "additionalProperties": false,
+          "properties": {
+            "tokens-per-session": { "type": "number", "minimum": 0 },
+            "weighted-per-session": { "type": "number", "minimum": 0 },
+            "context-at-start": { "type": "number", "minimum": 0 },
+            "context-peak": { "type": "number", "minimum": 0 },
+            "waste-share": { "type": "number", "minimum": 0 },
+            "waste:retry": { "type": "number", "minimum": 0 },
+            "waste:loop": { "type": "number", "minimum": 0 },
+            "waste:notfound": { "type": "number", "minimum": 0 },
+            "waste:correction": { "type": "number", "minimum": 0 },
+            "waste:hook-block": { "type": "number", "minimum": 0 },
+            "waste:error-end": { "type": "number", "minimum": 0 },
+            "waste:exploration": { "type": "number", "minimum": 0 },
+            "tool-output": { "type": "number", "minimum": 0 }
+          }
+        },
+        "wasteShare": {
+          "type": "object",
+          "description": "The waste share on every base it could be told on, in percent. `raw`: waste tokens over all tokens. `weighted`: the same in input-token equivalents. The two are different quantities and are never compared with each other; `base` names the one `metrics[\"waste-share\"]` holds. A record without this block was written before the base was kept.",
+          "required": ["base"],
+          "additionalProperties": false,
+          "properties": {
+            "base": { "enum": ["weighted", "raw"] },
+            "weighted": { "type": "number", "minimum": 0 },
+            "raw": { "type": "number", "minimum": 0 }
+          }
+        },
+        "weights": {
+          "type": "object",
+          "description": "Which price weights the weighted numbers were made with. Two reviews are on the same weights when they name the same source and every model family both used has the same hash.",
+          "required": ["source", "families"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "type": "string", "maxLength": 200, "description": "The weights file, as the impact probe names it." },
+            "verifiedAt": { "type": "string", "maxLength": 40, "description": "When those weights were last checked against their sources." },
+            "families": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "object",
+                "required": ["id", "hash"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string", "maxLength": 120, "description": "A model family that had tokens in the window." },
+                  "hash": { "type": "string", "pattern": "^[0-9a-f]{12}$", "description": "12 hex characters of a SHA-256 over the ratios applied to that family." }
+                }
+              }
+            }
+          }
+        },
+        "unused": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "skills": { "type": "array", "maxItems": 5000, "items": { "type": "string", "maxLength": 300 } },
+            "mcpServers": { "type": "array", "maxItems": 5000, "items": { "type": "string", "maxLength": 300 } }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "description": "How well the tool calls of each source could be read in that window.",
+          "additionalProperties": false,
+          "properties": {
+            "claude": { "enum": ["not-read", "complete", "partial", "unknown"] },
+            "codex": { "enum": ["not-read", "complete", "partial", "unknown"] }
+          }
+        }
+      }
+    },
+    "measureSkipped": { "enum": ["shared-sessions", "no-transcript-reader", "not-measured"], "description": "Why `measure` is null. not-measured: the impact probe did not run or failed." },
+    "elements": {
+      "type": "object",
+      "description": "How many elements of each kind the harness had.",
+      "additionalProperties": false,
+      "properties": {
+        "permissions": { "type": "integer", "minimum": 0 },
+        "hooks": { "type": "integer", "minimum": 0 },
+        "skills": { "type": "integer", "minimum": 0 },
+        "agents": { "type": "integer", "minimum": 0 },
+        "plugins": { "type": "integer", "minimum": 0 },
+        "mcp": { "type": "integer", "minimum": 0 },
+        "clis": { "type": "integer", "minimum": 0 },
+        "docs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 1000,
+      "description": "Every item of the harness, whatever its status, each with what its revision is made of: `class`, `file`, `proposal` and `changes`.",
+      "items": {
+        "type": "object",
+        "required": ["id", "rev", "round", "severity", "class", "title", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9]{0,5}-[0-9]{1,3}$" },
+          "rev": { "type": "string", "pattern": "^[0-9a-f]{12}$", "description": "The revision of the item in its run: a hash of the harness id, class, file, proposal and changes." },
+          "round": { "$ref": "#/$defs/round" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "class": { "type": "string", "maxLength": 60 },
+          "title": { "type": "string", "maxLength": 204800 },
+          "status": { "enum": ["open", "approved", "in-progress", "fixed", "failed", "declined", "deferred", "ok", "not-applicable"] },
+          "file": { "type": "string", "maxLength": 200, "description": "The target file the reviewer named for an item, when it named one." },
+          "proposal": { "type": "string", "maxLength": 204800, "description": "What was proposed. A record written before proposals were kept has none." },
+          "decision": {
+            "type": "object",
+            "description": "The user's last decision on this item, when it has one.",
+            "required": ["action", "at"],
+            "additionalProperties": false,
+            "properties": {
+              "action": { "enum": ["approve", "decline", "defer"] },
+              "at": { "type": "string", "format": "date-time", "description": "When the user decided. For a carried decline, when they declined, in the review it comes from." },
+              "note": { "type": "string", "maxLength": 204800 },
+              "carriedFrom": {
+                "type": "object",
+                "description": "Set on a decline that was not given in this run: the user declined this same proposal in an earlier review, and the run carried the decision.",
+                "required": ["run", "item"],
+                "additionalProperties": false,
+                "properties": {
+                  "run": { "type": "string", "maxLength": 60 },
+                  "item": { "type": "string", "maxLength": 60 }
+                }
+              }
+            }
+          },
+          "fixedAt": { "type": "string", "format": "date-time" },
+          "verified": { "type": "string", "maxLength": 204800 },
+          "notVerified": { "type": "string", "maxLength": 204800 },
+          "principle": { "type": "string", "maxLength": 204800, "description": "The rule to keep, from the item's lesson." },
+          "saves": {
+            "type": "object",
+            "required": ["tokens", "basis"],
+            "additionalProperties": false,
+            "properties": {
+              "tokens": { "type": "integer", "minimum": 0 },
+              "basis": { "enum": ["measured", "estimated"] },
+              "metric": { "type": "string", "maxLength": 60 },
+              "how": { "type": "string", "maxLength": 204800 }
+            }
+          },
+          "previous": {
+            "type": "object",
+            "description": "The same finding in an earlier review of this harness.",
+            "required": ["run", "item"],
+            "additionalProperties": false,
+            "properties": {
+              "run": { "type": "string", "maxLength": 60 },
+              "item": { "type": "string", "maxLength": 60 }
+            }
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "The changes of the item, as proposed: part of what its revision is a hash of. For a fixed item they are also what the on-disk check of the next review looks for.",
+            "items": {
+              "type": "object",
+              "required": ["path", "before", "after"],
+              "additionalProperties": false,
+              "properties": {
+                "file": { "type": "string", "maxLength": 200, "description": "The file id the reviewer wrote on the change, when it wrote one." },
+                "path": { "type": "string", "maxLength": 32767, "description": "Display path." },
+                "before": { "type": "string", "maxLength": 204800 },
+                "after": { "type": "string", "maxLength": 204800 },
+                "insertAfter": { "type": "string", "maxLength": 204800 },
+                "hashAfter": { "type": ["string", "null"], "maxLength": 128, "description": "SHA-256 of the file after the change, from the ledger; null when the change removed the file; absent when the change was not recorded in the ledger." },
+                "deleted": { "type": "boolean", "description": "true when the change removed the file." }
+              }
+            }
+          },
+          "changesOmitted": { "type": "boolean", "description": "true when the item had changes and the record does not keep them: there were too many, or the record would have been over its size limit. Such an item is not checked on disk, and its decline is carried only when the revision is equal as written." }
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "description": "The comparison this review made with the record before it: the `followUp` object of state.schema.json (`$defs.followUp`), validated against that definition."
+    }
+  },
+  "$defs": {
+    "round": { "type": "integer", "minimum": 1, "maximum": 8 }
+  }
+}

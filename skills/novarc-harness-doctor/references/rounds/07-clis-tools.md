@@ -48,7 +48,21 @@ removing or moving a server changes what the agent can do.
 | Required by the project (its docs or team depend on it) | Keep it at project level, committed in `.mcp.json` without secrets | `none` / `reversible` |
 
 The bar for user level is high: "I use it sometimes" means project level or on demand. When in
-doubt, propose project level and let the user decide.
+doubt, propose project level and let the user decide. Two questions settle most cases, and a
+server stays at user level only with a yes to both:
+
+1. **Is it universal?** Would nearly every session, in every project, use it?
+2. **Does it do what a CLI behind a skill cannot?** Interactive session state, streaming, an
+   authentication handshake, structured browsing. A request-and-response API is a CLI's job.
+
+Use the measurement: `impact.unusedContext.mcpServersNeverCalled` names the servers that were
+loaded in every session of the window and never called once, and the board's MCP view shows the
+call count of each. More than ten servers at one level is a finding by itself, whatever each
+one does: every tool definition is paid for in every session.
+
+A server listed in `impact.unusedContext.mcpServersUnknown` (call count `null`) was not measured:
+its transcripts could not be fully read. Never propose removing it as unused; say that its use
+is unknown and ask the user.
 
 Options to put in front of the user for each server, in this order: replace with CLI; move to
 project level; keep at user level; disable for now. One line each on what changes.

@@ -13,8 +13,9 @@ const body2 = renderBlockBody(
 
 test('block body names the skill, the summary and the pinned fetch command', () => {
   assert.match(body, /`alpha`: Alpha summary\./);
-  assert.match(body, /npx -y novarc-powers@9\.9\.9 fetch alpha/);
-  assert.match(body, /read the SKILL\.md at the printed path and follow it/);
+  assert.match(body, /npx -y novarc-powers@9\.9\.9 fetch <skill>/);
+  assert.match(body, /github:NovArc-Sistemas\/novarc-powers#v9\.9\.9 fetch <skill>/);
+  assert.match(body, /read that file and follow it/);
 });
 
 test('insert into a missing file creates just the block', () => {
