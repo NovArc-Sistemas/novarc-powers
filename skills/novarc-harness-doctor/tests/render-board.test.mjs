@@ -169,9 +169,10 @@ test('the only external resource is the web font stylesheet, and --offline leave
       assert.ok(!/@import|url\(/i.test(markup), 'no CSS imports or url()');
       assert.ok(!/\bsrc\s*=/.test(markup), 'no src attribute anywhere');
       assert.ok(!/import\(|XMLHttpRequest|WebSocket|sendBeacon/.test(markup), 'no other way out');
-      // fetch exists only for the local server channel, and only with relative /api paths.
+      // fetch exists only to ask the local server whether the board was rebuilt: one relative GET.
       const fetches = [...markup.matchAll(/fetch\(([^)]*)/g)].map((m) => m[1]);
-      assert.ok(fetches.length > 0 && fetches.every((f) => /^api\('\/api\/(decisions|state)'/.test(f)), fetches.join(' | '));
+      assert.ok(fetches.length === 1 && /^'\/api\/state\?t='/.test(fetches[0]), fetches.join(' | '));
+      assert.ok(!/method:\s*'POST'|\/api\/decisions/.test(markup), 'nothing is ever sent');
     }
     // One visual direction: an explicit light page, no dark-mode inversion.
     const html = online.read('board.html');
@@ -271,10 +272,11 @@ test('--channel sets the hint the page starts from; the state can set it too', (
     assert.equal(fromState.boot().channel, 'artifact');
     assert.equal(both.boot().channel, 'file');
     assert.equal(none.boot().channel, 'file');
-    // The page still finds out by itself: all three ways are in every board.
+    // The board only shows, whatever the channel: it refreshes from the local server, and that is all it asks.
     const html = none.read('board.html');
-    for (const s of [".use('db')", ".collection('decisions')", '/api/decisions', '/api/state', 'run.mjs decide', 'localStorage']) assert.ok(html.includes(s), s);
-    assert.ok(!/window\.claude\.db|claude\.db\b/.test(html), 'the namespace is only ever reached through use()');
+    for (const s of ['/api/state', 'localStorage']) assert.ok(html.includes(s), s);
+    for (const s of [".use('db')", ".collection('decisions')", '/api/decisions', 'run.mjs decide']) assert.ok(!html.includes(s), s);
+    assert.ok(!/claude\.use|window\.claude/.test(html), 'the Artifact runtime is never reached');
   } finally { for (const x of [flag, fromState, both, none]) rmrf(x.dir); }
 });
 
@@ -298,7 +300,7 @@ test('--channel artifact writes a page fragment; server and file write a standal
     assert.ok(!/<meta\b/i.test(frag), 'charset and viewport come from the publisher');
     // The title, then the stylesheet and the font link, then the content, the data and the script.
     const order = ['<title>', '<style>', '</style>', '<link rel="stylesheet" href="https://fonts.googleapis.com/', '<a class="skip" href="#view" id="skip">',
-      '<nav class="nav" id="nav"', '<main id="view"', '<footer id="foot">', '<div class="tray on-dark" id="tray"', '<script type="application/json" id="board-data">', '<script>\n'];
+      '<nav class="nav" id="nav"', '<aside class="side" id="side"', '<main id="view"', '<footer id="foot">', '<script type="application/json" id="board-data">', '<script>\n'];
     const at = order.map((s) => frag.indexOf(s));
     assert.ok(at.every((i, k) => i >= 0 && (k === 0 || i > at[k - 1])), `${order.map((s, k) => `${s} at ${at[k]}`).join('; ')}`);
     assert.ok(frag.endsWith('</script>\n'));
@@ -902,13 +904,14 @@ test('language "pt" renders Portuguese strings in both files; enum values stay u
     const data = boot();
     assert.deepEqual([data.lang, data.locale], ['pt', 'pt-BR']);
     assert.deepEqual(data.t, STRINGS.pt, 'the page receives the active dictionary, and only that one');
-    assert.equal(data.t.nav.overview, 'visão geral');
-    assert.equal(data.t.madeWith, 'Feito com NOVARC Powers');
-    assert.equal(STRINGS.en.madeWith, 'Made with NOVARC Powers');
+    assert.equal(data.t.nav.overview, 'Visão geral');
+    assert.equal(data.t.nav.pending, 'Pendências');
+    assert.equal(data.t.madeWith, 'Feito com NovArc Powers');
+    assert.equal(STRINGS.en.madeWith, 'Made with NovArc Powers');
     assert.equal(data.home, HOMEPAGE_URL, 'the footer link travels with the data, so the page source names no other address');
-    assert.ok(!/NovArc Powers/.test(html), 'the product name is written NOVARC Powers');
-    assert.equal(data.t.channel.file, 'cole o comando no chat');
-    assert.equal(data.t.channel.artifact, 'decisões pelo painel');
+    assert.ok(!/NOVARC Powers/.test(html), 'the product name is written NovArc Powers');
+    assert.equal(data.t.kind.user, 'Conta');
+    assert.equal(data.t.kindGroup.project, 'Projetos');
     for (const s of ['Modo: revisão guiada', '## Decisões pendentes', 'Rodada 2: Instruções e estrutura', '| crítica |', '| aprovado |', '| aplicando |',
       'Nota: Antes 75.1 (B) · Agora 79.5 (B) · Depois das aprovações 82.5 (B)', '### Defesas reconhecidas', 'Nenhuma defesa registrada.', '## Registro', 'últimos 30 dias']) {
       assert.ok(md.includes(s), `board.md has "${s}"`);

@@ -38,7 +38,7 @@ probes/summary.json what the last probe run did
 findings/<unit>.json  what a reviewer found (see "Findings file")
 groups.json         stable group ids
 status.json         overlay of item status changes (decisions, applied, verified)
-decisions.jsonl     one decision per line, appended by the board channel or `run.mjs decide`
+decisions.jsonl     one decision per line, appended by `run.mjs decide`
 log.jsonl           run events, rendered into the state's log
 ledger.json         every file change the run applied, with hashes and backup paths
 backups/<stamp>/    copies taken before each change (secrets masked or file skipped)
@@ -362,6 +362,13 @@ The channel decides the shape of `board.html`:
 | `server`, `file` | A standalone document (doctype, head, body) |
 | `artifact` | E-mail addresses are masked in everything it embeds, file text included, because this copy leaves the machine (a change that can no longer be placed in its file once masked is listed under `warnings`). A page fragment for the Artifact publisher, which adds its own document around it: `<title>` first, then styles, content and inline scripts, with no doctype, `html`, `head` or `body` tag. The embedded data is printed one entry per line so the publishing agent can read and patch it. Do not open this file from disk or serve it: build again with `--channel server` for the local page |
 
+The board is view-only: it has no decision control and sends nothing back; its Pending view
+(`#/pending`, old `#/decide` links open it) lists what waits for a decision by id. A side index
+lists the harnesses (accounts, then projects) and the sections of the open page. A change in a
+file can be put in focus with `?c=<item>.<change>` in the route. The page data carries
+`hookEvents`, the hook lifecycle the explorer draws, checked against the blocking tables of
+`lib/snapshot/elements.mjs` by a test.
+
 The board remembers the open route per run in the browser's storage and reopens it after a
 reload when the URL has no hash; it works the same without storage.
 
@@ -375,13 +382,10 @@ Serves the run's board on `127.0.0.1` only and prints `{ "url": "http://127.0.0.
 |---|---|
 | `GET /?t=` | `board.html` |
 | `GET /api/state?t=&v=<version>` | `{ "version", "changed": bool }`; the board reloads when it changed |
-| `GET /api/decisions?t=` | decisions recorded so far |
-| `POST /api/decisions?t=` | appends one decision (with its optional `rev`) to `decisions.jsonl` |
-
-Every route needs the token; the server serves no other file, sets no CORS headers, refuses a
-`Host` that is not loopback (403), rejects bodies over 16 KB (413) and invalid decisions (400),
-stamps each decision with its own clock, and exits after 12 hours or when the run is closed
-(409 on writes once closed). Without `--run` it serves the latest run.
+Every route needs the token; any request that is not a `GET` is refused (405), before the token
+is checked. The server
+serves no other file, sets no CORS headers, refuses a `Host` that is not loopback (403), and
+exits after 12 hours or when the run is closed. Without `--run` it serves the latest run.
 
 ## Findings file
 
@@ -402,18 +406,23 @@ adds verdicts, notes and item links, never the base inventory.
 
 ## Decisions
 
-One decision, wherever it travels:
+**The board is view-only.** The user reads it and decides in the conversation with the agent,
+which records each decision with `run.mjs decide`. The board shows the decisions recorded so
+far, and its Pending tab lists what still waits, by id.
+
+One decision:
 
 ```json
 { "id": "<uuid>", "at": "<ISO>", "runId": "<runId>", "target": "ACME-104",
-  "action": "approve", "note": "optional text", "exclude": [], "rev": "0a1b2c3d4e5f", "via": "board" }
+  "action": "approve", "note": "optional text", "exclude": [], "rev": "0a1b2c3d4e5f", "via": "chat" }
 ```
 
 `target` is an item id, a group id, or `accounts.primary` (with the chosen account id in `note`).
 
 **A decision is about one revision.** `rev` is the revision of the item or group the user was
-looking at. The board sends it; a decision typed in chat takes the current one; a decision that
-arrives without one is bound to the revision in the last built board. A decision whose `rev` is
+looking at. `run.mjs decide` takes the current one unless `--rev` is given; a decision that
+arrives without one through `decisions --ingest` is bound to the revision in the last built
+board. A decision whose `rev` is
 not the current revision is not applied (it comes back under `stale`).
 
 - Item `rev`: the first 12 hex characters of a SHA-256 over the canonical JSON (sorted keys, no
@@ -423,7 +432,7 @@ not the current revision is not applied (it comes back under `stale`).
 - Group `rev`: the same hash over its members' `itemId:rev`, sorted.
 - `state.json` holds the authoritative values; never compute them by hand.
 
-A note that holds a credential is refused in every channel.
+A note that holds a credential is refused.
 
 **Privacy of what the run writes and prints.** `state.json`, the review records and every
 answer of `run.mjs` pass the same barriers: credentials masked; the home directory as `~`; and
@@ -432,12 +441,6 @@ content, not the text of a change, not the proposal) e-mail addresses masked and
 outside the run's harnesses cut to their last two segments. `build` reports how many places it
 rewrote. Data read back from disk (records, the index, file names given to `--ingest`) is
 untrusted and goes through the same barriers before it is used or printed.
-
-| Channel | Board side | Session side |
-|---|---|---|
-| `artifact` (claude.ai Artifact with the `db` capability) | `db.collection("decisions").doc(<target>).set(decision)` | List the `decisions` collection, save it as a JSON array or as one file per document in a folder, `run.mjs decisions --ingest <file or folder>` |
-| `server` (`serve-board.mjs`) | `POST /api/decisions` | `run.mjs decisions` |
-| `file` (board opened from disk) | Copies `run.mjs decide ... --rev <rev>` text for the user to paste in chat | The agent runs what the user pasted |
 
 Effect on an item: `approve` → `approved`; `decline` → `declined`; `defer` → `deferred`; `ask` →
 stays `open` with `question` set. A group decision applies to every item of the group not listed

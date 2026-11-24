@@ -133,18 +133,22 @@ node <skill>/scripts/run.mjs build --channel <artifact|server|file>
 It merges everything into `<run>/state.json`, computes the scores (`references/scoring.md`; never
 write one by hand), checks that every change is anchored in its file (fix any warning it
 prints), and renders `<run>/board.html`. Open it the way the environment file says. The board
-has an overview (every harness before and after, accounts, group decisions), one tab per
-harness (impact, explorer of its files with each change drawn in place, diagnosis) and a
-Decide tab. Tell the user in two sentences how to use it, and start with the three findings
-that matter most.
+is for looking, not for deciding: an overview (every harness before and after, accounts,
+group decisions), one tab per harness (impact, explorer of its files with each change drawn in
+place, diagnosis) and a Pending tab that lists what waits for a decision, by id. Tell the user
+in two sentences that they read the board and decide here, in the conversation, and start with
+the three findings that matter most.
 
 ### 5. Decide and apply
 
 Loop until `run.mjs next` suggests `close`:
 
-1. **Collect decisions**: `run.mjs decisions` (the environment file says how they arrive from
-   the board). In chat, record what the user says with `run.mjs decide`. Answer every question
-   the user asked from the board, in chat, in the same teaching style.
+1. **Decide with the user, in chat.** Walk through the pending items (most impact first, or
+   in the order the user asks), answer every question in the same teaching style, and record
+   each decision the user states with `run.mjs decide --target <id> --action
+   approve|decline|defer [--note "..."]`, groups included (`--exclude` for the items the user
+   leaves out). Never record a decision the user did not state. When the user asks something
+   about an item, answer it; record `ask` only if they want the question kept on the board.
 2. **Apply what was approved**, one executor per harness (`apply:<harness>` units): for each
    item `run.mjs mark --status in-progress`, back up, make exactly the change the item shows,
    verify, `run.mjs record`, then `run.mjs mark --status fixed --verified "..."` (or `failed`,

@@ -1,12 +1,54 @@
-// Board client, fragment 4 of 9: the pieces every view shares: marks and tags, code lines, the
-// change panel, the full case, the decision bar and the paste-in-chat box.
+// Board client, fragment 4 of 10: the pieces every view shares: marks and tags, the kind of a
+// harness, the folded "why it matters" note, code lines, the change panel and the full case.
 
-function sevMarks(sev) {
+/**
+ * The severity as four slanted bars (as many filled as the severity is high, so it reads without
+ * colour). `withWord` writes the severity beside them, in place of a separate tag.
+ */
+function sevMarks(sev, withWord) {
   var label = tx(T.severityAria, { severity: lbl(T.severity, sev) });
-  return el('span', { cls: 'sev ' + sev, role: 'img', 'aria-label': label, title: label }, el('i'), el('i'), el('i'), el('i'));
+  var marks = el('span', { cls: 'sev ' + sev, role: withWord ? null : 'img', 'aria-label': withWord ? null : label, 'aria-hidden': withWord ? 'true' : null, title: label }, el('i'), el('i'), el('i'), el('i'));
+  return withWord ? el('span', { cls: 'sevw ' + sev }, marks, lbl(T.severity, sev)) : marks;
 }
 
-function sevTone(sev) { return sev === 'critical' || sev === 'high' ? 'bad' : sev === 'medium' ? 'warn' : 'info'; }
+// --- the kind of a harness ------------------------------------------------------------------
+// An account (user harness) and a repository (project harness) never look alike: each kind has
+// its own glyph, its own treatment (a filled signal-blue mark against an outlined navy one) and
+// its own word, so the difference reads without colour too.
+
+function kindGlyph(kind) {
+  var user = kind === 'user';
+  return svg('svg', { 'class': 'kg', viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' },
+    user ? [svg('circle', { cx: 8, cy: 5.2, r: 3 }), svg('path', { d: 'M2.2 14.6c.5-3.2 2.9-5.1 5.8-5.1s5.3 1.9 5.8 5.1z' })]
+      : svg('path', { d: 'M1.5 3.5h4.6l1.5 1.7h6.9v8.3h-13z' }));
+}
+
+/** The marker of a harness kind. `opts`: { word: false } for the glyph alone (with a label for screen readers). */
+function kindMark(kind, opts) {
+  var k = kind === 'user' ? 'user' : 'project';
+  var o = opts || {};
+  var word = lbl(T.kind, k);
+  if (o.word === false) return el('span', { cls: 'kind ' + k + ' bare', role: 'img', 'aria-label': word, title: word }, kindGlyph(k));
+  return el('span', { cls: 'kind ' + k }, kindGlyph(k), el('span', { text: word }));
+}
+
+/** A harness name with its kind marker in front, as a link to the harness when `link` is set. */
+function harnessRef(hid, link) {
+  var h = HARNESS[hid];
+  if (!h) return el('span', { text: String(hid) });
+  var body = [kindMark(h.kind, { word: false }), el('span', { text: h.name })];
+  return link ? el('a', { cls: 'href', href: R.harness(hid) }, body) : el('span', { cls: 'href' }, body);
+}
+
+/**
+ * Teaching text the reader needs once: folded behind a small "why it matters" toggle, so that
+ * what drives a decision is what shows at first glance. The text stays one click away.
+ */
+function whyNote(text, key) {
+  if (!text) return null;
+  return fold('why:' + (key || text.slice(0, 40)), 'why', T.why, el('p', { text: text }), false);
+}
+
 
 function statusTone(status) {
   if (status === 'fixed' || status === 'ok') return 'ok';
@@ -35,7 +77,7 @@ function statusTags(item) {
 function cid(itemId) {
   var item = ITEM[itemId];
   if (!item) return el('span', { cls: 'cid', text: itemId });
-  return el('a', { cls: 'cid st-' + eff(item).status, href: R.item(itemId), title: item.title, text: itemId });
+  return el('a', { cls: 'cid st-' + item.status, href: R.item(itemId), title: item.title, text: itemId });
 }
 
 function cids(ids) {
@@ -61,12 +103,27 @@ function row() {
 
 function groupRow(text, span) { return el('tr', { cls: 'grp' }, el('td', { colspan: span, text: text })); }
 
+/**
+ * A page section. `sub` is a line shown under the title, or `{ why: text }` for teaching text,
+ * folded behind "why it matters". `toc` (`{ id, label }`, optional, as the fourth argument when
+ * it is an object with an id) lists the section in the side index.
+ */
 function section(kicker, title, sub) {
-  var s = el('section', { cls: 'sec' });
+  var rest = Array.prototype.slice.call(arguments, 3);
+  var toc = rest.length && rest[0] && rest[0].nodeType === undefined && rest[0].id ? rest.shift() : null;
+  var s = el('section', { cls: 'sec', id: toc ? toc.id : null, 'data-toc': toc ? (toc.label || title) : null });
   if (kicker) s.appendChild(el('div', { cls: 'sec-k', text: kicker }));
   s.appendChild(el('h2', { text: title }));
-  if (sub) s.appendChild(el('p', { cls: 'sub', text: sub }));
-  return append(s, Array.prototype.slice.call(arguments, 3));
+  if (sub && typeof sub === 'object') s.appendChild(whyNote(sub.why, title));
+  else if (sub) s.appendChild(el('p', { cls: 'sub', text: sub }));
+  return append(s, rest);
+}
+
+/** The id of an item as a button that copies it, for saying it in the chat ("approve U1-101"). */
+function copyId(id, cls) {
+  var b = el('button', { type: 'button', cls: 'cid copy' + (cls ? ' ' + cls : ''), title: tx(T.pend.copy, { id: id }), 'aria-label': tx(T.pend.copy, { id: id }), 'data-fk': 'copy:' + id, text: id });
+  b.addEventListener('click', function () { copyText(id, b); });
+  return b;
 }
 
 // --- code -----------------------------------------------------------------------------------
@@ -158,7 +215,7 @@ function historyNote(item) {
 
 /**
  * The full case of one item: what is wrong, the lesson, the exact change, the rule to keep and
- * the decision. `opts`: { target, actions, big }.
+ * what was decided, as the state records it. `opts`: { target }.
  */
 function caseCard(item, opts) {
   var o = opts || {};
@@ -167,13 +224,12 @@ function caseCard(item, opts) {
   var slim = !item.lesson && !(item.changes || []).length && (e.status === 'ok' || e.status === 'not-applicable');
   var card = el('article', { cls: 'case' + (slim ? ' slim' : '') + (o.target ? ' target' : ''), id: 'case-' + item.id, 'aria-labelledby': 'case-t-' + item.id });
   var head = el('header', { cls: 'chead' },
-    el('span', { cls: 'cid', text: item.id }),
-    sevMarks(item.severity),
-    tag(lbl(T.severity, item.severity), sevTone(item.severity)),
+    copyId(item.id),
+    sevMarks(item.severity, true),
     tag(item.round + ' ' + lbl(T.rounds, item.round)),
     item['class'] && item['class'] !== 'none' ? tag(lbl(T['class'], item['class'])) : null,
     item.origin && item.origin !== 'active' ? tag(lbl(T.origin, item.origin), 'dashed') : null,
-    item.group && GROUP[item.group] ? el('a', { cls: 'tag info', href: R.decide(item.group), text: tx(T.dg.group, { id: item.group }) }) : null,
+    item.group && GROUP[item.group] ? el('a', { cls: 'tag info', href: R.pending(), text: tx(T.dg.group, { id: item.group }) }) : null,
     statusTags(item));
   card.appendChild(head);
   card.appendChild(el('h3', { cls: 'ctitle', id: 'case-t-' + item.id, text: item.title }));
@@ -205,121 +261,10 @@ function caseCard(item, opts) {
     item.verified ? metaBlock(T.field.verified, item.verified) : null,
     item.notVerified ? metaBlock(T.field.notVerified, item.notVerified) : null,
     item.backup ? metaBlock(T.field.backup, el('span', { cls: 'mono', text: item.backup })) : null,
-    item.updatedAt ? metaBlock(T.field.updated, fmtDate(item.updatedAt, true)) : null,
+    item.updatedAt ? el('p', { cls: 'upd', text: T.field.updated + ' ' + fmtDate(item.updatedAt, true) }) : null,
     L.learnMore ? metaBlock(T.lesson.learnMore, extLink(L.learnMore)) : null);
   card.appendChild(el('div', { cls: 'cfoot' + (L.principle ? '' : ' solo') },
     L.principle ? el('div', { cls: 'principle' }, el('span', { cls: 'pk' }, el('span', { cls: 'glyph' }), T.lesson.principle), el('p', { text: L.principle })) : null,
     meta));
-  if (o.actions !== false) {
-    var bar = decisionBar(item.id, { big: o.big });
-    if (bar) card.appendChild(el('div', { cls: 'cact' }, bar));
-  }
   return card;
-}
-
-// --- decisions ------------------------------------------------------------------------------
-
-/** What the user typed or toggled in a decision bar, kept across redraws. */
-var barState = {};
-var excluded = {};
-var uidSeq = 0;
-
-function barOf(target) { return barState[target] || (barState[target] = { reopen: false, note: false, ask: false, text: '', error: false }); }
-
-function excludedOf(groupId) { return Object.keys(excluded[groupId] || {}).filter(function (id) { return excluded[groupId][id]; }); }
-
-function pasteMini(decision, failed) {
-  var cmd = decisionCommand(decision);
-  var btn = el('button', { type: 'button', cls: 'btn small', text: T.send.copy });
-  btn.addEventListener('click', function () { copyText(cmd, btn); });
-  return el('div', { cls: 'paste' }, el('p', { text: failed ? T.send.failed : T.send.pasteOne }), el('code', { text: cmd }), el('div', { cls: 'row' }, btn));
-}
-
-/** Several commands in one box, for the summary and the tray. */
-function pasteBox(decisions) {
-  var text = decisions.map(decisionCommand).join('\n');
-  var ta = el('textarea', { readonly: true, rows: String(Math.min(12, Math.max(2, decisions.length))), 'aria-label': T.send.pasteTitle, spellcheck: 'false' });
-  ta.value = text;
-  ta.addEventListener('focus', function () { ta.select(); });
-  var btn = el('button', { type: 'button', cls: 'btn primary small', text: T.send.copyAll });
-  btn.addEventListener('click', function () { copyText(text, btn); });
-  return el('div', { cls: 'paste' }, el('p', { text: T.send.pasteHint }), ta, el('div', { cls: 'row' }, btn));
-}
-
-/**
- * Buttons and status for one target (an item or a group). Returns null when there is nothing to
- * decide and nothing decided here. `opts`: { big, keys, compact }.
- */
-function decisionBar(target, opts) {
-  var o = opts || {};
-  var group = GROUP[target] || null;
-  var item = group ? null : ITEM[target];
-  if (!group && !item) return null;
-  var ui = barOf(target);
-  var local = group ? overlay.groups[target] || null : overlay.items[target] || null;
-  var members = group ? group.items.map(function (id) { return ITEM[id]; }).filter(Boolean) : [];
-  var decidable = group ? members.some(canDecide) : canDecide(item);
-  var settled = group ? !members.some(function (m) { return eff(m).status === 'open'; }) : item.status !== 'open';
-  var wrap = el('div', { cls: 'dbar' });
-
-  var showButtons = decidable && (ui.reopen || (!local && !settled));
-  if (local && !ui.reopen) {
-    var line = el('div', { cls: 'dstate ' + local.action }, el('span', { cls: 'pip' }), el('span', { text: T.decided[local.action] }));
-    if (local.note && local.action !== 'ask') line.appendChild(el('span', { cls: 'muted', text: local.note }));
-    if (sendState[local.id] === 'sending') line.appendChild(el('span', { cls: 'muted', text: T.send.sending }));
-    wrap.appendChild(line);
-    if (local.action === 'ask' && local.note) wrap.appendChild(el('p', { cls: 'muted', text: local.note }));
-    if (sendState[local.id] === 'failed' || sendState[local.id] === 'paste') wrap.appendChild(pasteMini(local, sendState[local.id] === 'failed'));
-  } else if (!local && settled && !ui.reopen) {
-    if (!decidable) return null;
-    if (group) wrap.appendChild(el('div', { cls: 'dstate' }, el('span', { cls: 'pip' }), el('span', { text: tx(T.grp.decided, { done: members.length, total: members.length }) })));
-    else wrap.appendChild(el('div', { cls: 'dstate' }, el('span', { cls: 'pip' }), el('span', { text: lbl(T.status, item.status) }), item.decision ? el('span', { cls: 'muted', text: item.decision }) : null));
-  }
-
-  if (!showButtons) {
-    if (decidable) {
-      var change = el('button', { type: 'button', cls: 'btn ghost small', 'data-fk': 'chg:' + target, text: T.act.change });
-      change.addEventListener('click', function () { ui.reopen = true; redraw(); });
-      wrap.firstChild ? wrap.firstChild.appendChild(change) : wrap.appendChild(change);
-    }
-    return wrap;
-  }
-
-  var send = function (action) {
-    var note = ui.text.trim();
-    if (action === 'ask' && !note) { ui.ask = true; ui.note = true; ui.error = true; redraw(); return; }
-    barState[target] = { reopen: false, note: false, ask: false, text: '', error: false };
-    decide(target, action, note, group ? excludedOf(target) : []);
-  };
-  var button = function (action, primary) {
-    var b = el('button', { type: 'button', cls: 'btn' + (primary ? ' primary' : '') + (o.big ? '' : ' small'), 'data-fk': 'dec:' + target + ':' + action, 'data-act': action },
-      primary ? el('span', { cls: 's' }) : null, action === 'ask' && ui.ask ? T.act.sendQuestion : T.act[action],
-      o.keys ? el('kbd', { text: o.keys[action] }) : null);
-    b.addEventListener('click', function () {
-      if (action === 'ask' && !ui.ask) { ui.ask = true; ui.note = true; redraw(); return; }
-      send(action);
-    });
-    return b;
-  };
-  var btns = el('div', { cls: 'dbtns', 'data-target': target }, button('approve', true), button('decline'), button('defer'), button('ask'));
-  if (!ui.note && !o.compact) {
-    var add = el('button', { type: 'button', cls: 'btn ghost small', 'data-fk': 'note:' + target, text: T.act.addNote });
-    add.addEventListener('click', function () { ui.note = true; redraw(); });
-    btns.appendChild(add);
-  } else if (ui.reopen || ui.ask) {
-    var cancel = el('button', { type: 'button', cls: 'btn ghost small', text: T.act.cancel });
-    cancel.addEventListener('click', function () { ui.reopen = false; ui.ask = false; ui.note = false; ui.error = false; redraw(); });
-    btns.appendChild(cancel);
-  }
-  wrap.appendChild(btns);
-  if (ui.note) {
-    var id = 'note-' + (++uidSeq);
-    var ta = el('textarea', { id: id, 'data-fk': 'ta:' + target, rows: '2' });
-    ta.value = ui.text;
-    ta.addEventListener('input', function () { ui.text = ta.value; if (ui.error && ta.value.trim()) { ui.error = false; } });
-    wrap.appendChild(el('div', { cls: 'dnote-f' }, el('label', { 'for': id, text: ui.ask ? T.act.questionLabel : T.act.noteLabel }), ta,
-      ui.error ? el('span', { cls: 'err', role: 'alert', text: T.act.questionRequired }) : null));
-  }
-  if (item && item.question && !local) wrap.appendChild(el('p', { cls: 'muted', text: T.statusAsked + ': ' + item.question }));
-  return wrap;
 }

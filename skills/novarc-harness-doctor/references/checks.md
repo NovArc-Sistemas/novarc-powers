@@ -112,6 +112,13 @@ sentences they rely on:
 Re-read the page before changing one of these rules. Which events can block, and through what,
 is decided in one place: `hookBlocking` in `scripts/lib/snapshot/elements.mjs`.
 
+## Permission precedence
+
+Claude Code evaluates permission rules in order: deny, then ask, then allow. The first match in
+that order decides, and a more specific rule does not change the order. A call that matches no
+rule follows the default mode (`permissions.defaultMode`). Source: the Claude Code permissions
+documentation, read on 2026-11-24.
+
 ## Defenses
 
 Reported in `defenses`, never as findings, so the board can show what is already fine:

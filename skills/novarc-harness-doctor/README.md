@@ -1,6 +1,6 @@
 # novarc-harness-doctor
 
-**Português** · [English](README.en.md)
+**Português** · [English](README.en.md) · Parte do [NovArc Powers](https://github.com/NovArc-Sistemas/novarc-powers)
 
 Encontra todos os harness de agente da sua máquina, mede o que custaram nos últimos 30 dias,
 explica o que está errado e corrige o que você aprovar, num painel interativo.
@@ -10,15 +10,39 @@ permissões, hooks, skills, plugins, servidores MCP, CLIs, a documentação do p
 que impedem erros. Você tem um harness de usuário **por conta** (cada conta do Claude Code, o
 Codex, e assim por diante) e um harness de projeto **por repositório**.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-overview.png" alt="Visão geral do painel: nota de antes e depois de cada harness e tokens gastos em ineficiências medidas" width="820">
+</p>
+
+- **Mede com os seus dados.** Lê as sessões dos últimos 30 dias, só na sua máquina, e conta os
+  tokens que foram para comando repetido depois de falhar, trabalho refeito depois de uma
+  correção sua, exploração às cegas e contexto carregado sem uso. Medido e estimado nunca se
+  misturam.
+- **Ensina enquanto diagnostica.** Cada achado vem com o porquê, o custo, a regra para levar e a
+  mudança desenhada dentro do próprio arquivo: o que sai em vermelho, o que entra em verde.
+- **É um explorador do seu harness.** Cada conta e cada projeto vira uma aba: instruções,
+  permissões, hooks, scripts de apoio, gates, skills, MCPs e CLIs, tudo navegável.
+- **Você decide conversando, ele aplica.** O painel é para ver; as decisões você toma na
+  conversa com o agente. Toda mudança tem backup e pode ser desfeita com um comando.
+- **Mantém suas contas iguais.** Escolha uma conta como principal; as outras do mesmo provedor
+  passam a apontar para ela, e as de outros provedores recebem a parte que dá para replicar.
+- **Volta para conferir.** Cada revisão fica registrada. Um mês depois, a mesma skill mede de
+  novo, mostra o que se confirmou, o que foi desfeito e o que voltou, e reavalia cada harness.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-explorer.png" alt="Explorador de um harness: o arquivo de instruções com a mudança proposta em vermelho e verde e a explicação ao lado" width="820">
+</p>
+
 ## Como usar
 
 Sem instalar nada, peça ao seu agente:
 
-> Rode `npx -y github:NovArc-Sistemas/novarc-powers fetch novarc-harness-doctor`, leia o SKILL.md
-> no caminho que ele imprimir e siga as instruções para revisar os meus harness.
+> Rode `npx -y novarc-powers fetch novarc-harness-doctor`, leia o SKILL.md no caminho que ele
+> imprimir e siga as instruções para revisar os meus harness.
 
-Ou instale o ponteiro com `npx github:NovArc-Sistemas/novarc-powers add novarc-harness-doctor`.
-Depois basta pedir "revisa meus harness" em qualquer sessão. Precisa de Node 20+ e git.
+Ou instale o ponteiro com `npx novarc-powers add novarc-harness-doctor`. Depois basta pedir
+"revisa meus harness" em qualquer sessão. Precisa de Node 20+ e git. Nada sai da sua máquina, a
+menos que você escolha publicar o painel como uma página privada no claude.ai.
 
 ## O que acontece
 
@@ -56,8 +80,8 @@ Depois basta pedir "revisa meus harness" em qualquer sessão. Precisa de Node 20
     o porquê. Alterne entre mudanças, antes e depois.
   - **Diagnóstico:** cada achado com o porquê é um problema, o que custa, como fica melhor e a
     regra para levar.
-- **Decidir:** uma decisão por vez, da mais grave para a mais leve, com aprovar, recusar, deixar
-  para depois ou perguntar.
+- **Pendências:** o que espera a sua decisão, com o código de cada item. A decisão em si você
+  toma na conversa com o agente ("aprova ACME-104", "por que U1-202?"): o painel só mostra.
 
 O painel abre como página privada no claude.ai (se você usa Claude Code e autorizar) ou como
 página local em `127.0.0.1`. O conteúdo é o mesmo.

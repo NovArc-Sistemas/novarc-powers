@@ -31,10 +31,10 @@
 node <skill>/scripts/serve-board.mjs --run <id>
 ```
 
-Give the user the URL it prints (it only answers on this machine). The user decides with the
-buttons on the page; read the decisions with `run.mjs decisions`. If a background process is
-not possible here, `run.mjs build --channel file` and give the path of `<run>/board.html`: the
-board then shows, for each decision, the line to paste in chat.
+Give the user the URL it prints (it only answers on this machine). The board is view-only: the
+user reads it and decides in this conversation, where you record each decision with
+`run.mjs decide`. If a background process is not possible here, `run.mjs build --channel
+file` and give the path of `<run>/board.html` to open from disk.
 
 ## Subagents
 

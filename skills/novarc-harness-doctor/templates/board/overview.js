@@ -1,4 +1,4 @@
-// Board client, fragment 5 of 9: the overview tab: title, totals, accounts, one row per
+// Board client, fragment 5 of 10: the overview tab: title, totals, accounts, one row per
 // harness and the group decisions.
 
 function heroBlock(kicker, titleNodes, lead, byline, small) {
@@ -68,7 +68,8 @@ function totalsBand() {
   var covered = {};
   groups.forEach(function (g) { g.items.forEach(function (id) { if (ITEM[id] && isOpen(ITEM[id])) covered[id] = true; }); });
   tot(el('div', { cls: 'v', text: fmtInt(open.length) }), T.tot.open,
-    groups.length ? pl(T.tot.openNote, groups.length, { items: fmtInt(Object.keys(covered).length) }) : (open.length ? T.tot.openNone : null));
+    [groups.length ? pl(T.tot.openNote, groups.length, { items: fmtInt(Object.keys(covered).length) }) + ' ' : null,
+      open.length ? el('a', { cls: 'tot-go', href: R.pending(), text: T.tot.seePending }) : null]);
   return band;
 }
 
@@ -89,10 +90,9 @@ var ELEMENT_STATES = ['linked', 'generated', 'copied', 'divergent', 'missing', '
  * each state. The element list and the notes open on demand. Labels and notes are shown as they
  * arrive: the scripts already write them in the run language.
  */
-function accountItem(a, accounts, choosing) {
+function accountItem(a, accounts) {
   var sync = a.sync || { mode: accounts.primary === a.id ? 'primary' : 'independent', status: 'none' };
   var isPrimary = accounts.primary === a.id || sync.mode === 'primary';
-  var chosen = overlay.primary && overlay.primary.note === a.id;
   var els = sync.elements || [];
   var counts = el('span', { cls: 'acc-counts' });
   ELEMENT_STATES.forEach(function (state) {
@@ -119,25 +119,15 @@ function accountItem(a, accounts, choosing) {
       sync.mode !== 'primary' ? tag(lbl(T.syncStatus, sync.status), sync.status === 'ok' ? 'ok' : sync.status === 'drift' ? 'warn' : sync.status === 'broken' ? 'bad' : '') : null),
     counts,
   ], body, false);
-  var act = null;
-  if (chosen) {
-    var state = sendState[overlay.primary.id];
-    act = el('div', { cls: 'acc-act' }, el('div', { cls: 'dstate approve' }, el('span', { cls: 'pip' }), el('span', { text: T.acc.chosen })),
-      state === 'failed' || state === 'paste' ? pasteMini(overlay.primary, state === 'failed') : null);
-  } else if (choosing) {
-    var b = el('button', { type: 'button', cls: 'btn small', 'data-fk': 'primary:' + a.id, text: T.acc.choose });
-    b.addEventListener('click', function () { decide(PRIMARY_TARGET, 'approve', a.id, []); });
-    act = el('div', { cls: 'acc-act' }, b);
-  }
-  return el('div', { cls: 'acc-item' + (isPrimary ? ' primary' : '') }, row, act);
+  return el('div', { cls: 'acc-item' + (isPrimary ? ' primary' : '') }, row);
 }
 
 function accountsPanel() {
   var accounts = ST.accounts;
   if (!accounts || !(accounts.list || []).length) return null;
   var undecided = accounts.primary === null || accounts.primary === undefined;
-  var s = section(null, T.acc.h, T.acc.sub);
-  // With no primary yet, the choice comes first: what it does, and a button on every row.
+  var s = section(null, T.acc.h, { why: T.acc.sub }, { id: 'ov-accounts', label: T.acc.h });
+  // With no primary yet, the choice comes first: what it does, and that it is made in the chat.
   if (undecided) s.appendChild(el('div', { cls: 'callout' }, el('b', { text: T.acc.noPrimaryTitle }), el('p', { text: T.acc.noPrimaryBody })));
   var byProvider = {};
   var order = [];
@@ -149,7 +139,7 @@ function accountsPanel() {
   order.forEach(function (p) {
     var list = byProvider[p].slice().sort(function (a, b) { return (accounts.primary === b.id) - (accounts.primary === a.id); });
     var rows = el('div', { cls: 'acc-list' });
-    list.forEach(function (a) { rows.appendChild(accountItem(a, accounts, undecided)); });
+    list.forEach(function (a) { rows.appendChild(accountItem(a, accounts)); });
     box.appendChild(el('div', null, el('div', { cls: 'prov-h' }, el('span', { cls: 'glyph' }), el('b', { text: lbl(T.provider, p) }), el('span', { cls: 'muted mono', text: pl(T.acc.accounts, list.length) })), rows));
   });
   s.appendChild(box);
@@ -174,9 +164,12 @@ function scoreBar(sc) {
     grade(sc.projectedGrade, sc.projected, p > b ? 'after' : '', T.fleet.after));
 }
 
-function harnessTypeText(h) {
+/** The provider of a harness in words, when its name does not already say it; null otherwise. */
+function providerWord(h) {
   var p = providerOf(h);
-  return lbl(T.harnessKind, h.kind) + (p ? ' · ' + lbl(T.provider, p) : '');
+  if (!p) return null;
+  var word = lbl(T.provider, p);
+  return h.name.toLowerCase().indexOf(word.toLowerCase()) >= 0 ? null : word;
 }
 
 /**
@@ -219,7 +212,9 @@ function followUpRow(h) {
 }
 
 function fleetRow(h) {
-  var name = el('div', { cls: 'hname' }, el('span', { cls: 'htype', text: harnessTypeText(h) }), el('b', { text: h.name }), el('span', { cls: 'p', text: h.path }));
+  var pw = providerWord(h);
+  // Under its group heading the row needs only the glyph of its kind, not the word again.
+  var name = el('div', { cls: 'hname' }, el('b', { cls: 'hn' }, kindMark(h.kind, { word: false }), el('span', { text: h.name })), el('span', { cls: 'p', text: (pw ? pw + ' · ' : '') + h.path }));
   var since = followUpRow(h);
   var label = tx(T.fleet.open, { name: h.name }) + (since ? '. ' + since.say : '');
   if (isEmptyHarness(h)) return el('a', { cls: 'hrow', href: R.harness(h.id), 'aria-label': label }, name, el('span', { cls: 'hempty', text: emptyText(h) }), since ? since.node : null);
@@ -233,12 +228,11 @@ function fleetRow(h) {
     : skip.reason === 'shared-sessions' && skip['with'] ? tx(T.fleet.sharedWith, { name: harnessName(skip['with']) })
       : skip.reason === 'no-transcript-reader' ? T.fleet.noReader
         : sessions === null ? T.notMeasured : pl(T.fleet.unmeasured, sessions);
-  var dots = el('span', { cls: 'dots', 'aria-hidden': 'true' });
-  open.slice(0, 16).forEach(function (i) { dots.appendChild(el('i', { cls: i.severity })); });
   return el('a', { cls: 'hrow', href: R.harness(h.id), 'aria-label': label }, name,
     scoreBar(sc),
     el('div', { cls: 'metric' }, el('b', { text: value }), el('span', { text: note })),
-    el('div', { cls: 'pend' }, el('span', { cls: 'p', text: open.length ? pl(T.fleet.toDecide, open.length) : T.fleet.nothing }), open.length ? dots : null),
+    // The count, and how serious the worst of them is (the one severity that drives the order).
+    el('div', { cls: 'pend' }, el('span', { cls: 'p', text: open.length ? pl(T.fleet.toDecide, open.length) : T.fleet.nothing }), open.length ? sevMarks(open[0].severity, true) : null),
     el('span', { cls: 'go', 'aria-hidden': 'true', text: '\u203a' }),
     since ? since.node : null);
 }
@@ -258,29 +252,13 @@ function groupSaving(group) {
   return pl(T.grp.saving, windowDays(), { tokens: fmtTokens(sum) }) + (estimated ? ' (' + T.grp.estimated + ')' : '');
 }
 
-function memberList(group, withBars) {
-  var locked = !!overlay.groups[group.id];
+/** The members of a group, each with its status as the state records it. */
+function memberList(group) {
   var list = el('ul', { cls: 'mlist' });
   group.items.forEach(function (id) {
     var m = ITEM[id];
     if (!m) return;
-    var out = !!(excluded[group.id] && excluded[group.id][id]);
-    var li = el('li', { cls: out ? 'out' : null }, cid(id),
-      el('span', { cls: 't' }, m.title, el('small', { text: harnessName(m.harness) })));
-    if (!locked && m.status === 'open') {
-      var box = el('input', { type: 'checkbox', checked: out });
-      box.addEventListener('change', function () {
-        if (!excluded[group.id]) excluded[group.id] = {};
-        excluded[group.id][id] = box.checked;
-        li.setAttribute('class', box.checked ? 'out' : '');
-      });
-      li.appendChild(el('label', null, box, T.grp.exclude));
-    } else {
-      li.appendChild(el('span', null, statusTags(m)));
-    }
-    list.appendChild(li);
-    // An item left out of a decided group still needs its own decision.
-    if (withBars && locked && isOpen(m)) list.appendChild(el('li', { style: { display: 'block' } }, decisionBar(m.id, null)));
+    list.appendChild(el('li', null, cid(id), el('span', { cls: 't' }, m.title, el('small', null, harnessRef(m.harness, false))), el('span', null, statusTags(m))));
   });
   return list;
 }
@@ -290,16 +268,17 @@ function groupCard(group) {
   var harnesses = [];
   members.forEach(function (m) { if (harnesses.indexOf(m.harness) < 0) harnesses.push(m.harness); });
   var chips = el('div', { cls: 'chips' });
-  harnesses.forEach(function (hid) { chips.appendChild(HARNESS[hid] ? el('a', { href: R.harness(hid), text: harnessName(hid) }) : el('span', { text: hid })); });
+  harnesses.forEach(function (hid) { chips.appendChild(harnessRef(hid, true)); });
   var saving = groupSaving(group);
+  var open = members.filter(isOpen).length;
   return el('div', { cls: 'grp' },
-    el('div', { cls: 'grp-h' }, el('span', { cls: 'cid', text: group.id }), el('span', { cls: 'htype', text: lbl(T.rounds, group.round) })),
+    el('div', { cls: 'grp-h' }, copyId(group.id), tag(lbl(T.rounds, group.round)),
+      open ? tag(pl(T.fleet.toDecide, open), 'warn') : tag(tx(T.grp.decided, { done: members.length, total: members.length }), 'ok')),
     el('h3', { text: group.title }),
     group.summary ? el('p', { text: group.summary }) : null,
     chips,
     saving ? el('span', { cls: 'gain', text: saving }) : null,
-    decisionBar(group.id, null),
-    fold('grp:' + group.id, 'members', pl(T.grp.members, members.length), memberList(group, true), false));
+    fold('grp:' + group.id, 'members', pl(T.grp.members, members.length), memberList(group), false));
 }
 
 function viewOverview() {
@@ -312,10 +291,9 @@ function viewOverview() {
   var counts = { users: pl(T.ov.users, users), projects: pl(T.ov.projects, projects) };
   var lead = single ? T.ov.leadOne : tx(users && projects ? T.ov.leadMany : users ? T.ov.leadOnlyUsers : T.ov.leadOnlyProjects, counts);
   var out = el('div');
+  // The mode and the system are in the footer: they describe the run, not what to decide.
   out.appendChild(heroBlock(single ? T.ov.kickerOne : T.ov.kickerFleet, title, lead.charAt(0).toUpperCase() + lead.slice(1), [
-    [T.by.mode, lbl(T.modeName, ST.mode)],
     [T.by.agent, ST.environment.agent],
-    [T.by.os, ST.environment.os],
     [T.by.window, pl(T.windowDays, windowDays())],
     [T.by.date, fmtDate(ST.run.lastRun || ST.run.startedAt, true)],
     // A run started as the follow-up of an earlier one says which.
@@ -324,9 +302,15 @@ function viewOverview() {
   out.appendChild(totalsBand());
   if (ST.harnesses.some(function (h) { return h.impact && h.impact.example; })) out.appendChild(el('p', { cls: 'example', text: T.imp.example }));
 
+  // Accounts first, then projects, each under its own marker: the two kinds never mix.
   var fleet = el('div', { cls: 'fleet' });
-  HARNESS_ORDER.forEach(function (h) { fleet.appendChild(fleetRow(h)); });
-  out.appendChild(section(null, single ? T.fleet.hOne : T.fleet.hMany, T.fleet.sub, fleet));
+  ['user', 'project'].forEach(function (kind) {
+    var list = HARNESS_ORDER.filter(function (h) { return (h.kind === 'user') === (kind === 'user'); });
+    if (!list.length) return;
+    if (!single) fleet.appendChild(el('h3', { cls: 'fleet-h' }, kindMark(kind, { word: false }), lbl(T.kindGroup, kind), el('span', { cls: 'muted', text: String(list.length) })));
+    list.forEach(function (h) { fleet.appendChild(fleetRow(h)); });
+  });
+  out.appendChild(section(null, single ? T.fleet.hOne : T.fleet.hMany, { why: T.fleet.sub }, { id: 'ov-fleet', label: single ? T.fleet.hOne : T.fleet.hMany }, fleet));
 
   var acc = accountsPanel();
   if (acc) out.appendChild(acc);
@@ -334,12 +318,12 @@ function viewOverview() {
   if ((ST.groups || []).length) {
     var groups = el('div', { cls: 'groups' });
     ST.groups.forEach(function (gr) { groups.appendChild(groupCard(gr)); });
-    out.appendChild(section(null, T.grp.h, T.grp.sub, groups));
+    out.appendChild(section(null, T.grp.h, { why: T.grp.sub }, { id: 'ov-groups', label: T.grp.h }, groups));
   }
 
   var leads = (ST.leads || []).filter(function (l) { return !l.harness || !HARNESS[l.harness]; });
-  if (leads.length) out.appendChild(section(null, T.lead.h, T.lead.sub, leadList(leads)));
-  if ((ST.log || []).length) out.appendChild(section(null, T.log.h, null, ST.log.length > 8 ? fold('log:all', 'foldbox', pl(T.ex.entries, ST.log.length), logTable(ST.log, true), false) : logTable(ST.log, true)));
+  if (leads.length) out.appendChild(section(null, T.lead.h, { why: T.lead.sub }, { id: 'ov-leads', label: T.lead.h }, leadList(leads)));
+  if ((ST.log || []).length) out.appendChild(section(null, T.log.h, null, { id: 'ov-log', label: T.log.h }, ST.log.length > 8 ? fold('log:all', 'foldbox', pl(T.ex.entries, ST.log.length), logTable(ST.log, true), false) : logTable(ST.log, true)));
   return out;
 }
 

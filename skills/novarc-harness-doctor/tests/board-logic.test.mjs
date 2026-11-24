@@ -1,5 +1,5 @@
-// The board client's logic that needs no page (templates/board/logic.js): decisions and their
-// revisions, routes and the remembered one, storage that may fail, what counts as unknown, and
+// The board client's logic that needs no page (templates/board/logic.js): what is pending and
+// in which order, routes and the remembered one, storage that may fail, what counts as unknown, and
 // what the follow-up of an earlier review comes to (the overview line, a metric's change, an item's history).
 // Also the way lib modules are inlined into the page. The fragment has no DOM in it, so it is
 // loaded here as plain text.
@@ -14,185 +14,27 @@ import * as anchors from '../scripts/lib/anchors.mjs';
 import { STRINGS, fill, plural, label } from '../scripts/lib/i18n.mjs';
 
 const read = (...p) => fs.readFileSync(path.join(SKILL_DIR, ...p), 'utf8');
-const NAMES = ['ACTION_STATUS', 'DECIDABLE', 'PRIMARY_TARGET', 'REV_RE', 'quoteArg', 'decisionCommand', 'uuidFromBytes', 'revOf', 'makeDecision', 'cleanDecision',
-  'latestPerTarget', 'groupsOfItems', 'overlayFor', 'effectiveOf', 'effectiveItems', 'decisionQueue',
+const NAMES = ['pendingQueue',
   'parseRoute', 'routeKey', 'routeExists', 'routeToRestore', 'safeStore', 'triState', 'countOf', 'wasteGroups',
   'FU_VERDICT_TONE', 'FU_CHECK_TONE', 'metricUnit', 'metricSubLabel', 'notMeasuredReason', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail',
   'itemHistory', 'historyLine', 'carriedDecline', 'carriedLine', 'declinedBefore'];
 const L = new Function(`${read('templates', 'board', 'logic.js')}\nreturn { ${NAMES.join(', ')} };`)();
 
 const item = (id, status, extra = {}) => ({ id, harness: 'h', round: 1, severity: 'medium', class: 'none', status, ...extra });
-const dec = (target, action, at, extra = {}) => ({ id: `${target}@${at}`, at, runId: 'run-1', target, action, via: 'board', ...extra });
 const T1 = '2026-01-10T10:00:00Z';
-const T2 = '2026-01-10T11:00:00Z';
-const T3 = '2026-01-10T12:00:00Z';
-const REV_1 = '0123456789ab';
-const REV_2 = 'ba9876543210';
 
-test('decisionCommand is the exact run.mjs decide line, with a safely quoted note', () => {
-  assert.equal(L.decisionCommand(dec('ACME-104', 'approve', T1)), 'run.mjs decide --run run-1 --target ACME-104 --action approve');
-  assert.equal(L.decisionCommand(dec('G-1', 'approve', T1, { exclude: ['A-1', 'B-2'] })), 'run.mjs decide --run run-1 --target G-1 --action approve --exclude A-1,B-2');
-  assert.equal(L.decisionCommand(dec('A-1', 'ask', T1, { note: 'why "this"\nand $HOME `x`?' })),
-    'run.mjs decide --run run-1 --target A-1 --action ask --note "why \\"this\\" and \\$HOME \\`x\\`?"');
-  assert.equal(L.decisionCommand(dec('accounts.primary', 'approve', T1, { note: 'claude-1' })), 'run.mjs decide --run run-1 --target accounts.primary --action approve --note "claude-1"');
-});
-
-test('the line to paste carries the rev last, and never anything that is not a rev', () => {
-  assert.equal(L.decisionCommand(dec('ACME-104', 'approve', T1, { rev: REV_1 })), `run.mjs decide --run run-1 --target ACME-104 --action approve --rev ${REV_1}`);
-  assert.equal(L.decisionCommand(dec('G-1', 'decline', T1, { note: 'not now', exclude: ['A-1'], rev: REV_2 })),
-    `run.mjs decide --run run-1 --target G-1 --action decline --note "not now" --exclude A-1 --rev ${REV_2}`);
-  // Read back from storage, a rev is untrusted text: only the 12 hex characters reach a command line.
-  for (const bad of ['', 'abc', `${REV_1}; rm -rf ~`, '0123456789AB', 12, null, ['x']]) {
-    assert.equal(L.decisionCommand(dec('A-1', 'approve', T1, { rev: bad })), 'run.mjs decide --run run-1 --target A-1 --action approve');
-  }
-});
-
-test('makeDecision builds the contract shape and leaves empty fields out', () => {
-  assert.deepEqual(L.makeDecision('run-1', 'A-1', 'approve', '  ', [], 'id-1', T1), { id: 'id-1', at: T1, runId: 'run-1', target: 'A-1', action: 'approve', via: 'board' });
-  assert.deepEqual(L.makeDecision('run-1', 'G-1', 'decline', ' no ', ['A-2'], 'id-2', T1), { id: 'id-2', at: T1, runId: 'run-1', target: 'G-1', action: 'decline', via: 'board', note: 'no', exclude: ['A-2'] });
-  const id = L.uuidFromBytes(new Uint8Array(16).fill(255));
-  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-});
-
-test('a decision carries the rev of the item or group it answers, when the state has one', () => {
-  const state = {
-    items: [item('A-1', 'open', { rev: REV_1 }), item('A-2', 'open'), item('A-3', 'open', { rev: 'not-a-rev' })],
-    groups: [{ id: 'G-1', title: 't', round: 1, rev: REV_2, items: ['A-1', 'A-2'] }, { id: 'G-2', title: 't', round: 1, items: ['A-2', 'A-3'] }],
-  };
-  assert.equal(L.revOf(state, 'A-1'), REV_1);
-  assert.equal(L.revOf(state, 'G-1'), REV_2);
-  for (const none of ['A-2', 'A-3', 'G-2', 'Z-9', L.PRIMARY_TARGET]) assert.equal(L.revOf(state, none), null, none);
-  assert.equal(L.revOf({}, 'A-1'), null);
-
-  const made = (target) => L.makeDecision('run-1', target, 'approve', '', [], 'id', T1, L.revOf(state, target));
-  assert.deepEqual(made('A-1'), { id: 'id', at: T1, runId: 'run-1', target: 'A-1', action: 'approve', via: 'board', rev: REV_1 });
-  assert.equal(made('G-1').rev, REV_2);
-  assert.ok(!('rev' in made('A-2')) && !('rev' in made(L.PRIMARY_TARGET)), 'no rev in the state, no rev in the decision');
-  assert.ok(L.REV_RE.test(REV_1) && !L.REV_RE.test('0123456789abc') && !L.REV_RE.test('0123456789AB'));
-});
-
-test('cleanDecision keeps only well-formed decisions read back from a channel', () => {
-  assert.equal(L.cleanDecision(null), null);
-  assert.equal(L.cleanDecision({ target: 'A-1', action: 'delete-everything', at: T1 }), null);
-  assert.equal(L.cleanDecision({ target: 'A-1', action: 'approve', at: 'yesterday' }), null);
-  assert.equal(L.cleanDecision({ action: 'approve', at: T1 }), null, 'no target');
-  assert.deepEqual(L.cleanDecision({ action: 'approve', at: T1, exclude: ['A-2', 7, ''], note: 5, extra: { nested: true } }, 'G-1'),
-    { id: `G-1@${T1}`, at: T1, runId: '', target: 'G-1', action: 'approve', via: 'board', exclude: ['A-2'] });
-  // The rev survives the round trip; anything else in its place is dropped, the decision stays.
-  assert.equal(L.cleanDecision({ target: 'A-1', action: 'approve', at: T1, rev: REV_1 }).rev, REV_1);
-  for (const bad of ['zzz', 5, null, `${REV_1} `]) assert.ok(!('rev' in L.cleanDecision({ target: 'A-1', action: 'approve', at: T1, rev: bad })));
-});
-
-test('a restored decision made on another revision of its target does not hold', () => {
-  const state = {
-    items: [item('A-1', 'open', { rev: REV_1 }), item('A-2', 'open', { rev: REV_1 }), item('A-3', 'open'), item('B-1', 'open', { rev: REV_1 }), item('B-2', 'open', { rev: REV_1 })],
-    groups: [{ id: 'G-1', title: 't', round: 1, rev: REV_2, items: ['B-1', 'B-2'] }],
-  };
-  const o = L.overlayFor(state, [
-    dec('A-1', 'approve', T1, { rev: REV_1 }), // the revision on the table: holds
-    dec('A-2', 'approve', T1, { rev: REV_2 }), // an earlier revision: the proposal changed since
-    dec('A-3', 'approve', T1, { rev: REV_2 }), // the state has no rev to compare with: holds
-    dec('G-1', 'approve', T1, { rev: REV_1 }), // the group changed, so none of its members is decided
-  ], {});
-  assert.deepEqual(Object.keys(o.items), ['A-1', 'A-3']);
-  assert.deepEqual(o.groups, {});
-  // A decision without a rev (an older board, or chat) is not judged by it.
-  assert.deepEqual(Object.keys(L.overlayFor(state, [dec('A-2', 'approve', T1), dec('G-1', 'decline', T1)], {}).items), ['A-2', 'B-1', 'B-2']);
-  // Each decision is judged on its own revision, as the session does when it takes them in: an
-  // answer to the revision on the table holds even when a later one answered another revision.
-  const both = L.overlayFor(state, [dec('A-2', 'decline', T1, { rev: REV_1 }), dec('A-2', 'approve', T2, { rev: REV_2 })], {});
-  assert.equal(both.items['A-2'].action, 'decline');
-  assert.equal(L.overlayFor(state, [dec('A-2', 'decline', T1, { rev: REV_1 }), dec('A-2', 'approve', T2, { rev: REV_1 })], {}).items['A-2'].action, 'approve');
-});
-
-test('a decision made on the page moves an open item, and the scores follow', () => {
-  const state = { harnesses: [{ id: 'h' }], rounds: [{ harness: 'h', round: 1, status: 'done' }], items: [item('A-1', 'open', { severity: 'high' }), item('A-2', 'open')] };
-  const none = L.overlayFor(state, [], {});
-  assert.deepEqual(none.items, {});
-  const approve = dec('A-1', 'approve', T1);
-  const o = L.overlayFor(state, [approve], { [approve.id]: true });
-  assert.equal(L.effectiveOf(state.items[0], o).status, 'approved');
-  assert.equal(L.effectiveOf(state.items[1], o).status, 'open');
-  assert.deepEqual(o.held, [approve]);
-  // high 15 + medium 5 = 20 -> 80 now; with A-1 approved the projected score counts only A-2: 95.
-  const eff = { ...state, items: L.effectiveItems(state, o) };
-  const s = scoring.scoreHarness(eff, 'h');
-  assert.deepEqual([s.baseline, s.current, s.projected], [80, 80, 95]);
-  assert.equal(state.items[0].status, 'open', 'the state itself is not touched');
-  // decline halves it now; defer changes nothing; ask leaves it open with the question set.
-  const st = (action, note) => L.effectiveOf(state.items[0], L.overlayFor(state, [dec('A-1', action, T1, note ? { note } : {})], {}));
-  assert.equal(st('decline').status, 'declined');
-  assert.equal(st('defer').status, 'deferred');
-  assert.deepEqual([st('ask', 'why?').status, st('ask', 'why?').asked, st('ask', 'why?').question], ['open', true, 'why?']);
-});
-
-test('the state always wins over decisions restored from memory', () => {
-  const state = {
-    items: [item('A-1', 'open'), item('A-2', 'fixed'), item('A-3', 'declined', { updatedAt: T2 }), item('A-4', 'approved'), item('A-5', 'open')],
-    decisions: [{ id: 'in-state', at: T2, target: 'A-5', action: 'ask' }],
-  };
-  const restored = [
-    dec('A-1', 'approve', T1), // open, nothing newer in the state: holds
-    dec('A-2', 'decline', T3), // already fixed: never
-    dec('A-3', 'approve', T1), // the state declined it later: the state wins
-    dec('A-4', 'decline', T3), // the state has no stamp for it, so memory cannot prove it is newer
-    dec('A-5', 'approve', T1), // the state has a newer decision for it
-    { ...dec('A-1', 'decline', T3), id: 'in-state' }, // already taken into the state
-  ];
-  const o = L.overlayFor(state, restored, {});
-  assert.deepEqual(Object.keys(o.items), ['A-1']);
-  assert.equal(o.items['A-1'].action, 'approve');
-  // Provably newer than the state: holds for a status the user may still change.
-  assert.equal(L.overlayFor(state, [dec('A-3', 'approve', T3)], {}).items['A-3'].action, 'approve');
-  // Made in this page load: holds for anything still decidable, but never for a finished item.
-  const fresh = [dec('A-4', 'decline', T1), dec('A-2', 'decline', T1)];
-  const f = L.overlayFor(state, fresh, { [fresh[0].id]: true, [fresh[1].id]: true });
-  assert.deepEqual(Object.keys(f.items), ['A-4']);
-});
-
-test('the newest decision per target wins, and arrival order breaks a tie', () => {
-  const list = [dec('A-1', 'approve', T1), dec('A-1', 'decline', T2), dec('A-2', 'defer', T1), { ...dec('A-2', 'approve', T1), id: 'later' }];
-  assert.deepEqual(L.latestPerTarget(list).map((d) => [d.target, d.action]), [['A-1', 'decline'], ['A-2', 'approve']]);
-});
-
-test('a group decision covers its items, except the excluded ones and the ones decided later on their own', () => {
-  const state = {
-    items: [item('A-1', 'open', { group: 'G-1' }), item('B-1', 'open'), item('C-1', 'open'), item('D-1', 'fixed')],
-    groups: [{ id: 'G-1', title: 't', round: 2, items: ['A-1', 'B-1', 'C-1', 'D-1'] }],
-  };
-  assert.deepEqual(L.groupsOfItems(state), { 'A-1': ['G-1'], 'B-1': ['G-1'], 'C-1': ['G-1'], 'D-1': ['G-1'] });
-  const g = dec('G-1', 'approve', T2, { exclude: ['C-1'] });
-  const own = dec('B-1', 'decline', T3);
-  const older = dec('A-1', 'decline', T1);
-  const o = L.overlayFor(state, [g, own, older], {});
-  assert.equal(L.effectiveOf(state.items[0], o).status, 'approved', 'the group decision is newer than the item one');
-  assert.equal(L.effectiveOf(state.items[1], o).status, 'declined', 'decided on its own after the group');
-  assert.equal(L.effectiveOf(state.items[2], o).status, 'open', 'left out of the group');
-  assert.equal(L.effectiveOf(state.items[3], o).status, 'fixed');
-  assert.equal(o.groups['G-1'], g);
-  assert.deepEqual(o.held.map((d) => d.target), ['G-1', 'B-1']);
-});
-
-test('choosing the primary account holds only while the state has none', () => {
-  const accounts = (primary) => ({ primary, list: [{ id: 'claude-1' }, { id: 'codex-1' }] });
-  const pick = dec(L.PRIMARY_TARGET, 'approve', T1, { note: 'codex-1' });
-  assert.equal(L.overlayFor({ items: [], accounts: accounts(null) }, [pick], {}).primary, pick);
-  assert.equal(L.overlayFor({ items: [], accounts: accounts('claude-1') }, [pick], {}).primary, null);
-  assert.equal(L.overlayFor({ items: [], accounts: accounts(null) }, [dec(L.PRIMARY_TARGET, 'approve', T1, { note: 'unknown' })], {}).primary, null);
-});
-
-test('the decision queue: groups with an open item first, then open items by severity', () => {
+test('the pending queue: groups with an open item first, then open items by severity', () => {
   const state = {
     items: [item('A-1', 'open', { severity: 'low' }), item('A-2', 'open', { severity: 'critical' }), item('A-3', 'fixed', { severity: 'critical' }),
       item('B-1', 'open', { severity: 'high' }), item('B-2', 'open', { severity: 'high', round: 3 }), item('C-1', 'approved')],
     groups: [{ id: 'G-1', title: 't', round: 1, items: ['A-1', 'C-1'] }, { id: 'G-2', title: 'done', round: 1, items: ['A-3', 'C-1'] }],
   };
-  assert.deepEqual(L.decisionQueue(state), [
+  assert.deepEqual(L.pendingQueue(state), [
     { kind: 'group', id: 'G-1' }, { kind: 'item', id: 'A-2' }, { kind: 'item', id: 'B-1' }, { kind: 'item', id: 'B-2' },
   ]);
 });
 
-test('the decision queue: what the user declined in an earlier review is asked after everything else', () => {
+test('the pending queue: what the user declined in an earlier review is listed after everything else', () => {
   const last = (lastStatus) => ({ history: { firstSeenAt: T1, times: 1, lastStatus } });
   const items = [
     item('A-1', 'open', { severity: 'critical', ...last('declined') }), // back with another proposal: last, whatever its severity
@@ -205,7 +47,7 @@ test('the decision queue: what the user declined in an earlier review is asked a
     item('B-1', 'open', { severity: 'low', ...last('declined') }),
     item('B-2', 'open', { severity: 'low' }),
   ];
-  const ids = (state) => L.decisionQueue(state).map((e) => e.id);
+  const ids = (state) => L.pendingQueue(state).map((e) => e.id);
   // Never declined first, most severe first; then the ones declined before, in the same order among themselves.
   assert.deepEqual(ids({ items }), ['A-3', 'A-5', 'A-2', 'B-2', 'A-1', 'A-6', 'A-4', 'B-1']);
   // A group still comes first, and still covers its members, declined before or not.
@@ -232,25 +74,27 @@ test('parseRoute reads every route the page writes, and anything else is the ove
   assert.deepEqual(L.parseRoute('#/h/u1/diagnosis?item=U1-101'), { page: 'harness', harness: 'u1', sub: 'diagnosis', arg: null, q: { item: 'U1-101' } });
   assert.deepEqual(L.parseRoute('#/h/u1/file/fu1-1?at=U1-201.0'), { page: 'harness', harness: 'u1', sub: 'file', arg: 'fu1-1', q: { at: 'U1-201.0' } });
   assert.deepEqual(L.parseRoute('#/h/u1/view/hooks'), { page: 'harness', harness: 'u1', sub: 'view', arg: 'hooks', q: {} });
-  assert.deepEqual(L.parseRoute('#/decide/G-1'), { page: 'decide', arg: 'G-1', q: {} });
-  assert.deepEqual(L.parseRoute('#/decide'), { page: 'decide', arg: null, q: {} });
+  assert.deepEqual(L.parseRoute('#/pending'), { page: 'pending', q: {} });
+  assert.deepEqual(L.parseRoute('#/h/u1/file/fu1-1?c=U1-201.1'), { page: 'harness', harness: 'u1', sub: 'file', arg: 'fu1-1', q: { c: 'U1-201.1' } });
+  // What boards with a Decide tab wrote opens the Pending view.
+  assert.deepEqual(L.parseRoute('#/decide/G-1'), { page: 'pending', q: {} });
+  assert.deepEqual(L.parseRoute('#/decide'), { page: 'pending', q: {} });
   assert.deepEqual(L.parseRoute('#/h/a%20b/view/%E0%A4%A'), { page: 'harness', harness: 'a b', sub: 'view', arg: '%E0%A4%A', q: {} }, 'a broken escape is kept as text');
-  for (const other of ['#/h', '#/settings', '#x', 'decide']) assert.equal(L.parseRoute(other).page, other === 'decide' ? 'decide' : 'overview', other);
+  for (const other of ['#/h', '#/settings', '#x', 'decide']) assert.equal(L.parseRoute(other).page, other === 'decide' ? 'pending' : 'overview', other);
 });
 
 const KNOWN = {
   harnesses: { u1: true, shop: true },
   files: { 'fu1-1': 'u1', 'fshop-1': 'shop' },
   views: { hooks: true, mcp: true },
-  targets: { 'G-1': true, 'U1-101': true },
 };
 
 test('a route exists only when what it names is in this state', () => {
   const exists = (hash) => L.routeExists(L.parseRoute(hash), KNOWN);
-  for (const ok of ['#/overview', '#/decide', '#/decide/summary', '#/decide/G-1', '#/decide/U1-101', '#/h/u1', '#/h/u1/explorer', '#/h/u1/diagnosis', '#/h/u1/diagnosis?item=GONE-1',
+  for (const ok of ['#/overview', '#/pending', '#/decide', '#/decide/summary', '#/h/u1', '#/h/u1/file/fu1-1?c=U1-201.0', '#/h/u1/explorer', '#/h/u1/diagnosis', '#/h/u1/diagnosis?item=GONE-1',
     '#/h/shop/impact', '#/h/u1/file/fu1-1', '#/h/u1/file/fu1-1?at=U1-201.0', '#/h/shop/view/mcp']) assert.equal(exists(ok), true, ok);
   for (const gone of ['#/h/ghost', '#/h/ghost/diagnosis', '#/h/u1/file/fshop-1', '#/h/u1/file/f-none', '#/h/u1/file', '#/h/u1/view/secrets', '#/h/u1/view',
-    '#/h/u1/settings', '#/decide/U1-999', '#/h/constructor', '#/h/u1/view/constructor', '#/h/u1/file/toString', '#/decide/hasOwnProperty']) assert.equal(exists(gone), false, gone);
+    '#/h/u1/settings', '#/h/constructor', '#/h/u1/view/constructor', '#/h/u1/file/toString']) assert.equal(exists(gone), false, gone);
   assert.equal(L.routeExists(null, KNOWN), false);
   assert.equal(L.routeExists(L.parseRoute('#/h/u1'), null), false);
   assert.equal(L.routeExists(L.parseRoute('#/h/u1'), {}), false);
@@ -259,12 +103,12 @@ test('a route exists only when what it names is in this state', () => {
 test('the remembered route is restored only without a hash in the URL and only while it exists', () => {
   const restore = (url, stored) => L.routeToRestore(url, stored, KNOWN);
   assert.equal(restore('', '#/h/u1/view/hooks'), '#/h/u1/view/hooks');
-  assert.equal(restore('#', '#/decide/G-1'), '#/decide/G-1');
+  assert.equal(restore('#', '#/pending'), '#/pending');
   assert.equal(restore(undefined, '#/h/shop/diagnosis?item=SHOP-1'), '#/h/shop/diagnosis?item=SHOP-1');
   // The URL names a route: it wins, even when it is the overview or leads nowhere.
   for (const url of ['#/overview', '#/h/u1', '#/', '#/h/ghost', '#x']) assert.equal(restore(url, '#/h/u1/view/hooks'), null, url);
   // Nothing to restore: the overview, a route whose target is gone, or anything that is not a route.
-  for (const stored of ['#/overview', '#/', '#/nowhere', '#/h/ghost', '#/h/u1/file/fshop-1', '#/decide/U1-999', 'h/u1', 'javascript:alert(1)', 'https://example.com/#/h/u1',
+  for (const stored of ['#/overview', '#/', '#/nowhere', '#/h/ghost', '#/h/u1/file/fshop-1', 'h/u1', 'javascript:alert(1)', 'https://example.com/#/h/u1',
     '', null, undefined, 42, {}, ['#/h/u1'], `#/h/u1/diagnosis?item=${'x'.repeat(600)}`]) assert.equal(restore('', stored), null, String(stored).slice(0, 40));
   assert.equal(L.routeKey('20260110-ab12'), 'novarc-harness-doctor:20260110-ab12:route');
   assert.notEqual(L.routeKey('a'), L.routeKey('b'), 'one key per run');
