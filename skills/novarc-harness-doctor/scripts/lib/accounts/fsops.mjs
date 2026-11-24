@@ -2,7 +2,10 @@
 // without ever following a link into somebody else's files.
 import fs from 'node:fs';
 import path from 'node:path';
-import { lstatSafe, statSafe, readlinkSafe, readdirSafe, sha256, mkdirp, removeLink, realpathSafe, pathKey } from '../../sync-check.mjs';
+import {
+  homeDir, lstatSafe, statSafe, readlinkSafe, readdirSafe, sha256, mkdirp, removeLink, realpathSafe, pathKey,
+  copyFileSafe, buildThenRename, testFault,
+} from '../../sync-check.mjs';
 
 const CHUNK = 1024 * 1024;
 
@@ -115,26 +118,69 @@ export function signature(p, { cap = 4000, bytes = 64 * 1024 * 1024 } = {}) {
   return cut ? `${sig}+` : sig;
 }
 
-/** Copy a file or a tree. Links are re-created as links (or, where refused, as what they hold). */
-export function copyTree(src, dst) {
-  const l = fs.lstatSync(src);
-  if (l.isSymbolicLink()) {
-    const raw = fs.readlinkSync(src);
-    const st = (() => { try { return fs.statSync(src); } catch { return null; } })();
-    try { fs.symlinkSync(raw, dst, st && st.isDirectory() ? 'dir' : 'file'); return; } catch (e) {
+/**
+ * Copy a file or a tree to a place where nothing is yet. Links are re-created as links (or,
+ * where refused, as what they hold). The copy appears whole or not at all: a file is copied
+ * under a temp name and renamed, a folder is built under a temp name beside the destination and
+ * renamed. The next run removes that temp if this one dies in the middle.
+ */
+export function copyTree(src, dst, { home = homeDir() } = {}) {
+  /** A link as a link; where the OS refuses one, a junction for a folder and the bytes for a file. */
+  const link = (from, to, copyFile) => {
+    const raw = fs.readlinkSync(from);
+    const st = statSafe(from);
+    try { fs.symlinkSync(raw, to, st && st.isDirectory() ? 'dir' : 'file'); } catch (e) {
       if (!st) throw e;
-      if (st.isDirectory()) { fs.symlinkSync(realpathSafe(src) || path.resolve(path.dirname(src), raw), dst, 'junction'); return; }
-      fs.copyFileSync(src, dst);
-      return;
+      if (st.isDirectory()) fs.symlinkSync(realpathSafe(from) || path.resolve(path.dirname(from), raw), to, 'junction');
+      else copyFile(from, to);
     }
-  }
-  if (l.isDirectory()) {
-    mkdirp(dst);
-    for (const e of fs.readdirSync(src)) copyTree(path.join(src, e), path.join(dst, e));
-    return;
-  }
+  };
+  /** A folder, copied to a place nobody reads yet (the temp name): plain copies are enough there. */
+  const fill = (from, to) => {
+    fs.mkdirSync(to);
+    for (const name of fs.readdirSync(from).sort()) {
+      const a = path.join(from, name);
+      const b = path.join(to, name);
+      const l = fs.lstatSync(a);
+      if (l.isSymbolicLink()) link(a, b, (x, y) => fs.copyFileSync(x, y));
+      else if (l.isDirectory()) fill(a, b);
+      else fs.copyFileSync(a, b);
+      testFault('tree-file');
+    }
+  };
   mkdirp(path.dirname(dst));
-  fs.copyFileSync(src, dst);
+  const top = fs.lstatSync(src);
+  if (top.isSymbolicLink()) link(src, dst, (x, y) => copyFileSafe(x, y, { home }));
+  else if (top.isDirectory()) buildThenRename(dst, (tmp) => fill(src, tmp), { home });
+  else copyFileSafe(src, dst, { home });
+}
+
+/** True when everything at `a` is also at `b`, entry for entry and byte for byte; `b` may hold more. */
+export function containedIn(a, b, budget = { entries: 20000, bytes: 64 * 1024 * 1024 }) {
+  const left = { entries: budget.entries, bytes: budget.bytes };
+  const walk = (x, y) => {
+    const lx = lstatSafe(x);
+    const ly = lstatSafe(y);
+    if (!lx) return true;
+    if (!ly || --left.entries < 0) return false;
+    if (lx.isSymbolicLink() || ly.isSymbolicLink()) return lx.isSymbolicLink() && ly.isSymbolicLink() && readlinkSafe(x) === readlinkSafe(y);
+    if (lx.isDirectory() !== ly.isDirectory()) return false;
+    if (lx.isDirectory()) return readdirSafe(x).every((e) => walk(path.join(x, e.name), path.join(y, e.name)));
+    if (lx.size !== ly.size) return false;
+    left.bytes -= lx.size;
+    return left.bytes >= 0 && sameContent(x, y);
+  };
+  return walk(a, b);
+}
+
+/** Bring into `dst` whatever `src` holds and `dst` lacks. Nothing that is in `dst` is touched. */
+export function fillFrom(src, dst, { home = homeDir() } = {}) {
+  const ls = lstatSafe(src);
+  if (!ls) return;
+  const ld = lstatSafe(dst);
+  if (!ld) { copyTree(src, dst, { home }); return; }
+  const real = (l) => l.isDirectory() && !l.isSymbolicLink();
+  if (real(ls) && real(ld)) for (const e of readdirSafe(src)) fillFrom(path.join(src, e.name), path.join(dst, e.name), { home });
 }
 
 /** Remove a file, a link or a tree. A link is removed as a link: its target is never touched. */
@@ -146,14 +192,17 @@ export function removeTree(p) {
   fs.rmdirSync(p);
 }
 
-/** Move a file, link or folder. Falls back to copy-verify-remove across volumes. */
-export function movePath(src, dst) {
+/**
+ * Move a file, link or folder. Falls back to copy-verify-remove across volumes: the copy appears
+ * whole or not at all (see copyTree), so the destination is complete before the source is touched.
+ */
+export function movePath(src, dst, { home = homeDir() } = {}) {
   mkdirp(path.dirname(dst));
   try { fs.renameSync(src, dst); return; } catch (e) {
     if (e.code !== 'EXDEV' && e.code !== 'EPERM' && e.code !== 'EBUSY' && e.code !== 'ENOTEMPTY') throw e;
     if (lstatSafe(dst)) throw e;
   }
-  copyTree(src, dst);
+  copyTree(src, dst, { home });
   if (compareTrees(src, dst) !== 'same') {
     removeTree(dst);
     throw new Error('could not move: the copy does not match the original');

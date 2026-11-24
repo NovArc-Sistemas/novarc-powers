@@ -50,8 +50,9 @@ file and confirm each before it becomes an item. Mask secrets. Every item needs 
 measurement supports a number. Record what is fine as inventory and defenses. The same finding
 in several harnesses is one group. When the brief names an earlier review record for a harness,
 read its items first and follow "Reviewing a harness again" in references/follow-up.md: link
-every finding that was seen before with `previous`, and do not propose again what the user
-declined unless something changed. Write user-facing text in [language]. When done:
+every finding that was seen before with `previous`; for one the user declined, send the same
+proposal copied from the record when nothing changed (the decline is then carried), or say what
+changed. You never set `declined` yourself. Write user-facing text in [language]. When done:
   node [<skill>]/scripts/run.mjs complete --run [runId] --unit [unitId] --session [label] --findings [file]
 Report: how many items per harness and severity, what you could not check, and anything the
 other rounds should know.

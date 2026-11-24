@@ -337,12 +337,15 @@ function metricRow(m, waiting) {
   var change = metricChange(m, waiting);
   var verdict = waiting ? 'not-enough-data' : m.verdict;
   var named = Array.isArray(m.items) && m.items.length ? noteCell(tx(T.fu.from, { items: m.items.join(', ') })) : null;
-  return row([el('b', { text: metricLabel(m.metric) }), noteCell(lbl(T.fu.unit, unit)), named],
+  // Both reviews may have a number and still not compare: the row then says why.
+  var why = waiting ? null : notMeasuredReason(m, T);
+  var chip = tag(lbl(T.fu.verdict, verdict), has(FU_VERDICT_TONE, verdict) ? FU_VERDICT_TONE[verdict] : '');
+  return row([el('b', { text: metricLabel(m.metric) }), noteCell(metricSubLabel(m, T)), named],
     value(m.before),
     el('td', { cls: 'num', text: fmtMetric(m.expected, unit) || '-' }),
     value(m.after),
     el('td', { cls: 'num' }, el('span', { cls: 'fu-chg' + (change.tone ? ' ' + change.tone : ''), text: fmtSignedPct(change.pct) })),
-    tag(lbl(T.fu.verdict, verdict), has(FU_VERDICT_TONE, verdict) ? FU_VERDICT_TONE[verdict] : ''));
+    why ? el('td', { cls: 'wide' }, chip, noteCell(why)) : chip);
 }
 
 function followUpSection(h) {

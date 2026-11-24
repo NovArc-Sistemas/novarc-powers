@@ -137,7 +137,7 @@ export function sandbox(t, { accounts = 2, projects = ['acme-shop', 'novarc-powe
     overrides[`NOVARC_HD_SCRIPT_${name.replace(/\.mjs$/, '').replace(/-/g, '_').toUpperCase()}`] = path.join(stubDir, name);
   }
   const env = homeEnv(home, { NOVARC_POWERS_HOME: home, STUB_LOG: stubLog, ...overrides });
-  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'STUB_FAIL', 'STUB_HANG', 'STUB_GARBAGE', 'STUB_SCORES', 'STUB_RENDER_WARN', 'STUB_RENDER_DUMP', 'STUB_LINKED', 'STUB_OWNER', 'STUB_IMPACT', 'NOVARC_HD_NOW', 'NOVARC_HD_TEST_RECORDS_GATE']) delete env[k];
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'STUB_FAIL', 'STUB_HANG', 'STUB_GARBAGE', 'STUB_SCORES', 'STUB_RENDER_WARN', 'STUB_RENDER_DUMP', 'STUB_LINKED', 'STUB_OWNER', 'STUB_IMPACT', 'NOVARC_HD_NOW', 'NOVARC_HD_TEST_RECORDS_GATE', 'NOVARC_HD_TEST_CRASH_AT', 'NOVARC_HD_TEST_HISTORY_LIMITS']) delete env[k];
 
   const pool = [
     { id: 'claude-1', provider: 'claude-code', label: 'Claude Code · account 1', identity: 'so…@example.com', path: '~/.claude', dir: '.claude', isDefault: true, host: null, linksInto: null },

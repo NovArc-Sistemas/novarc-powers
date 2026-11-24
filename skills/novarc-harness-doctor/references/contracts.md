@@ -145,7 +145,9 @@ from disk and refuses when the accounts no longer match the plan file. A plan si
 the content behind a link, not only where the link points, and each step checks its element
 again right before writing: a step whose element changed after the plan ends as
 `{ "result": "failed", "stale": true, "error": "... plan again" }` with nothing written for it,
-the other steps still run, and the exit code is 1. It writes
+the other steps still run, and the exit code is 1. Every step is journalled as an intent before it
+is made, so a run that died half way can be undone back to the exact starting tree: `plan`
+warns about such a run and `apply` names it in `unfinished: [stamps]`. It writes
 `~/.novarc-powers/novarc-harness-doctor/sync/manifest.json` (what is managed, with hashes and,
 for generated files, the `identity` of the destination) and keeps what it replaced under
 `sync/backups/<stamp>/`.
@@ -161,9 +163,19 @@ source) and never overwrites a file the user edited. A repair writes a generated
 it is still a plain file with a single name, in the folder recorded for it, inside the account
 folder. A destination that became a link, gained a second name (hardlink) or whose folder now
 leads elsewhere is reported with `decide: true` (Codex MCP block: `manual: true`) and a note, and
-is not written. Writes never truncate first: a file with one name is replaced through a temporary
-file and a rename; a file shared through a hardlink is copied to `sync/recovery/` first, written
-in place, read back, and restored from the copy if anything fails.
+is not written.
+
+**No file is ever written in place.** New bytes go to a synced temporary file that is renamed
+over the old one, and each known other name of the file (a hardlink in another account folder)
+is then switched to the new file by a rename of its own. After a failure or a process death at
+any point, every name holds its complete old bytes or its complete new bytes. A record written
+under `sync/recovery/` before the first byte lets the next run that may write (`check --repair`,
+so the session-start check, `apply`, `undo`, `install-check`, `uninstall-check`) finish the
+switch or clear the temporary files, and it says what it did: `recovered: [{ file, outcome }]`,
+with `outcome` one of `completed`, `rolled-back`, `abandoned`, `waiting`, `removed`,
+`pending`. Read-only commands only report `pending`. A file with a hardlink the tool has no
+record of is not written at all: the command reports it with the count (`unknownNames`), and
+the user removes that name or turns it into a symlink.
 
 `install-check` registers `check --repair` to run at session start in the primary account (a
 gate: only with the user's yes).
@@ -180,7 +192,10 @@ as in the state schema (`harnesses[]` entry without scores, `files[]`, `$defs.el
 `layers[]`). File content is masked and capped. Masking is by key first: every string under a
 key named like a secret (password, token, secret, credentials, api key and the like), in JSON,
 TOML, YAML, `KEY=value` lines and command flags, whatever its length, descendants included;
-then by known token shapes. A masked value keeps its first four characters and its length
+then by known token shapes. Under such a key a value stays readable only when ALL of it is a
+reference (`${VAR}`, `$VAR` in upper case, `$(command)`, `%VAR%`, `<placeholder>`, code that
+reads the environment); a reference with any literal around it, and a number, are masked. When
+in doubt it masks: a lower-case `$token` in a script shows masked too. A masked value keeps its first four characters and its length
 (`abcd…29`), or only the length when it is short (`…7`). Caps: 256 KB per file, 3 MB per
 harness; over budget, lower-priority files keep their metadata and get `"omitted": "budget"`.
 Priority: instruction files and their imports, settings, hook registrations and the scripts they
@@ -269,7 +284,10 @@ command does not know is an error (exit 2), so a mistyped flag is never silently
   its brief: the harnesses (each with `lastRecord.file`, the absolute path of its last review
   record, when there is one), the rounds, the round files to read, the probe files, and the id
   range. A claim older than its `ttlMinutes` (default 90) can be taken over.
-- `complete` validates the findings file and stores it; `release` gives a unit back. It refuses
+- `complete` validates the findings file and stores it; `release` gives a unit back. A reviewer
+  may only set `open`, `ok` or `not-applicable`: a decline is the user's, and one made in an
+  earlier review is carried by the run when the same proposal comes back with `previous`
+  (output `declinedBefore: { same: [...], changed: [...] }`). It refuses
   a file that holds a credential, naming where (`/items/0/evidence: credential (github-token)`)
   and never the value. When an item the user already decided comes back as another revision,
   that decision no longer holds: the item is `open` again and the output lists it under
@@ -303,7 +321,12 @@ command does not know is an error (exit 2), so a mistyped flag is never silently
 - `close` writes the review record of every harness (`references/follow-up.md`), then marks the
   run closed; the local page stops. Output: `{ runId, closed, closedAt, already?, historyDir,
   records: [{ harness, harnessKey, file, md, items, fixed, written }] }`. It exits 1 and leaves
-  the run open when a record does not fit its schema. `history --json` prints
+  the run open when a record does not fit its schema. `history --json` may add
+  `ignored: [{ harness, file, reason }]` (files in `history/` that are not usable records) and
+  `healed` (an index or `.md` rebuilt from the records). Any command adds `lockLost: true` when
+  it outlived the run lock and another process may have written meanwhile. Once a run has records, every command that changes
+  a status (`decide`, `decisions`, `complete`, `mark`, `record`, `undo`) writes them again and adds
+  `records` to its output, or `recordsNotWritten` with the reason. `history --json` prints
   `{ historyDir, at, harnesses: [{ key, kind, provider, name, path, reviews, followUpAfter,
   due }], due, unrecordedRuns }`. `list` shows the runs on this machine; `history` shows what
   was reviewed before, per harness, and which follow-ups are due.
@@ -328,7 +351,7 @@ The channel decides the shape of `board.html`:
 | Channel | `board.html` is |
 |---|---|
 | `server`, `file` | A standalone document (doctype, head, body) |
-| `artifact` | A page fragment for the Artifact publisher, which adds its own document around it: `<title>` first, then styles, content and inline scripts, with no doctype, `html`, `head` or `body` tag. The embedded data is printed one entry per line so the publishing agent can read and patch it. Do not open this file from disk or serve it: build again with `--channel server` for the local page |
+| `artifact` | E-mail addresses are masked in everything it embeds, file text included, because this copy leaves the machine (a change that can no longer be placed in its file once masked is listed under `warnings`). A page fragment for the Artifact publisher, which adds its own document around it: `<title>` first, then styles, content and inline scripts, with no doctype, `html`, `head` or `body` tag. The embedded data is printed one entry per line so the publishing agent can read and patch it. Do not open this file from disk or serve it: build again with `--channel server` for the local page |
 
 The board remembers the open route per run in the browser's storage and reopens it after a
 reload when the URL has no hash; it works the same without storage.
@@ -392,6 +415,14 @@ not the current revision is not applied (it comes back under `stale`).
 - `state.json` holds the authoritative values; never compute them by hand.
 
 A note that holds a credential is refused in every channel.
+
+**Privacy of what the run writes and prints.** `state.json`, the review records and every
+answer of `run.mjs` pass the same barriers: credentials masked; the home directory as `~`; and
+in prose fields (titles, findings, evidence, opinions, lessons, notes, log text; not file
+content, not the text of a change, not the proposal) e-mail addresses masked and absolute paths
+outside the run's harnesses cut to their last two segments. `build` reports how many places it
+rewrote. Data read back from disk (records, the index, file names given to `--ingest`) is
+untrusted and goes through the same barriers before it is used or printed.
 
 | Channel | Board side | Session side |
 |---|---|---|

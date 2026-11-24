@@ -558,7 +558,8 @@
             "expected": null,
             "after": 2,
             "changePct": -23.1,
-            "verdict": "improved"
+            "verdict": "improved",
+            "base": "weighted"
           },
           {
             "metric": "tool-output",
@@ -1023,6 +1024,16 @@
             "after": 194412,
             "changePct": null,
             "verdict": "not-measured"
+          },
+          {
+            "metric": "waste-share",
+            "unit": "percent",
+            "before": 3.9,
+            "expected": null,
+            "after": 1.7,
+            "changePct": null,
+            "verdict": "not-measured",
+            "reason": "no-common-base"
           }
         ],
         "items": [
@@ -1059,6 +1070,13 @@
               "./docs/deploy.md"
             ],
             "saves": null
+          },
+          {
+            "id": "LOJA-103",
+            "title": "O exemplo de configuração sugere liberar tudo",
+            "round": 1,
+            "status": "declined",
+            "now": "LOJA-103"
           },
           {
             "id": "LOJA-104",
@@ -2233,8 +2251,19 @@
       "origin": "example",
       "file": "./examples/settings.exemplo.json",
       "rev": "f2173968e153",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "LOJA-103"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "declined",
+        "lastDecisionAt": "2026-10-18T15:27:00Z",
+        "lastNote": "O exemplo fica: é por ele que quem chega começa."
+      },
       "title": "O exemplo de configuração sugere liberar tudo",
-      "finding": "O arquivo de exemplo traz `Bash(*)` na lista de allow.",
+      "finding": "O arquivo de exemplo traz `Bash(*)` na lista de allow. Em outubro a proposta era apagar o arquivo, e você recusou; agora a proposta é trocar o conteúdo.",
       "proposal": "Trocar o exemplo por uma lista curta de comandos do projeto.",
       "opinion": "Não roda em sessão nenhuma, por isso pesa pouco na nota. Mas é o que um colega novo vai copiar.",
       "status": "open"
@@ -2258,6 +2287,10 @@
         "lastStatus": "declined",
         "lastDecisionAt": "2026-10-18T15:31:00Z",
         "lastNote": "Só eu uso esse perfil, e de propósito."
+      },
+      "carriedFrom": {
+        "run": "20261018-m4rt",
+        "item": "LOJA-104"
       },
       "title": "O perfil local opcional libera o deploy",
       "finding": "O perfil local de exemplo libera `npm run deploy` sem confirmação.",

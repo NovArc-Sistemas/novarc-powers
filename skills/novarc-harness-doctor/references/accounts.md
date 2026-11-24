@@ -210,7 +210,8 @@ Rules:
   restores the originals byte for byte and removes what the run created, only where each thing
   is still as the run left it; anything edited since is reported and left alone.
 - **An undo that could not finish is run again.** Each step is marked in the run's journal the
-  moment it is undone, and the run counts as undone only when every step is. When the result
+  moment it is undone, and the run counts as undone only when every step is. This holds for a
+  run that died half way as well ("When `apply` itself dies half way", below). When the result
   has `pending` above 0, `conflicts` says why each of those steps is still there (a file edited
   since the run, something else at the original place, a backup out of reach). Clear the cause
   and run the same command: it skips what is already undone (`alreadyUndone`) and retries only
@@ -225,17 +226,133 @@ Rules:
   whole plan before it starts, and each element once more right before that step writes. A step
   whose element moved in between is given up with nothing written: its `done` entry is `failed`
   with `"stale": true`, the other steps still run and the exit code is 1. Plan again for it.
-- **A write never leaves a file truncated or half written.** A file with a single name is
-  written through a temp file in the same folder and an atomic rename. A symbolic link is kept,
-  and the file it resolves to is written that same way. A file with other names (a hardlink, as
-  `settings.json` is where symbolic links are refused) has to be written in place, or the other
-  names would stop following it: an intact copy goes to `sync/recovery/` first, the file is
-  written, synced and read back, and on any failure the copy is written back and the step fails
-  saying so. The copy is deleted afterwards. Only if the restore fails too does it stay: the
-  error then names it, under `~/.novarc-powers/novarc-harness-doctor/sync/recovery/`. Give that
-  path to the user; it holds what the file contained, anything sensitive included. A process
-  killed in the middle of a write can leave a `*.nhd-*.tmp` file beside the destination, which is
-  safe to delete. The session-start check never writes the Claude Code state file at all.
+- **No file is ever written in place.** New bytes go to a temp file in the same folder (written,
+  synced to disk, read back), and that temp file is renamed over the old one: a single step
+  that either happened or did not. A symbolic link is kept, and the file it resolves to is
+  replaced that way. So a write that fails, and a process that dies at any point of a write,
+  leave the file holding its complete old bytes or its complete new bytes: never a mix, never
+  an empty file. `apply`, `undo`, `install-check`, `uninstall-check` and `check --repair` all
+  write through this one path.
+- **A file with other names follows as a whole.** Where symbolic links are refused, a linked
+  file is a hardlink: one file under two names (the primary's `settings.json` and the second
+  account's). Replacing the file under one name alone would leave the other name on the old
+  file, so each KNOWN other name is switched over right after: a link to the new file is made
+  under a temp name beside it and renamed over it. Every name therefore holds complete old or
+  complete new bytes at every moment. The only in-between state is "one name already new,
+  another still old", and it lasts until the switch is done. Known names are the ones the
+  manifest records and the same file in another account's folder.
+
+### When a run dies in the middle of a write
+
+Before the first byte of a write, a small record of it goes to
+`~/.novarc-powers/novarc-harness-doctor/sync/recovery/`: the file, what it holds and what it
+will hold (as hashes, never the content), its other names, and the temp files involved. The
+record is removed when the write is done. A run that finds one knows that an earlier run died,
+and:
+
+- when the rename had gone through, switches over the other names that still hold the old bytes
+  (`completed`, with how many in `relinked`);
+- when it had not, removes the temp files: every name is as it was (`rolled-back`);
+- never touches a name whose content changed since the death (`abandoned` for the file itself,
+  `left` for another name), and never removes or renames anything that is not a temp file of
+  this tool, whatever the record says.
+
+`check --repair` (so the session-start hook), `apply`, `undo`, `install-check` and
+`uninstall-check` do this before anything else and say what they did: a `recovered` list in
+their JSON, a line on stderr, and the first part of the hook's one line (`recovered 1 (...)`).
+`list`, `diff`, `plan`, `check` without `--repair` and the dry runs change nothing, as always:
+they report the same entries with outcome `pending`. When a result carries `recovered`, tell
+the user what it says first; after a `pending`, run `check --repair`.
+
+What this guarantees, and where it stops:
+
+- After a death at any point of a write, every name of the file holds the complete old or the
+  complete new bytes, at once and with no repair needed. The next run that may write then
+  finishes the switch of the other names, or clears the temp files, by itself, and reports it.
+- Between the death and that run, the names of one file can differ: the primary already new, a
+  linked account still old. Both are whole files. The account that is behind catches up at the
+  next session start of the primary.
+- The operation that was running is not resumed: see "When `apply` itself dies half way" below.
+- A temp file is named `<file>.nhd-<pid>-<random>.tmp` and is never read as if it were the file.
+  Those of a write, a copy or a re-link are removed by the next run that may write; those of
+  the tool's own bookkeeping (at the top of its `sync/` folder) once they are a minute old.
+- A power cut is covered as far as the disk and the filesystem honour a sync: the record is
+  synced before anything else, and the temp file before the rename.
+- The file that replaces the old one is a new file on disk. It keeps the permission bits of
+  the old one; on Windows it takes the folder's default access rules, and a program that had
+  the old file open keeps reading the old bytes until it opens the file again.
+- Two runs of the tool at once are not coordinated. A run that starts while another is in the
+  middle of a write takes that write for an interrupted one; nothing is torn by it, but the
+  other run's step can then fail with nothing changed. Do not start an `apply` while another
+  runs, and keep the agent apps closed during one (their session start runs the check).
+- When another program holds the file open in a way that forbids replacing it (Windows), the
+  write fails with nothing changed: close the app and run again. When that happens for one of
+  the OTHER names after the file itself was replaced, the result says so (`warnings` of
+  `apply`, `notes` of `install-check`, `note` of `undo`), that name keeps its complete old
+  bytes, and the next run that may write tries it again (`waiting` until it works).
+
+### When `apply` itself dies half way
+
+`apply` writes each step into the run's journal BEFORE it makes it (synced to disk) and marks
+it done after: a move to the backup, a new folder, a link, a file replaced in the primary, each
+file added to a folder of the primary, a folder brought into it, each generated file and edit,
+and the manifest. A folder brought into the primary is built under a temp name beside its place
+and renamed, so it is there whole or not at all. A run that dies therefore leaves, at worst,
+one step that is in the journal and not marked: `undo` and the next `apply` do not take the
+journal's word for that step, they look at the disk (is the original in the backup, is the link
+there, does the file still hold what it held).
+
+What to do, and what to tell the user:
+
+- `plan` says so first, as its first warning: "An earlier run did not finish ...: <stamp>".
+  `apply` says the same (`unfinished: [stamps]`, and a note with the undo command) in its result,
+  refused or not.
+- `accounts.mjs undo --stamp <stamp> --yes` returns the accounts to the exact bytes they had
+  before that run, wherever it died, with nothing to clear by hand. This is the recommended
+  move: undo, then apply the plan the user had approved (it is valid again), or plan anew.
+- Applying the same plan without the undo is safe as well: it completes when the dead run had
+  changed nothing the plan depends on, and is refused as stale otherwise, with nothing written.
+- Several runs are undone newest first. Before a new `apply` makes anything, it strikes from a
+  dead run's journal the steps that run never got to, so an undo of the dead run cannot take
+  the new run's links for its own. Undone in the wrong order, the older run reports "something
+  else is at the original place now" for what the newer one put there, and waits.
+- `undo` is safe to kill too: run it again and it finishes.
+
+What a death can still leave that `undo` does not take back:
+
+- Changes somebody made after the death. A file edited since, something new at an original's
+  place: reported as a conflict and left, exactly as after a run that finished.
+- Files inside the tool's own folder: copies in that run's backup folder, a temp file of the
+  journal less than a minute old, the installed copy of the check. None of them is part of an
+  account.
+- `install-check` and `uninstall-check` are one edit of one file. Killed in the middle, the
+  hook is either in the file or not, never half: run the same command again.
+- Two runs at the same time (see above): a run that is alive is judged like one that died.
+- A power cut, as opposed to a process that dies. The journal entry is synced before its step;
+  the step itself and its done mark are not, so the last of them may not have reached the disk
+  in that order. `undo` judges an unmarked step by the disk, and reports a step marked done
+  that it does not find as a conflict.
+
+### Names of a file this tool does not know
+
+A file can have a hardlink this tool never made and finds nowhere: a second name of
+`settings.json` kept in a dotfiles folder with `mklink /H` or `ln`. Replacing the file would
+leave that name behind on the old content, silently. So the write is refused before anything
+changes, with the count: `unknownNames` in the result (the `done[]` entry of `apply`, with
+`"decide": true`; the output of `install-check` and `uninstall-check`, with `"refused": true`;
+a `conflicts` entry of `undo`), and the message "the file has N other name(s) (hardlinks) that
+this tool has no record of". What happens to those names is the user's decision, never the
+skill's:
+
+- find them (`fsutil hardlink list <file>` on Windows; `find <folder> -samefile <file>`
+  elsewhere);
+- remove the ones that are not needed, or turn them into symbolic links to the file (a symbolic
+  link follows the file by itself and is not counted);
+- run the command again.
+
+The session-start check never writes a file that has a second name (see "Where the check is
+allowed to write"), so this comes up in `apply`, `undo`, `install-check` and `uninstall-check`
+only.
 
 ## The session-start check
 
@@ -250,7 +367,9 @@ Rules:
 - never overwrites a file somebody edited by hand: it reports it, with both paths, until the user
   decides (edit the primary and delete the copy, or keep it apart with `keep-as-exception`);
 - never follows a generated file to a new destination, and never leaves one half written: see
-  "Where the check is allowed to write" below.
+  "Where the check is allowed to write" below;
+- first of all, finishes or clears a write that an earlier run died in the middle of (see "When
+  a run dies in the middle of a write").
 
 It prints nothing when all is well and one line otherwise, and always exits 0, so it cannot
 block a session. `install-check` copies `scripts/sync-check.mjs` (one self-contained file) to
@@ -301,12 +420,13 @@ an elevated shell; then a folder becomes a junction (no privilege needed, same b
 reading) and a file becomes a hardlink.
 
 A hardlink breaks silently when an editor saves the PRIMARY file atomically (write a temp file,
-rename it over the original): the secondary keeps the old content. This is why the manifest
-records the content last seen through each link. The check links again when the secondary still
-has that content, and reports it instead when somebody edited it. Tell a user whose files are
-hardlinks that the session-start check is what keeps them honest, and that after turning on
-Developer Mode, `plan --symlinks` followed by `apply` turns the hardlinks (including ones made by
-hand) into symbolic links, which survive an atomic save of the primary.
+rename it over the original): the secondary keeps the old content. This tool saves that way
+too, on purpose, and switches the other names over itself; an editor does not. This is why the
+manifest records the content last seen through each link. The check links again when the
+secondary still has that content, and reports it instead when somebody edited it. Tell a user
+whose files are hardlinks that the session-start check is what keeps them honest, and that
+after turning on Developer Mode, `plan --symlinks` followed by `apply` turns the hardlinks
+(including ones made by hand) into symbolic links, which survive an atomic save of the primary.
 
 A symbolic link has the mirror weakness: an editor that saves the SECONDARY path atomically
 replaces the link with a regular file. The same rule covers it. The habit to teach is simple:

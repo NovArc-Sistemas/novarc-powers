@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { homeBase } from './paths.mjs';
+import { setOwn } from './store.mjs';
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -28,22 +29,32 @@ function spellings(root) {
   return out;
 }
 
-/** Matchers for the home directory: the OS one, the NOVARC_POWERS_HOME one, and their real paths. */
-export function homeMatchers(extraRoots = []) {
-  const roots = new Set();
-  for (const r of [os.homedir(), homeBase(), ...extraRoots]) {
-    if (!r) continue;
-    roots.add(path.resolve(r));
-    try { roots.add(fs.realpathSync.native(r)); } catch { /* not on disk */ }
-  }
+/** One matcher per spelling of every folder in `roots` (absolute paths, taken as written). */
+export function literalMatchers(roots) {
   const all = new Set();
-  for (const r of roots) for (const s of spellings(r)) all.add(s);
+  for (const r of roots) if (typeof r === 'string' && r) for (const s of spellings(r)) all.add(s);
   // Longest first, so a nested root is not shadowed by its parent.
   return [...all].sort((a, b) => b.length - a.length).map((s) => {
     const windowsLike = /^[A-Za-z]:/.test(s) || process.platform === 'win32';
     // Not followed by a path-name character: a home folder named `ann` must not match inside `anna`.
     return new RegExp(`${escapeRe(s)}(?![A-Za-z0-9._-])`, windowsLike ? 'gi' : 'g');
   });
+}
+
+/** Matchers for folders of this machine: each one as given and as its real path. */
+export function folderMatchers(folders) {
+  const roots = new Set();
+  for (const r of folders) {
+    if (!r) continue;
+    roots.add(path.resolve(r));
+    try { roots.add(fs.realpathSync.native(r)); } catch { /* not on disk */ }
+  }
+  return literalMatchers(roots);
+}
+
+/** Matchers for the home directory: the OS one, the NOVARC_POWERS_HOME one, and their real paths. */
+export function homeMatchers(extraRoots = []) {
+  return folderMatchers([os.homedir(), homeBase(), ...extraRoots]);
 }
 
 export function hasHomePath(text, matchers) {
@@ -95,7 +106,7 @@ export function scrubDeep(value, matchers, hits = [], at = '') {
   if (Array.isArray(value)) return value.map((v, i) => scrubDeep(v, matchers, hits, ptr(at, i)));
   if (value && typeof value === 'object') {
     const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v, matchers, hits, ptr(at, k));
+    for (const [k, v] of Object.entries(value)) setOwn(out, k, scrubDeep(v, matchers, hits, ptr(at, k)));
     return out;
   }
   return value;

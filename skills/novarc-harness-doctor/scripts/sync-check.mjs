@@ -14,7 +14,10 @@
 // short line when something was repaired or has drifted, and ALWAYS exit 0. It never reads
 // credentials, sessions or history, never prints file contents or absolute home paths, never
 // overwrites a file somebody edited by hand, never writes through a link or into a file that
-// gained another name, and never leaves a file truncated: a failed write changes nothing.
+// gained another name, and never writes INTO a file at all: new bytes go to a temp file that is
+// renamed over the old one, so a write that fails, or a process that dies in the middle of one,
+// leaves every name holding its complete old bytes or its complete new bytes. What a run that
+// died left unfinished is finished, or cleaned up, by the next run (see recoverWrites).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -156,22 +159,67 @@ export function sameFile(a, b) {
 
 export function mkdirp(dir) { fs.mkdirSync(dir, { recursive: true }); }
 
-/** Where the intact copy of a file sits while that file is being written in place. */
+// ---- Writing without ever leaving a torn file ----------------------------------------------
+//
+// No file is ever written in place. The new bytes go to a temp file beside the destination
+// (written, synced, read back) and the temp is renamed over it: one atomic step. A file that has
+// other names (hardlinks) gets each KNOWN other name switched over the same way, one rename per
+// name. Before the first byte, a record of the whole operation is written durably under the sync
+// state folder; a run that finds such a record finishes or clears what a dead run left.
+
+/** Where the record of a write in progress is kept until that write is done. */
 export function recoveryDir(home = homeDir()) {
   return path.join(syncDir(home), 'recovery');
 }
 
+const INTENT_VERSION = 1;
+const TEMP_RE = /\.nhd-\d+-[0-9a-f]{8}\.tmp$/;
+const LEFTOVER_AGE_MS = 60 * 1000;
+
+/** A temp name beside `file`: the same folder, so that renaming it over `file` is atomic. */
+function tempName(file) {
+  return `${file}.nhd-${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`;
+}
+
 /**
- * Write the whole buffer at the start of an open file. TESTS ONLY: when the environment variable
- * NOVARC_POWERS_TEST_FAULT lists `stage`, half of the bytes are written and the call then fails
- * as a full disk would, so a failure in the middle of a write can be tested without one.
+ * TESTS ONLY. NOVARC_POWERS_TEST_FAULT lists, separated by commas, the points at which a write
+ * is made to fail, so that a failure or a death in the middle of one can be tested without a full
+ * disk or a power cut. `point` fails there as a full disk would; `kill@point` ends the process
+ * on the spot, with nothing unwound; `#n` restricts either to the n-th time the point is reached.
+ * The points, in the order a write passes them: record (half of the record written), intent (the
+ * record is durable), temp (half of the new bytes written), staged (the temp is complete),
+ * peer-staged (a link for another name is ready), committed (the rename over the destination is
+ * done), peer (before another name is switched over), finished (before the record is removed);
+ * and, outside a write, copied (a plain copy sits in its temp), linked (a link that replaces a
+ * file sits under its temp name) and journal (half of a journal that is saved durably). The
+ * steps of `accounts.mjs apply` and `undo` add their own through testFault. Unset, as it always
+ * is outside the tests, this costs one environment lookup.
  */
-function writeAll(fd, buf, stage) {
-  const faults = process.env.NOVARC_POWERS_TEST_FAULT;
-  if (faults && faults.split(',').includes(stage)) {
-    if (buf.length > 1) fs.writeSync(fd, buf, 0, buf.length >> 1, 0);
+const faultHits = new Map();
+function fault(point, first) {
+  const spec = process.env.NOVARC_POWERS_TEST_FAULT;
+  if (!spec) return;
+  for (const entry of spec.split(',')) {
+    const m = /^(kill@)?([a-z-]+)(?:#(\d+))?$/.exec(entry.trim());
+    if (!m || m[2] !== point) continue;
+    const n = (faultHits.get(entry) || 0) + 1;
+    faultHits.set(entry, n);
+    if (m[3] && n !== Number(m[3])) continue;
+    if (first) first();
+    if (m[1]) {
+      try { process.kill(process.pid, 'SIGKILL'); } catch { /* not possible here: exit instead */ }
+      process.exit(99);
+    }
     throw Object.assign(new Error('no space left on device (simulated)'), { code: 'ENOSPC' });
   }
+}
+
+/** TESTS ONLY: a fault point of the code built on these primitives (see `fault`). */
+export function testFault(point) { fault(point); }
+
+/** Write the whole buffer at the start of an open file. */
+function writeAll(fd, buf, point) {
+  fault(point, () => { if (buf.length > 1) fs.writeSync(fd, buf, 0, buf.length >> 1, 0); });
   let off = 0;
   while (off < buf.length) {
     const n = fs.writeSync(fd, buf, off, buf.length - off, off);
@@ -180,96 +228,370 @@ function writeAll(fd, buf, stage) {
   }
 }
 
-/**
- * Put `buf` at `file` through a temp file in the same folder: written, synced, read back, then
- * renamed over the destination. Until the rename the destination holds its old bytes; after it,
- * the new ones. A rename replaces the name itself: it never writes into another file that the
- * old name was linked to. `mode` carries the permission bits of the file being replaced.
- */
-function replaceFile(file, buf, mode, stage = 'temp') {
-  const dir = path.dirname(file);
-  mkdirp(dir);
-  const tmp = `${file}.nhd-${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`;
+/** Create the temp file `tmp` holding `buf`: written, synced and read back. Removed on failure. */
+function stageFile(tmp, buf, mode, point) {
   let fd;
   try {
     fd = fs.openSync(tmp, 'wx', mode === undefined ? 0o666 : mode);
-    writeAll(fd, buf, stage);
+    writeAll(fd, buf, point);
     if (mode !== undefined && !IS_WIN) fs.fchmodSync(fd, mode); // the mode given to open is cut by the umask
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     if (!fs.readFileSync(tmp).equals(buf)) throw new Error('verification failed: the temp file does not hold what was written');
-    fs.renameSync(tmp, file);
   } catch (e) {
     if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already closed */ }
     try { fs.unlinkSync(tmp); } catch { /* never created */ }
     throw e;
   }
-  if (!IS_WIN) {
-    // Make the rename itself durable. Best effort: not every filesystem lets a folder be synced.
-    try { const d = fs.openSync(dir, 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* best effort */ }
+}
+
+/**
+ * Rename `from` over `to`: the one atomic step every write here ends in. Windows refuses it for
+ * a moment while a scanner or an indexer holds either file, so there it is tried again, briefly.
+ */
+function renameOver(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try { fs.renameSync(from, to); return; } catch (e) {
+      if (!IS_WIN || attempt >= 3 || !e || !(e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES')) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * (attempt + 1));
+    }
   }
 }
 
-/**
- * Write INTO a file that has other names (hardlinks): the bytes must land in that very file, or
- * the other names would stop following it. An intact copy is put under the sync state folder
- * first. The new bytes are then written over the old ones and the file is cut to length only
- * afterwards, so it is never empty and a restore never needs more room than the file already
- * has; it is synced and read back. On any failure the copy is written back the same way and the
- * error says so. The copy is removed once the file is known to be whole; when even the restore
- * fails it stays, and the error says where it is.
- */
-function writeShared(file, buf, home) {
-  // Opened once, for the write and for a restore: a file that cannot be written fails here,
-  // before anything changed, and a restore never depends on opening it again.
-  const fd = fs.openSync(file, 'r+');
-  try {
-    const before = fs.readFileSync(fd);
-    const keep = path.join(recoveryDir(home), `${Date.now().toString(36)}-${process.pid}-${crypto.randomBytes(3).toString('hex')}-${path.basename(file)}`);
-    replaceFile(keep, before, 0o600, 'copy');
-    const put = (data, stage) => {
-      writeAll(fd, data, stage);
-      fs.ftruncateSync(fd, data.length);
-      fs.fsyncSync(fd);
-      if (!fs.readFileSync(file).equals(data)) throw new Error('verification failed: the file does not hold what was written');
-    };
-    try { put(buf, 'shared'); } catch (e) {
-      const why = e && (e.code || e.message);
-      try { put(before, 'restore'); } catch {
-        throw Object.assign(new Error(`the write failed (${why}) and the file could not be restored: an intact copy of what it held is at ${displayPath(keep, home)}`), { code: e && e.code, recovery: keep });
-      }
-      try { fs.unlinkSync(keep); } catch { /* best effort */ }
-      throw Object.assign(new Error(`the write failed (${why}); the file was restored to what it held`), { code: e && e.code, restored: true });
-    }
-    try { fs.unlinkSync(keep); } catch { /* best effort */ }
-  } finally { fs.closeSync(fd); }
+/** Make a rename inside `dir` durable. Best effort: not every filesystem lets a folder be synced. */
+function syncFolder(dir) {
+  if (IS_WIN) return;
+  try { const d = fs.openSync(dir, 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* best effort */ }
+}
+
+function putRecord(file, rec) {
+  const tmp = tempName(file);
+  stageFile(tmp, Buffer.from(JSON.stringify(rec, null, 2) + '\n', 'utf8'), 0o600, 'record');
+  try { renameOver(tmp, file); } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    throw e;
+  }
+  syncFolder(path.dirname(file));
 }
 
 /**
- * Write a file without ever leaving it truncated or half written, and without breaking a link
- * on it. What sits at the path decides how:
- *   nothing, or a file with one name     temp file in the same folder, sync, atomic rename
- *   a symbolic link                      the link stays; the file it resolves to is written by
- *                                        these same rules
- *   a file with other names (hardlinks)  written in place, guarded by an intact copy (see
- *                                        writeShared): a rename would cut it off from them
- * Returns how it was written: 'created', 'replaced' or 'in-place'. On any failure it throws with
- * the destination holding what it held before.
+ * Record what is about to be done, durably, BEFORE the first byte of it. A write names its
+ * destination, the hash it has now and the hash it will have, its temp file, and every other
+ * name of the file with the temp link made for it. An operation that only creates something
+ * names the temp file or temp folder (`cleanup`) the next run has to remove if this one dies.
+ * Throws when the record cannot be written: then nothing is done at all.
  */
-export function writeKeepingLinks(p, data, { home = homeDir() } = {}) {
+function openIntent(home, fields) {
+  const dir = recoveryDir(home);
+  const file = path.join(dir, `${Date.now().toString(36)}-${process.pid}-${crypto.randomBytes(3).toString('hex')}.json`);
+  const rec = { version: INTENT_VERSION, tool: TOOL, pid: process.pid, startedAt: new Date().toISOString(), state: 'writing', ...fields };
+  for (let attempt = 0; ; attempt++) {
+    mkdirp(dir);
+    try { putRecord(file, rec); break; } catch (e) {
+      // Another run can remove the folder between the two calls, having just emptied it.
+      if (!attempt && e && e.code === 'ENOENT') continue;
+      try { fs.rmdirSync(dir); } catch { /* another record is open */ }
+      throw e;
+    }
+  }
+  return { file, rec };
+}
+
+function closeIntent(intent) {
+  try { fs.unlinkSync(intent.file); } catch { /* the next run removes it */ }
+  try { fs.rmdirSync(path.dirname(intent.file)); } catch { /* another record is open */ }
+}
+
+/** Every path a manifest records: where another name of a managed file can be. */
+export function manifestPaths(manifest) {
+  const out = [];
+  for (const a of (manifest && Array.isArray(manifest.accounts) ? manifest.accounts : [])) {
+    for (const e of Array.isArray(a.elements) ? a.elements : []) {
+      if (e && typeof e.path === 'string') out.push(e.path);
+      if (e && typeof e.target === 'string') out.push(e.target);
+    }
+  }
+  return out;
+}
+
+/**
+ * The paths among `candidates` that are OTHER names of the file at `real` (hardlinks to it),
+ * each once, in its real spelling. A symbolic link to the file is not another name: it follows
+ * the file by itself.
+ */
+function otherNames(real, candidates) {
+  const seen = new Set([pathKey(real)]);
+  const out = [];
+  for (const c of candidates) {
+    if (typeof c !== 'string' || !c) continue;
+    const l = lstatSafe(c);
+    if (!l || !l.isFile()) continue;
+    const abs = realpathSafe(c);
+    if (!abs || seen.has(pathKey(abs)) || !sameFile(abs, real)) continue;
+    seen.add(pathKey(abs));
+    out.push(abs);
+  }
+  return out;
+}
+
+/** The known other names of the file at `real`, and how many names it has beyond those. */
+function namesOf(real, nlink, home, peers) {
+  if (!(nlink > 1)) return { others: [], unknown: 0 };
+  const others = otherNames(real, peers === undefined ? manifestPaths(readManifest(manifestFile(home))) : peers);
+  return { others, unknown: Math.max(0, nlink - 1 - others.length) };
+}
+
+/** The refusal of a write to a file with `n` names nobody recorded (see writeKeepingLinks). */
+export function unknownNamesError(n) {
+  const [s, it, a] = n === 1 ? ['', 'it', 'a symbolic link'] : ['s', 'them', 'symbolic links'];
+  return Object.assign(new Error(`the file has ${n} other name${s} (hardlink${s}) that this tool has no record of; replacing it would leave ${it} behind with the old content, so nothing was written. Remove ${it} or turn ${it} into ${a}, then run this again`), { code: 'EUNKNOWNNAMES', unknownNames: n });
+}
+
+/**
+ * How many names the file at `p` has that writeKeepingLinks could not switch over: 0 means the
+ * file can be written. `peers` as for writeKeepingLinks. For a caller that has to know before it
+ * prepares anything.
+ */
+export function unknownNames(p, { home = homeDir(), peers } = {}) {
+  const real = lstatSafe(p) ? realpathSafe(p) : null;
+  const st = real ? statSafe(real) : null;
+  return st && st.isFile() ? namesOf(real, st.nlink, home, peers).unknown : 0;
+}
+
+/**
+ * Write a file so that no name of it ever holds torn bytes, and without breaking a link on it.
+ *
+ *   nothing at the path, or a file      temp file in the same folder, sync, atomic rename
+ *   a symbolic link                     the link stays; the file it resolves to is replaced by
+ *                                       these same rules
+ *   a file with other names (hardlinks) the file is replaced as above, then each KNOWN other name
+ *                                       is switched to the new file: a link to it is made under a
+ *                                       temp name beside that name and renamed over it
+ *
+ * `peers` lists the paths where another name of the file may be (default: every path the
+ * manifest records); only those that really are the same file count. When the file has more
+ * names than that, NOTHING is written and the call throws with code `EUNKNOWNNAMES` and the
+ * count in `unknownNames`: replacing the file would leave an unknown name behind with the old
+ * content, and that is the user's decision.
+ *
+ * A record of the write is durable before its first byte (see openIntent), so a process that
+ * dies at any point leaves each name with its complete old or its complete new bytes, and the
+ * next run finishes the switch (see recoverWrites). On a failure before the rename this throws
+ * with every name as it was. Returns { how: 'created' | 'replaced', relinked, pending, why? }:
+ * `pending` lists other names that could not be switched just now (a file held open); the
+ * record stays and the next run switches them.
+ */
+export function writeKeepingLinks(p, data, { home = homeDir(), peers } = {}) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  let real = path.resolve(String(p));
+  let st = null;
+  if (lstatSafe(p)) {
+    real = realpathSafe(p);
+    if (!real) throw new Error('the path is a link to something that does not exist; nothing was written');
+    st = fs.statSync(real);
+    if (!st.isFile()) throw new Error('the path is not a file; nothing was written');
+    // A rename needs no right on the file it replaces: one the user made read-only is left alone.
+    fs.accessSync(real, fs.constants.W_OK);
+  } else mkdirp(path.dirname(real));
+  const { others, unknown } = namesOf(real, st ? st.nlink : 0, home, peers);
+  if (unknown) throw unknownNamesError(unknown);
+  const before = st ? hashFile(real) : null;
+  if (st && before === null) throw new Error('the file cannot be read; nothing was written');
+  const intent = openIntent(home, { target: real, tmp: tempName(real), before, after: sha256(buf), peers: others.map((o) => ({ path: o, tmp: tempName(o) })) });
+  const { rec } = intent;
+  const made = [];
+  try {
+    fault('intent');
+    stageFile(rec.tmp, buf, st ? st.mode & 0o7777 : undefined, 'temp');
+    made.push(rec.tmp);
+    fault('staged');
+    // A link to the NEW file, ready beside each other name: nothing anybody reads has changed yet.
+    for (const pr of rec.peers) { fs.linkSync(rec.tmp, pr.tmp); made.push(pr.tmp); fault('peer-staged'); }
+    renameOver(rec.tmp, real); // the one step that makes the path hold the new bytes
+  } catch (e) {
+    for (const m of made) { try { fs.unlinkSync(m); } catch { /* not there */ } }
+    closeIntent(intent);
+    throw e;
+  }
+  fault('committed');
+  const pending = [];
+  let relinked = 0;
+  let why;
+  for (const pr of rec.peers) {
+    try { fault('peer'); renameOver(pr.tmp, pr.path); relinked++; } catch (e) { pending.push(pr.path); why = String(e && (e.code || e.message)); }
+  }
+  for (const d of new Set([real, ...rec.peers.map((pr) => pr.path)].map((f) => path.dirname(f)))) syncFolder(d);
+  fault('finished');
+  if (pending.length) {
+    // The path holds the new bytes; another name could not be switched (held open, on Windows).
+    // The record stays, marked as waiting only for that: the next run finishes it.
+    try { putRecord(intent.file, { ...rec, state: 'pending' }); } catch { /* the record as it is says the same */ }
+  } else closeIntent(intent);
+  return { how: st ? 'replaced' : 'created', relinked, pending, ...(why ? { why } : {}) };
+}
+
+/**
+ * Make something appear at `dst` whole or not at all: `build(tmp)` creates it under a temp name
+ * beside `dst` (a file, or a folder with anything in it), and the temp is then renamed to `dst`.
+ * A record lets the next run remove the temp if this one dies. `dst` must not be a folder that
+ * exists already.
+ */
+export function buildThenRename(dst, build, { home = homeDir() } = {}) {
+  const tmp = tempName(dst);
+  const intent = openIntent(home, { cleanup: [tmp] });
+  try {
+    build(tmp);
+    renameOver(tmp, dst);
+  } catch (e) {
+    removeTemp(tmp);
+    throw e;
+  } finally { closeIntent(intent); }
+}
+
+/** Copy a file so that `dst` never shows half of it. */
+export function copyFileSafe(src, dst, { home = homeDir() } = {}) {
+  buildThenRename(dst, (tmp) => { fs.copyFileSync(src, tmp); fault('copied'); }, { home });
+}
+
+/**
+ * Remove a temp file, or a temp folder with everything in it. A link is removed as a link and
+ * never followed. Only ever called on a path this tool named as a temp (see TEMP_RE).
+ */
+function removeTemp(p) {
   const l = lstatSafe(p);
-  if (!l) { replaceFile(p, buf); return 'created'; }
-  const real = l.isSymbolicLink() ? realpathSafe(p) : p;
-  if (!real) throw new Error('the path is a link to something that does not exist; nothing was written');
-  const st = fs.statSync(real);
-  if (!st.isFile()) throw new Error('the path is not a file; nothing was written');
-  if (st.nlink > 1) { writeShared(real, buf, home); return 'in-place'; }
-  // A rename needs no right on the file it replaces: one the user made read-only is left alone.
-  fs.accessSync(real, fs.constants.W_OK);
-  replaceFile(real, buf, st.mode & 0o7777);
-  return 'replaced';
+  if (!l) return false;
+  try {
+    if (l.isDirectory() && !l.isSymbolicLink()) {
+      for (const e of readdirSafe(p)) removeTemp(path.join(p, e.name));
+      fs.rmdirSync(p);
+    } else removeLink(p);
+    return true;
+  } catch { return false; }
+}
+
+/** Deal with one record a dead run left. Returns what was found, or null when there was nothing. */
+function settle(rec, file, home, repair) {
+  const show = (p) => displayPath(p, home);
+  // Only ever a temp file of this tool is removed or renamed, whatever a record says.
+  const ours = (p) => typeof p === 'string' && path.isAbsolute(p) && TEMP_RE.test(p);
+  const drop = (p) => (ours(p) && removeTemp(p) ? 1 : 0);
+  const done = () => { try { fs.unlinkSync(file); } catch { /* tried again by the next run */ } };
+  if (typeof rec.target !== 'string' || !path.isAbsolute(rec.target) || typeof rec.after !== 'string') {
+    // Not a write: something was being created, and only its temp file or temp folder can be left.
+    const found = (Array.isArray(rec.cleanup) ? rec.cleanup : []).filter((p) => ours(p) && lstatSafe(p));
+    if (!repair) return found.length ? { file: show(found[0]), outcome: 'pending', leftovers: found.length } : null;
+    let n = 0;
+    for (const p of found) n += drop(p);
+    done();
+    return n ? { file: show(found[0]), outcome: 'removed', leftovers: n } : null;
+  }
+  const entry = { file: show(rec.target) };
+  if (!repair) return { ...entry, outcome: 'pending' };
+  const peers = (Array.isArray(rec.peers) ? rec.peers : []).filter((pr) => pr && typeof pr.path === 'string' && path.isAbsolute(pr.path));
+  const there = !!lstatSafe(rec.target);
+  const now = there ? hashFile(rec.target) : null;
+  if (there && now !== null && now === rec.after) {
+    // The rename went through: the path holds the new bytes. Switch over each other name that
+    // still holds the old ones; one that changed since, or is gone, is not this tool's to touch.
+    let relinked = 0;
+    let left = 0;
+    let waiting = 0;
+    let why;
+    for (const pr of peers) {
+      const l = lstatSafe(pr.path);
+      if (l && l.isFile() && sameFile(pr.path, rec.target)) { drop(pr.tmp); continue; }
+      const h = l && l.isFile() ? hashFile(pr.path) : null;
+      if (h === null || (h !== rec.before && h !== rec.after)) { drop(pr.tmp); left++; continue; }
+      try {
+        let tmp = ours(pr.tmp) && lstatSafe(pr.tmp) && sameFile(pr.tmp, rec.target) ? pr.tmp : null;
+        if (!tmp) { drop(pr.tmp); tmp = tempName(pr.path); fs.linkSync(rec.target, tmp); }
+        try { renameOver(tmp, pr.path); } catch (e) {
+          if (tmp !== pr.tmp) try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+          throw e;
+        }
+        relinked++;
+      } catch (e) { waiting++; why = scrub(String(e && (e.code || e.message)), home); }
+    }
+    drop(rec.tmp);
+    if (waiting) {
+      if (rec.state !== 'pending') try { putRecord(file, { ...rec, state: 'pending' }); } catch { /* it says the same */ }
+      return { ...entry, outcome: 'waiting', waiting, ...(relinked ? { relinked } : {}), note: why };
+    }
+    done();
+    return { ...entry, outcome: 'completed', ...(relinked ? { relinked } : {}), ...(left ? { left } : {}) };
+  }
+  // The rename never happened (the path holds what it held), or the file was changed since:
+  // either way no name is touched, and only the temp files go.
+  const untouched = there ? now !== null && now === rec.before : rec.before === null;
+  drop(rec.tmp);
+  for (const pr of peers) drop(pr.tmp);
+  done();
+  return { ...entry, outcome: untouched ? 'rolled-back' : 'abandoned' };
+}
+
+/**
+ * Finish, or clear, what a run that died in the middle of a write left behind. Every run that
+ * may write calls this first; a read-only one passes `repair: false` and only learns what is
+ * waiting. Returns one entry per thing found, `file` as a display path, with `outcome`:
+ *   completed    the path had its new bytes: the other names still holding the old ones were
+ *                switched over (`relinked`); one changed since, or gone, was left (`left`)
+ *   rolled-back  the write had not taken effect: every name is as it was, the temp files are gone
+ *   abandoned    the file was changed since: no name was touched, the temp files are gone
+ *   waiting      another name still cannot be switched (`note` says why); tried again next run
+ *   removed      temp files of an operation that only creates things, or of this tool's own
+ *                bookkeeping, were removed (`leftovers`)
+ *   pending      found, nothing touched (`repair: false`)
+ * A temp file of the tool's own bookkeeping is a leftover once it is a minute old. Never throws.
+ */
+export function recoverWrites({ home = homeDir(), repair = true } = {}) {
+  const out = [];
+  const show = (p) => displayPath(p, home);
+  try {
+    const dir = recoveryDir(home);
+    let names = null;
+    try { names = fs.readdirSync(dir).sort(); } catch { /* the usual case: no such folder */ }
+    for (const name of names || []) {
+      if (!name.endsWith('.json')) continue;
+      const file = path.join(dir, name);
+      const j = parseJson(readText(file, 1024 * 1024));
+      const rec = j.ok && j.value && typeof j.value === 'object' && j.value.version === INTENT_VERSION ? j.value : null;
+      let entry;
+      if (rec) {
+        try { entry = settle(rec, file, home, repair); } catch (e) { entry = { file: show(file), outcome: 'waiting', note: scrub(String(e && (e.code || e.message)), home) }; }
+      } else {
+        if (repair) try { fs.unlinkSync(file); } catch { /* tried again by the next run */ }
+        entry = { file: show(file), outcome: repair ? 'removed' : 'pending', note: 'a record that cannot be read' };
+      }
+      if (entry) out.push(entry);
+    }
+    // Temp files of the tool's own bookkeeping (manifest, journals, these records): all of them
+    // are made at the top of the sync folder or in the recovery folder.
+    for (const d of names ? [syncDir(home), dir] : [syncDir(home)]) {
+      for (const name of readdirSafe(d).map((e) => e.name).filter((n) => TEMP_RE.test(n)).sort()) {
+        const p = path.join(d, name);
+        const st = lstatSafe(p);
+        if (!st || Math.abs(Date.now() - st.mtimeMs) < LEFTOVER_AGE_MS) continue; // a run may be using it
+        if (repair) { try { fs.unlinkSync(p); } catch { continue; } }
+        out.push({ file: show(p), outcome: repair ? 'removed' : 'pending', leftovers: 1 });
+      }
+    }
+    if (repair && names) try { fs.rmdirSync(dir); } catch { /* a record is still there */ }
+  } catch { /* recovery never stops a run */ }
+  return out;
+}
+
+/** One entry of recoverWrites as a short sentence. */
+export function recoveryText(r) {
+  const names = (n) => `${n} other name${n === 1 ? '' : 's'} of the file`;
+  if (r.outcome === 'completed') {
+    return `${r.file}: an interrupted write had gone through${r.relinked ? `; ${names(r.relinked)} now follow${r.relinked === 1 ? 's' : ''} it` : ''}${r.left ? `; ${names(r.left)} changed since and ${r.left === 1 ? 'was' : 'were'} left` : ''}`;
+  }
+  if (r.outcome === 'rolled-back') return `${r.file}: an interrupted write had not gone through; the file is as it was`;
+  if (r.outcome === 'abandoned') return `${r.file}: an interrupted write was dropped, because the file changed since`;
+  if (r.outcome === 'waiting') return `${r.file}: ${r.waiting ? `${names(r.waiting)} could not be switched over yet` : 'an interrupted write could not be finished yet'} (${r.note})`;
+  if (r.outcome === 'removed') return `${r.file}: ${r.note || (r.leftovers > 1 ? `${r.leftovers} leftover temp files` : 'a leftover temp file')} removed`;
+  return `${r.file}: left unfinished by an interrupted run (a check with --repair deals with it)`;
 }
 
 /** The real path of the folder a file sits in, or would be created in when folders are missing. */
@@ -338,13 +660,27 @@ export function destinationProblem(rec, p, accountDir) {
 }
 
 /** Write through a temp file and rename: for files this tool owns (manifest, journals). */
-export function writeAtomic(p, data) {
+export function writeAtomic(p, data, { via, durable = false } = {}) {
+  // `via`: the folder where the temp file is made. The tool keeps every temp file of its own
+  // bookkeeping at the top of its sync folder, so that one look there finds what a dead run left.
+  // `durable`: synced to disk before this returns, for a journal entry that has to be there
+  // BEFORE the action it describes.
   mkdirp(path.dirname(p));
-  const tmp = `${p}.tmp-${process.pid}-${Date.now().toString(36)}`;
-  fs.writeFileSync(tmp, data);
-  try { fs.renameSync(tmp, p); } catch (e) {
-    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
-    throw e;
+  const put = (tmp) => {
+    try {
+      if (durable) stageFile(tmp, Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8'), undefined, 'journal');
+      else fs.writeFileSync(tmp, data);
+      renameOver(tmp, p);
+      if (durable) syncFolder(path.dirname(p));
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+      throw e;
+    }
+  };
+  if (!via) { put(tempName(p)); return; }
+  try { put(tempName(path.join(via, path.basename(p)))); } catch (e) {
+    if (!e || (e.code !== 'EXDEV' && e.code !== 'ENOENT')) throw e;
+    put(tempName(p)); // that folder is on another volume, or gone: beside the file, then
   }
 }
 
@@ -416,10 +752,10 @@ const NO_LINK = new Set(['EXDEV', 'EPERM', 'EACCES', 'EMLINK', 'ENOTSUP']);
  * Link, or for a file that cannot be linked at all (the folders are on different volumes, or the
  * filesystem has no links) make a managed copy. Returns the kind, `copy` for the last case.
  */
-export function linkOrCopy(targetPath, linkPath, isDirectory) {
+export function linkOrCopy(targetPath, linkPath, isDirectory, home = homeDir()) {
   try { return createLink(targetPath, linkPath, isDirectory); } catch (e) {
     if (isDirectory || !NO_LINK.has(e.code)) throw e;
-    fs.copyFileSync(targetPath, linkPath);
+    copyFileSafe(targetPath, linkPath, { home });
     return 'copy';
   }
 }
@@ -441,15 +777,17 @@ export function removeLink(p) {
 }
 
 /** Replace the file at linkPath with a link to targetPath without a window where it is missing. */
-export function relinkFile(targetPath, linkPath) {
-  const tmp = `${linkPath}.nhd-${process.pid}`;
-  try { fs.unlinkSync(tmp); } catch { /* not there */ }
-  const kind = createLink(targetPath, tmp, false);
-  try { fs.renameSync(tmp, linkPath); } catch (e) {
-    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
-    throw e;
-  }
-  return kind;
+export function relinkFile(targetPath, linkPath, home = homeDir()) {
+  const tmp = tempName(linkPath);
+  const intent = openIntent(home, { cleanup: [tmp] });
+  try {
+    const kind = createLink(targetPath, tmp, false);
+    try { fault('linked'); renameOver(tmp, linkPath); } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+      throw e;
+    }
+    return kind;
+  } finally { closeIntent(intent); }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1204,16 +1542,21 @@ export function readManifest(file = manifestFile()) {
   return j.value;
 }
 
-export function writeManifest(manifest, file = manifestFile()) {
+/** The bytes of a manifest file, stamped with the time of writing. */
+export function manifestText(manifest) {
   manifest.updatedAt = new Date().toISOString();
-  writeAtomic(file, JSON.stringify(manifest, null, 2) + '\n');
+  return JSON.stringify(manifest, null, 2) + '\n';
+}
+
+export function writeManifest(manifest, file = manifestFile()) {
+  writeAtomic(file, manifestText(manifest));
 }
 
 // ---------------------------------------------------------------------------------------------
 // The check
 // ---------------------------------------------------------------------------------------------
 
-function checkLink(el, repair) {
+function checkLink(el, repair, home) {
   const st = linkStatus(el.path, el.target);
   if (st.state === 'ok') return { state: 'ok' };
   const targetExists = !!statSafe(el.target);
@@ -1234,7 +1577,7 @@ function checkLink(el, repair) {
   const unedited = here !== null && !!el.contentHash && here === el.contentHash;
   if (!identical && !unedited) return { state: 'drift', note: 'edited by hand; not overwritten', both: true };
   if (!repair) return { state: 'broken', note: identical ? 'the link became a separate identical copy' : 'the link broke and the primary changed since' };
-  el.kind = relinkFile(el.target, el.path);
+  el.kind = relinkFile(el.target, el.path, home);
   return { state: 'broken', note: 'the link had become a separate copy', repaired: true };
 }
 
@@ -1382,7 +1725,7 @@ function checkAdditions(acct, results, repair, home) {
     const where = { account: acct.id, name: c.name, path: c.path, target: c.target };
     if (!repair) { results.push({ ...where, state: 'drift', note: 'new in the primary, not linked yet' }); continue; }
     try {
-      acct.elements.push(element(linkOrCopy(c.target, c.path, c.dir)));
+      acct.elements.push(element(linkOrCopy(c.target, c.path, c.dir, home)));
       results.push({ ...where, state: 'drift', note: 'new in the primary', repaired: true });
       dirty = true;
     } catch (e) {
@@ -1396,15 +1739,19 @@ function checkAdditions(acct, results, repair, home) {
  * Verify every managed element. Returns
  *   { status: 'none'|'ok'|'drift'|'broken', primary, accounts: [{ id, provider, mode, status,
  *     elements: [{ name, state, note?, repaired?, decide?, path?, source? }] }],
- *     counts: { ok, drift, broken, repaired } }
+ *     counts: { ok, drift, broken, repaired }, recovered?: [...] }
  * `status` is what is still wrong after any repair. `decide` marks what somebody changed by hand
- * (never overwritten). Paths are display paths. Never throws.
+ * (never overwritten). `recovered` is there only when an earlier run died in the middle of a
+ * write: what recoverWrites found, and with `repair` did about it, before anything was checked.
+ * Paths are display paths. Never throws.
  */
 export function runCheck({ repair = false, file, home = homeDir() } = {}) {
   const mf = file || manifestFile(home);
   const counts = { ok: 0, drift: 0, broken: 0, repaired: 0 };
+  const interrupted = recoverWrites({ home, repair });
+  const recovered = interrupted.length ? { recovered: interrupted } : {};
   const manifest = readManifest(mf);
-  if (!manifest) return { status: 'none', primary: null, accounts: [], counts };
+  if (!manifest) return { status: 'none', primary: null, accounts: [], counts, ...recovered };
   const results = [];
   let dirty = false;
   // Deletions in the primary are mirrored only while the primary itself is there: a primary on
@@ -1431,7 +1778,7 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
       const mark = () => `${el.kind}|${el.contentHash || ''}|${el.identity ? JSON.stringify(el.identity) : ''}`;
       const before = mark();
       try {
-        r = el.kind === 'generated' ? checkGenerated(el, repair, home, acct) : checkLink(el, repair);
+        r = el.kind === 'generated' ? checkGenerated(el, repair, home, acct) : checkLink(el, repair, home);
         if (repair && el.kind !== 'generated' && !el.dir && (r.state === 'ok' || r.repaired)) {
           const h = hashFile(el.target); // the content last seen through the link
           if (h) el.contentHash = h;
@@ -1473,7 +1820,7 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
     const status = elements.some((e) => e.state === 'broken') ? 'broken' : elements.some((e) => e.state === 'drift') ? 'drift' : 'ok';
     return { id: acct.id, provider: acct.provider, mode: acct.mode, status, elements };
   });
-  return { status: counts.broken ? 'broken' : counts.drift ? 'drift' : 'ok', primary: manifest.primary, accounts, counts };
+  return { status: counts.broken ? 'broken' : counts.drift ? 'drift' : 'ok', primary: manifest.primary, accounts, counts, ...recovered };
 }
 
 /** The one line a session-start hook prints, or an empty string when there is nothing to say. */
@@ -1492,10 +1839,15 @@ export function summaryLine(report) {
     }
     if (manual) wrong.push(`${a.id}: ${manual} MCP server${manual === 1 ? '' : 's'} behind the primary (run accounts.mjs plan, then apply with the app closed)`);
   }
-  const attention = [...decide, ...wrong];
-  if (!repaired.length && !attention.length) return '';
+  // What an interrupted run left: said first when it was dealt with, as attention when it waits.
+  const recovered = [];
+  const waiting = [];
+  for (const r of report.recovered || []) (r.outcome === 'pending' || r.outcome === 'waiting' ? waiting : recovered).push(recoveryText(r));
+  const attention = [...waiting, ...decide, ...wrong];
+  if (!repaired.length && !attention.length && !recovered.length) return '';
   const cut = (list, n) => (list.length > n ? `${list.slice(0, n).join('; ')}; +${list.length - n} more` : list.join('; '));
   const parts = [];
+  if (recovered.length) parts.push(`recovered ${recovered.length} (${cut(recovered, 3)})`);
   if (repaired.length) parts.push(`repaired ${repaired.length} (${cut(repaired, 4)})`);
   if (attention.length) parts.push(`needs attention ${attention.length} (${cut(attention, 3)})`);
   return `${TOOL} account sync: ${parts.join('; ')}.`;

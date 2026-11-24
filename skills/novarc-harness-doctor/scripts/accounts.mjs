@@ -15,6 +15,9 @@
 // providers get the portable subset REPLICATED from it. Credentials, sessions, history and
 // caches are never linked, copied or read. `list`, `diff`, `plan` and `check` (without --repair)
 // write nothing. JSON on stdout, diagnostics on stderr; exit 0 ok, 2 bad arguments, 1 failure.
+// When an earlier run died in the middle of a write, every command says so (stderr, and a
+// `recovered` list in its JSON): the ones that may write finish or clear it first, the read-only
+// ones report it as waiting.
 // No output holds an absolute home path except the `pathAbs` field of `list`.
 // `list`, `diff` and `plan` are shown to the user on the board: `--lang` (default en) words their
 // labels, notes and reasons in the run language. Ids, states, modes, options and actions never
@@ -23,11 +26,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isMain, warn } from './lib/common.mjs';
-import { IS_WIN, homeDir, displayPath, scrub, manifestFile, readManifest, mkdirp, runCheck } from './sync-check.mjs';
+import {
+  IS_WIN, homeDir, displayPath, scrub, manifestFile, readManifest, mkdirp, runCheck, recoverWrites, recoveryText,
+} from './sync-check.mjs';
 import { detectAccounts, publicAccount, accountsInUse } from './lib/accounts/detect.mjs';
 import { computeDiff, publicDiff, countElements, manifestIsFor, primaryFromManifest } from './lib/accounts/diff.mjs';
 import { buildPlan, PlanError, OPTIONS } from './lib/accounts/plan.mjs';
-import { applyPlan, undoRun } from './lib/accounts/apply.mjs';
+import { applyPlan, undoRun, unfinishedRuns } from './lib/accounts/apply.mjs';
 import { installCheck, uninstallCheck, isCheckInstalled } from './lib/accounts/install.mjs';
 import { parseLang, translator } from './lib/accounts/strings.mjs';
 
@@ -61,7 +66,7 @@ function pathArg(p) {
 
 const ids = (v) => (typeof v === 'string' ? v.split(',').map((s) => s.trim()).filter(Boolean) : null);
 
-function print(obj, { raw = false } = {}) {
+function emit(obj, { raw = false } = {}) {
   const text = JSON.stringify(obj, null, 2);
   process.stdout.write((raw ? text : scrub(text)) + '\n');
 }
@@ -100,10 +105,21 @@ function parseResolutions(list) {
   return out;
 }
 
+/** True when this invocation is allowed to change something on the machine. */
+function mayWrite(cmd, args) {
+  if (cmd === 'apply' || cmd === 'undo') return args.yes === true && args['dry-run'] !== true;
+  return (cmd === 'install-check' || cmd === 'uninstall-check') && args.yes === true;
+}
+
 function main(argv) {
   const args = parseCli(argv);
   const cmd = args._[0];
   const home = homeDir();
+
+  // What a run that died in the middle of a write left behind. `check` does this itself.
+  const recovered = cmd && cmd !== 'check' ? recoverWrites({ home, repair: mayWrite(cmd, args) }) : [];
+  for (const r of recovered) warn(scrub(recoveryText(r)));
+  const print = (obj, opts) => emit(recovered.length && obj && typeof obj === 'object' ? { ...obj, recovered } : obj, opts);
 
   if (cmd === 'list') {
     const lang = langOf(args);
@@ -141,6 +157,9 @@ function main(argv) {
     }
     const { plan, steps } = built;
     if (manifest && !usable) plan.warnings.unshift(translator(lang)('warning.otherPrimary', { id: manifest.primary }));
+    // A run that died half way left the accounts in between: say so before anything is planned on top.
+    const dead = unfinishedRuns(home);
+    if (dead.length) plan.warnings.unshift(translator(lang)('warning.unfinished', { n: dead.length, stamps: dead.join(', ') }));
     const extra = {};
     if (typeof args.drafts === 'string') {
       const dir = pathArg(args.drafts);
@@ -179,7 +198,9 @@ function main(argv) {
   }
 
   if (cmd === 'check') {
-    print(runCheck({ repair: args.repair === true }));
+    const report = runCheck({ repair: args.repair === true });
+    for (const r of report.recovered || []) warn(scrub(recoveryText(r)));
+    print(report);
     return 0;
   }
 

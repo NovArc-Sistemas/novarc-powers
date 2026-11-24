@@ -19,8 +19,21 @@ answers three questions:
     <runId>.md                       the same, to read
 ```
 
-Records stay on the machine. They hold display paths (`~`, or relative to the project root),
-masked text only, and no e-mail; the absolute path of each harness is in `index.json` alone.
+Records stay on the machine. The records are the truth and `index.json` is a cache made from
+them: it is rebuilt whenever it disagrees, so a run that died between two files heals at the
+next `history`, `init` or `close`. The absolute path of each harness is in `index.json` alone.
+
+**What a record may hold.** Paths are display paths (`~`, or relative to the project root).
+Text is masked as in the state: no credential. In prose (titles, notes, the user's decision
+notes) an e-mail address is masked (`al…@example.com`) and an absolute path outside the
+harnesses of the run is cut to its last two segments (`…/Company/report.txt`). Two things are
+kept as written, because they must match the files: the text of a change (`changes[].before`
+and `after`, already masked for secrets) and the `proposal`.
+
+**Reading records back.** A record is data from disk and is treated as untrusted: every read
+passes the same barrier as a write, a file that is too large, misnamed, in another harness's
+folder or not valid against the schema is ignored with a reason (never with its content), and
+nothing a record says can make the tool read or write outside the harness.
 
 A run id starts with its date (`20261123-d6oj`), so the files sort by time.
 
@@ -83,12 +96,17 @@ again, so a record never claims a change that was undone and never misses one ap
 Rules:
 
 - **Every item of the harness goes in**, whatever its status: fixed, failed, declined, deferred,
-  still open. `changes` is kept for fixed items only (it is what the on-disk check needs).
+  still open, each with what its revision is made of (`class`, `file`, `proposal`, `changes`):
+  the on-disk check needs it for fixed items, and the next review needs it to recognise a
+  proposal the user already declined.
 - **`measure.metrics`** holds the comparable numbers, already per session (the table below).
   A metric that was not measured is absent, never 0. A harness with no impact measurement has
   `"measure": null` and `"measureSkipped": "<reason>"`.
 - Text comes from `state.json`, so it is already masked. A record never holds a secret; the same
   barrier that guards `state.json` runs over it.
+- `measure.wasteShare { base, weighted?, raw? }` and `measure.weights` say which base the waste
+  share is on and which price weights produced the weighted numbers, so two reviews are only
+  compared on a common base.
 
 ### Comparable metrics
 
@@ -141,7 +159,7 @@ that applies wins:
 | Verdict | When |
 |---|---|
 | `not-enough-data` | fewer than `minDays` days or `minSessions` sessions since the review |
-| `not-measured` | the metric is missing on one side |
+| `not-measured` | the metric is missing on one side, or the two sides are not on a common base: one weighted and one raw (`reason: no-common-base`), or the price weights changed between the reviews (`reason: weights-changed`) |
 | `worse` | the metric rose by more than `noisePct`, with or without an expectation |
 | `confirmed` | with an expectation: at least `confirmedShare` of the expected reduction happened |
 | `partial` | with an expectation: at least `partialShare` of it happened |
@@ -157,7 +175,7 @@ that applies wins:
 | `reverted` | the file holds the `before` text and not the `after` text |
 | `changed` | the file holds neither: someone rewrote that part |
 | `missing` | the file is gone (and the change did not delete it) |
-| `not-checked` | the change has no text to look for (a command, a setting outside a file) |
+| `not-checked` | the change has no text to look for (a command, a setting outside a file); or its path leads outside the harness (a project: its repo root; an account: its config dir), through `..`, `~` or a link; or it is not a regular file, or is larger than 4 MB |
 
 **What a comparison is, and is not.** Two periods are compared, not two versions of the same
 work: the kind of task, the models and the amount of activity change too. Say so wherever a
@@ -171,10 +189,13 @@ The brief of each unit carries the path of the harness's last record. The review
 1. Reads the record's items before proposing anything.
 2. Sets `previous: { "run", "item" }` on every finding that is the same as an item of the
    record. A rule-engine candidate with the same check id on the same path is the same finding.
-3. **Declined before:** propose it again only when something changed, and say what. Otherwise
-   write it with status `declined` and `previous` pointing at the declined item: `build` carries
-   the earlier note, and the board shows "declined on <date>". This is the only case in which a
-   reviewer sets `declined`; `run.mjs complete` refuses it anywhere else.
+3. **Declined before:** when nothing changed, send the **same proposal**: copy `class`, `file`,
+   `proposal` and `changes` from the record's item, and set `previous`. `build` compares the
+   revision of what you sent with the revision the user declined; when they are equal the
+   decline is carried, with its date and note, and the user is not asked again. When you
+   propose something different, say what changed: the item comes back `open`, marked as
+   declined before, last in the queue. A reviewer never sets `declined`: only the user's own
+   decision, on that exact proposal, can.
 4. **Deferred before, or left open:** it comes back `open`; the board shows when it was first
    seen and how many times.
 5. **Fixed before and back again** (reverted on disk, or the same problem in another place): a

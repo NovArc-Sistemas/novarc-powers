@@ -309,6 +309,16 @@
               "lastNote": { "type": "string", "description": "The note the user left with that decision." }
             }
           },
+          "carriedFrom": {
+            "type": "object",
+            "description": "Set by run.mjs build on a declined item whose decline was carried from an earlier review: the user declined this exact proposal (same rev) there, so it was not asked again.",
+            "required": ["run", "item"],
+            "additionalProperties": false,
+            "properties": {
+              "run": { "type": "string" },
+              "item": { "type": "string" }
+            }
+          },
           "lesson": {
             "type": "object",
             "description": "The teaching part of the diagnosis, in the user's language. See references/teaching.md.",
@@ -505,6 +515,8 @@
               "after": { "type": ["number", "null"], "description": "Measured now, since that review." },
               "changePct": { "type": ["number", "null"] },
               "verdict": { "enum": ["confirmed", "partial", "improved", "no-change", "worse", "not-enough-data", "not-measured"], "description": "confirmed and partial are read against an expectation; improved, no-change and worse are the plain change." },
+              "base": { "enum": ["weighted", "raw"], "description": "For waste-share: the base both numbers are on." },
+              "reason": { "enum": ["weights-changed", "no-common-base"], "description": "Why a row is not-measured although both reviews have a number: the price weights changed between them, or one is weighted and the other raw." },
               "items": { "type": "array", "items": { "type": "string" }, "description": "Ids, in that review, of the fixed items that named this metric." }
             }
           }

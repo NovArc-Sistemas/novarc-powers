@@ -14,7 +14,7 @@ import { readClaim, claimable, queueSnapshot, roundApplies, ROUND_FILES, DEFAULT
 import { validateFindings, findingsTemplate } from './findings.mjs';
 import { itemRev, DECISION_STATUSES } from './rev.mjs';
 import { hasCredential } from './secrets.mjs';
-import { harnessKeyOf, lastRecordOf, previousItem } from './followup.mjs';
+import { harnessKeyOf, lastRecordOf, previousItem, carriedDecline } from './followup.mjs';
 import { refreshRecords } from './history.mjs';
 
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
@@ -221,7 +221,7 @@ export function complete(ctx, { unitId, session, findingsPath }) {
   if (!findingsPath) throw new UsageError('complete needs --findings <file>');
   if (heldByOther(unit.claim)) throw new RunError(`unit ${unitId} is claimed by ${unit.claim.session}; it can be completed by that session, or by anyone once the claim is ${unit.claim.ttlMinutes} minutes old`);
   let data;
-  try { data = JSON.parse(fs.readFileSync(findingsPath, 'utf8').replace(/^﻿/, '')); } catch (e) {
+  try { data = JSON.parse(fs.readFileSync(findingsPath, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {
     throw new RunError(e && e.code === 'ENOENT' ? 'findings file not found' : 'findings file is not valid JSON');
   }
   const loaded = loadStateSchema();
@@ -235,15 +235,17 @@ export function complete(ctx, { unitId, session, findingsPath }) {
   if (clash.length) throw new RunError('findings rejected: item ids already used by another unit', { errors: clash.map((id) => `/items: id ${id} is already used by another unit`) });
 
   // `previous` names the same finding in an earlier review of that harness. One that points at
-  // nothing is told to the reviewer and kept; a `declined` that the user never declined is refused.
-  const notDeclined = [];
+  // nothing is told to the reviewer and kept. One that points at an item the user declined is
+  // answered with whether that decline still stands: it does for the same proposal (the
+  // revisions are equal), and the user is not asked again; another proposal is a new question.
+  const declinedBefore = { same: [], changed: [] };
   res.normalized.items.forEach((i, n) => {
     if (i.previous === undefined) return;
-    const before = previousItem(ctx.run, ctx.run.harnesses.find((h) => h.id === i.harness), i.previous);
-    if (i.status === 'declined' && (!before || before.item.status !== 'declined')) notDeclined.push(`/items/${n}/status: declined is only for a finding the user declined in an earlier review, and \`previous\` does not point at one`);
-    else if (!before) res.warnings.push(`/items/${n}/previous: no review record of this harness holds this run and item`);
+    const h = ctx.run.harnesses.find((x) => x.id === i.harness);
+    const before = previousItem(ctx.run, h, i.previous);
+    if (!before) res.warnings.push(`/items/${n}/previous: no review record of this harness holds this run and item`);
+    else if (before.item.status === 'declined' && i.status === 'open') (carriedDecline(ctx.run, h, i, itemRev(i)) ? declinedBefore.same : declinedBefore.changed).push(i.id);
   });
-  if (notDeclined.length) throw new RunError(`findings rejected: ${notDeclined.length} problem(s)`, { errors: notDeclined, warnings: res.warnings });
 
   // New findings change what a review record says: a run that already left records gets them again.
   return refreshRecords(ctx, withLock(ctx.paths.mutex, () => {
@@ -318,6 +320,7 @@ export function complete(ctx, { unitId, session, findingsPath }) {
       stored: `findings/${path.basename(ctx.paths.findingsFile(unitId))}`,
       counts: { items: res.normalized.items.length, byHarness, bySeverity, inventory: res.normalized.inventory.length, groups: res.normalized.groups.length },
       warnings: res.warnings,
+      ...(declinedBefore.same.length || declinedBefore.changed.length ? { declinedBefore } : {}),
       ...(invalidated.length ? { invalidated } : {}),
       ...(orphaned.length ? { orphanedStatuses: orphaned } : {}),
     };

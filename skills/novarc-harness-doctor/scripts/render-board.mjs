@@ -21,6 +21,9 @@
 // agent that publishes the page can read it whole and patch it. A fragment is not meant to be
 // opened from disk: it has no charset declaration of its own. And since an Artifact has no file
 // beside it, its noscript and its drawing-failed texts point at the agent, not at board.md.
+// It is also the one board that leaves the machine, so in it every e-mail address is masked, in
+// file text and change text too (see maskStateEmails); state.json, board.md and the other two
+// channels keep the text as it is on disk.
 //
 // A harness that was reviewed before carries `history` and `followUp` (references/follow-up.md):
 // the page and board.md then show what that review expected against what happened since. A state
@@ -35,6 +38,7 @@ import { parseArgs, parseJsonSafe, isMain, warn, printJson, normalizeInputPath }
 import { STRINGS, LOCALES, resolveLanguage, fill, plural, label, compactTokens } from './lib/i18n.mjs';
 import { ROUNDS_TOTAL, floor1, gradeFor, roundBreakdown, applyScores, averageScore, wasteOf, fleetImpact } from './lib/scoring.mjs';
 import { anchorState } from './lib/anchors.mjs';
+import { maskEmails } from './lib/run/prose.mjs';
 
 export * from './lib/scoring.mjs';
 
@@ -316,14 +320,127 @@ export function boardTitle(state, T) {
   return name ? fill(T.title, { name }) : T.titlePlain;
 }
 
+// ---------------------------------------------------------------------------------------------
+// E-mail addresses on a board that leaves the machine
+//
+// `run.mjs build` masks the prose of the state (lib/run/prose.mjs), but the text of a file and of
+// a change is kept exactly as on disk, because a change is drawn by finding its text in its file.
+// A board for the artifact channel is published, so there every address is masked, in every
+// string, with one substitution: each address found anywhere in the state is replaced by its
+// masked form wherever its exact text occurs. The same text therefore reads the same in a file
+// and in the change that quotes it, and the change is still found. The state on disk, board.md
+// and the boards that stay on the machine (server, file) are not touched.
+// ---------------------------------------------------------------------------------------------
+
+// Where the addresses are. This mirrors EMAIL_RE and the two look-alike exceptions of
+// lib/run/prose.mjs, which only exports the masked text; a board needs the addresses themselves.
+// tests/render-board.test.mjs checks that the two agree. The masked form is always the library's.
+const EMAIL_RE = /(?<![A-Za-z0-9._%+\-…*])([A-Za-z0-9][A-Za-z0-9._%+-]{0,63})@((?:[A-Za-z0-9][A-Za-z0-9-]{0,62}\.)+[A-Za-z]{2,24})(?![A-Za-z0-9-])/g;
+
+/** The e-mail addresses in `text`, as lib/run/prose.mjs would mask them, in order of appearance. */
+export function emailsIn(text) {
+  const out = [];
+  if (typeof text !== 'string' || !text.includes('@')) return out;
+  for (const m of text.matchAll(EMAIL_RE)) {
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 2);
+    if (/^:[^\s\d]/.test(after)) continue; // git@host:owner/repo
+    if (/^\d+x\./i.test(m[2])) continue; // logo@2x.png
+    out.push(m[0]);
+  }
+  return out;
+}
+
+/** A copy of `value` with every string passed through `fn`; keys, numbers and the rest stay. */
+function mapStrings(value, fn) {
+  if (typeof value === 'string') return fn(value);
+  if (Array.isArray(value)) return value.map((v) => mapStrings(v, fn));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, fn)]));
+  return value;
+}
+
+/** Where each change is drawn: `"<item>#<index>"` -> its hunk in the file it was found in. */
+function placements(state) {
+  const out = new Map();
+  for (const res of Object.values(anchorState(state).files)) {
+    for (const seg of res.segments) if (seg.type === 'hunk') out.set(`${seg.item}#${seg.change}`, seg);
+  }
+  return out;
+}
+const samePlace = (a, b) => !!a && !!b && a.curStart === b.curStart && a.removed.length === b.removed.length && a.added.length === b.added.length && a.applied === b.applied;
+/** The warning for a change a published board cannot keep in place (see maskStateEmails). */
+export const UNPLACED_WHEN_MASKED = 'not drawn in its file on the published board: with the e-mail addresses masked its text is no longer found there';
+
 /**
- * board.html for a validated state. `opts`: { lang, channel, offline, files }.
- * The channel picks the shell (SHELLS) and how the data is written: for an Artifact, a fragment
- * with the data on several lines; otherwise a standalone document with the data on one line.
- * State strings are untrusted: they travel only inside the embedded JSON, and the client sets
- * them with textContent.
+ * A copy of the state with every e-mail address masked, for a board that is published.
+ * Returns `{ state, unplaced }`. A state without addresses comes back as it is.
+ *
+ * Every change that is drawn in its file in `state` is drawn at the same lines in the copy. That
+ * holds by itself when an address is quoted whole. When a change cuts through an address (its
+ * text starts or ends inside one, or it puts one together with the text around it), the masked
+ * text would no longer be found, or the page would draw the address from two pieces: such a
+ * change is rewritten in the copy as the whole lines it replaces, which is the same edit and the
+ * way the file viewer draws it anyway. `unplaced` lists the changes that still could not be kept
+ * in place (`[{ item, change }]`); masking wins there, and the caller is told.
  */
-export function renderHtml(state, opts = {}) {
+export function maskStateEmails(state) {
+  const found = new Map();
+  let order = [];
+  const learn = (text) => {
+    for (const literal of emailsIn(text)) {
+      if (found.has(literal)) continue;
+      const masked = maskEmails(literal);
+      if (masked === literal) continue;
+      found.set(literal, masked);
+      // The longest first, so that an address which contains another is replaced whole.
+      order = [...found].sort((a, b) => b[0].length - a[0].length);
+    }
+  };
+  mapStrings(state, (text) => { learn(text); return text; });
+  const was = placements(state);
+  const drawsAddress = (hunk) => emailsIn(`${hunk.removed.join('\n')}\n${hunk.added.join('\n')}`).length > 0;
+  // Nothing to mask: no address in any string, and none in a line a change puts together.
+  if (!found.size && ![...was.values()].some(drawsAddress)) return { state, unplaced: [] };
+  const mask = (text) => {
+    if (!text.includes('@')) return text;
+    let out = text;
+    for (const [literal, masked] of order) if (out.includes(literal)) out = out.split(literal).join(masked);
+    return out;
+  };
+  const copy = mapStrings(state, mask);
+
+  /** Changes the copy does not draw where the state draws them, or draws with an address put together from two pieces. */
+  const displaced = () => {
+    const now = placements(copy);
+    return [...was.keys()].filter((key) => !samePlace(was.get(key), now.get(key)) || drawsAddress(now.get(key)));
+  };
+  const changeOf = (key) => {
+    const cut = key.lastIndexOf('#');
+    const item = copy.items.find((i) => i.id === key.slice(0, cut));
+    const index = Number(key.slice(cut + 1));
+    return { item: key.slice(0, cut), index, change: item && Array.isArray(item.changes) ? item.changes[index] : null };
+  };
+  const whole = (lines) => { const text = lines.join('\n'); learn(text); return mask(text); };
+  for (const key of displaced()) {
+    const hunk = was.get(key);
+    const { change } = changeOf(key);
+    if (!change) continue;
+    if (!hunk.applied && hunk.removed.length) {
+      change.before = whole(hunk.removed);
+      change.after = whole(hunk.added);
+      delete change.insertAfter;
+    } else if (hunk.applied && hunk.added.length) {
+      change.after = whole(hunk.added);
+      change.before = whole(hunk.removed);
+    }
+  }
+  return { state: copy, unplaced: displaced().map((key) => { const c = changeOf(key); return { item: c.item, change: c.index }; }) };
+}
+
+/**
+ * The page for a validated state, and what the caller has to be told about it:
+ * `{ html, unplaced }` (see maskStateEmails; always empty outside the artifact channel).
+ */
+function buildPage(state, opts = {}) {
   const lang = opts.lang || resolveLanguage(state.language);
   const T = STRINGS[lang];
   const channel = CHANNELS.includes(opts.channel) ? opts.channel : (state.environment.channel || 'file');
@@ -334,12 +451,15 @@ export function renderHtml(state, opts = {}) {
   // What the reader is told when the page cannot draw itself. A file on disk has board.md beside
   // it; a published Artifact has nothing beside it, so there the report comes from the agent.
   const fallback = channel === 'artifact' ? { noscript: T.noscriptArtifact, error: T.renderErrorArtifact } : { noscript: T.noscript, error: T.renderError };
-  const boot = { lang, locale: LOCALES[lang], channel, home: HOMEPAGE_URL, t: T, state: opts.files === 'changed' ? withChangedFilesOnly(state) : state };
+  const shown = opts.files === 'changed' ? withChangedFilesOnly(state) : state;
+  // Only the artifact channel leaves the machine: there, and only there, addresses are masked.
+  const published = channel === 'artifact' ? maskStateEmails(shown) : { state: shown, unplaced: [] };
+  const boot = { lang, locale: LOCALES[lang], channel, home: HOMEPAGE_URL, t: T, state: published.state };
   const parts = {
     OPEN: shell.open(htmlLang),
     BODY: shell.body,
     CLOSE: shell.close,
-    TITLE: escHtml(boardTitle(state, T)),
+    TITLE: escHtml(boardTitle(published.state, T)),
     FONTS: fonts,
     CSS: a.css,
     SKIP: escHtml(T.skip),
@@ -351,7 +471,20 @@ export function renderHtml(state, opts = {}) {
   };
   // One pass with a function replacer: inserted text is never scanned again, so nothing in the
   // state, the stylesheet or the script can be mistaken for a placeholder or a `$` pattern.
-  return a.html.replace(/%%([A-Z]+)%%/g, (m, k) => (Object.prototype.hasOwnProperty.call(parts, k) ? parts[k] : m));
+  const html = a.html.replace(/%%([A-Z]+)%%/g, (m, k) => (Object.prototype.hasOwnProperty.call(parts, k) ? parts[k] : m));
+  return { html, unplaced: published.unplaced };
+}
+
+/**
+ * board.html for a validated state. `opts`: { lang, channel, offline, files }.
+ * The channel picks the shell (SHELLS) and how the data is written: for an Artifact, a fragment
+ * with the data on several lines and every e-mail address masked; otherwise a standalone document
+ * with the data on one line, as it is in the state.
+ * State strings are untrusted: they travel only inside the embedded JSON, and the client sets
+ * them with textContent.
+ */
+export function renderHtml(state, opts = {}) {
+  return buildPage(state, opts).html;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -397,7 +530,8 @@ const upperFirst = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1)
  * The pure helpers of the page that read a follow-up (templates/board/logic.js has no DOM and no
  * globals), evaluated here so that board.md says about an earlier review exactly what the page says.
  */
-const LOGIC_NAMES = ['metricUnit', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail', 'itemHistory', 'historyLine'];
+const LOGIC_NAMES = ['metricUnit', 'metricSubLabel', 'notMeasuredReason', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail',
+  'itemHistory', 'historyLine', 'carriedDecline', 'carriedLine', 'declinedBefore'];
 let logicCache = null;
 function boardLogic() {
   if (!logicCache) {
@@ -449,7 +583,9 @@ function followUpMarkdown(fu, T, lang) {
       const change = Logic.metricChange(m, waiting);
       // While the sample is too small no verdict counts, whatever the state carries.
       const verdict = waiting ? 'not-enough-data' : m.verdict;
-      L.push(`| ${cell(label(T.fu.metric, m.metric))} (${label(T.fu.unit, unit)}) | ${value(m.before, T.notMeasured)} | ${value(m.expected, '-')} | ${value(m.after, T.notMeasured)} | ${change.pct === null ? '-' : `${sign(change.pct)}${num1(Math.abs(change.pct))}%`} | ${label(T.fu.verdict, verdict)} |`);
+      // Both reviews may have a number and still not compare: the row then says why.
+      const why = waiting ? null : Logic.notMeasuredReason(m, T);
+      L.push(`| ${cell(label(T.fu.metric, m.metric))} (${Logic.metricSubLabel(m, T)}) | ${value(m.before, T.notMeasured)} | ${value(m.expected, '-')} | ${value(m.after, T.notMeasured)} | ${change.pct === null ? '-' : `${sign(change.pct)}${num1(Math.abs(change.pct))}%`} | ${label(T.fu.verdict, verdict)}${why ? `: ${why}` : ''} |`);
     }
     L.push('');
   } else if (!waiting) L.push(T.fu.metricsNone, '');
@@ -573,9 +709,12 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       L.push(`- **${g.id}** (${T.dc.group}) ${cell(g.title)}: ${g.items.filter((id) => openIds.has(id)).join(', ')}`);
       L.push(`  - \`${decideCommand(state.run.id, g.id, 'approve', '', g.rev)}\``);
     }
-    const sorted = openItems.map((i, k) => ({ i, k })).sort((a, b) => (SEVERITY_ORDER[a.i.severity] - SEVERITY_ORDER[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k));
+    // The order of the page's decide queue: most severe first, and what the user declined in an
+    // earlier review (back now with another proposal) after everything that was never declined.
+    const again = (i) => (Logic.declinedBefore(i) ? 1 : 0);
+    const sorted = openItems.map((i, k) => ({ i, k })).sort((a, b) => (again(a.i) - again(b.i)) || (SEVERITY_ORDER[a.i.severity] - SEVERITY_ORDER[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k));
     for (const { i } of sorted) {
-      L.push(`- **${i.id}** (${label(T.severity, i.severity)}, ${cell(nameOf(i.harness))}${i.group ? `, ${i.group}` : ''}) ${cell(i.title)}`);
+      L.push(`- **${i.id}** (${label(T.severity, i.severity)}, ${cell(nameOf(i.harness))}${i.group ? `, ${i.group}` : ''}${again(i) ? `, ${T.hist.declinedBefore}` : ''}) ${cell(i.title)}`);
       L.push(`  - \`${decideCommand(state.run.id, i.id, 'approve', '', i.rev)}\``);
       if (i.question) L.push(`  - ${T.field.question}: ${cell(i.question)}`);
     }
@@ -651,13 +790,19 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       if (!inRound.length) continue;
       L.push(`#### ${fill(T.md.roundHeading, { n: r, name: T.rounds[r] })}`, '');
       L.push(`| ${C.id} | ${C.severity} | ${C.status} | ${C.class} | ${C.origin} | ${C.title} |`, '|---|---|---|---|---|---|');
-      for (const i of inRound) L.push(`| ${cell(i.id)} | ${label(T.severity, i.severity)} | ${label(T.status, i.status)} | ${label(T.class, i.class)} | ${label(T.origin, i.origin || 'active')} | ${cell(i.title)} |`);
+      // Beside the status, what an earlier review left on the finding: a decline kept because the
+      // same proposal came back, or an open finding that was declined before.
+      const statusOf = (i) => `${label(T.status, i.status)}${Logic.carriedDecline(i) ? ` (${T.hist.keptChip})` : i.status === 'open' && Logic.declinedBefore(i) ? ` (${T.hist.declinedBefore})` : ''}`;
+      for (const i of inRound) L.push(`| ${cell(i.id)} | ${label(T.severity, i.severity)} | ${statusOf(i)} | ${label(T.class, i.class)} | ${label(T.origin, i.origin || 'active')} | ${cell(i.title)} |`);
       L.push('');
       for (const i of inRound) {
         L.push(`- **${i.id}** ${cell(i.finding)}`);
         // What the records say about this finding in earlier reviews; a `previous` link alone says nothing.
+        // A decline kept from an earlier review says so first; the history then leaves that decision out.
         const hist = Logic.itemHistory(i);
-        if (hist) L.push(`  - ${F.history}: ${cell(Logic.historyLine(hist, T, TEXT_FORMAT))}`);
+        const carried = Logic.carriedDecline(i);
+        const told = [carried ? Logic.carriedLine(carried, T, TEXT_FORMAT) : '', hist ? Logic.historyLine(hist, T, TEXT_FORMAT, Boolean(carried)) : ''].filter(Boolean);
+        if (told.length) L.push(`  - ${F.history}: ${cell(told.join(' · '))}`);
         if (i.evidence) L.push(`  - ${F.evidence}: ${cell(i.evidence)}`);
         const paths = [...new Set((i.changes || []).map((c) => c.path))];
         if (paths.length) L.push(`  - ${F.file}: ${paths.map(cell).join(', ')} (${plural(T.md.changes, i.changes.length)})`);
@@ -743,8 +888,13 @@ export function renderFile(statePath, outDir, opts = {}) {
   const anchors = anchorState(state);
   const warnings = [...anchors.warnings.map((w) => ({ item: w.item, change: w.change, problem: w.problem })), ...referenceWarnings(state)];
   const lang = resolveLanguage(state.language, opts.lang);
-  const html = renderHtml(state, { lang, channel: opts.channel, offline: opts.offline === true, files: opts.files });
+  const page = buildPage(state, { lang, channel: opts.channel, offline: opts.offline === true, files: opts.files });
+  const html = page.html;
+  // board.md stays on the machine: it is written from the state as it is, whatever the channel.
   const md = renderMarkdown(state, lang, warnings);
+  // The anchoring warnings above are the state's own. A published board can add one of its own
+  // kind: a change that masking the e-mail addresses took out of its place (see maskStateEmails).
+  const published = page.unplaced.map((u) => ({ item: u.item, change: u.change, problem: UNPLACED_WHEN_MASKED }));
 
   const out = outDir || path.dirname(statePath);
   fs.mkdirSync(out, { recursive: true });
@@ -754,7 +904,7 @@ export function renderFile(statePath, outDir, opts = {}) {
   const mdPath = path.join(out, 'board.md');
   fs.writeFileSync(htmlPath, html);
   fs.writeFileSync(mdPath, md);
-  return { ok: true, language: lang, scores, warnings, bytes: Buffer.byteLength(html), files: { state: statePath, html: htmlPath, md: mdPath } };
+  return { ok: true, language: lang, scores, warnings: [...warnings, ...published], bytes: Buffer.byteLength(html), files: { state: statePath, html: htmlPath, md: mdPath } };
 }
 
 if (isMain(import.meta.url)) {

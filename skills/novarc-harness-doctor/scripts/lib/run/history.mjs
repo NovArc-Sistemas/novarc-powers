@@ -4,11 +4,17 @@
 // history/index.json. `history --write` does it for a run that stays open. A run that already has
 // records gets them written again by whatever changes a status afterwards (`decide`, `decisions`,
 // `mark`, `record`, `undo`, `complete`), so a record always says what was decided and what is
-// applied now. A record is made from the state as `build` assembles it (followup.mjs), goes
-// through the same two barriers as the state (home paths, credentials), and is checked against
-// templates/record.schema.json before anything is written. Every file is written with a temp
-// file and a rename, under the run's mutex and the history folder's own: two runs can close at
-// the same time.
+// applied now. A record is made from the state as `build` assembles it (followup.mjs), passes the
+// barrier every record passes when it is read (records.mjs: home paths, the prose policy,
+// credentials), and is checked against templates/record.schema.json before anything is written.
+// Every file is written with a temp file and a rename, under the run's mutex and the history
+// folder's own: two runs can close at the same time.
+//
+// The records are the truth of the history folder. The `.md` beside each one and index.json are
+// made from them, so whatever a crash left behind (a record without its `.md`, an index that does
+// not know a record, a run that wrote its records and was never marked closed) is put right by
+// the next `history`, `init` or `close`: `healHistory` writes what is missing or differs, and
+// `close` on a run that has records but is not closed writes them again and closes it.
 //
 // Making the records is the slow part: the whole state is assembled and harness files are read.
 // It is never done while holding the run mutex, where a lock held that long could be taken for a
@@ -16,15 +22,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeInputPath } from '../common.mjs';
-import { RunError, UsageError, Plain, readJson, readJsonl, readText, writeTextAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
-import { runPaths, runsDir, latestRunId, historyDir, historyIndexPath, historyMutex, RUN_ID_RE } from './paths.mjs';
-import { homeMatchers, scrubDeep } from './scrub.mjs';
-import { maskDeep } from './secrets.mjs';
+import { RunError, UsageError, Plain, readJson, readJsonl, readText, readTextCapped, writeTextAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
+import { runPaths, runsDir, latestRunId, historyDir, historyIndexPath, historyMutex, homeBase, RUN_ID_RE } from './paths.mjs';
 import { isDateTime } from './schema.mjs';
 import { loadFindings, loadItems, loadStatus, resolveGroups, resolveRunId, loadRun, inputsFingerprint } from './model.mjs';
 import { assembleCurrent } from './build.mjs';
 import { markClosed } from './init.mjs';
-import { HARNESS_KEY_RE, harnessKeyOf, listRecords, forgetRecords, makeRecord, validateRecord, recordBaseName, loadThresholds } from './followup.mjs';
+import { limits, harnessKeyOf, ownsPath, harnessKeys, indexedPaths, listRecords, ignoredRecords, starved, forgetRecords, recheckRecords, validateRecord, recordBaseName, sanitizeRecord } from './records.mjs';
+import { makeRecord, slimRecord, loadThresholds } from './followup.mjs';
 import { recordMarkdown, historyText } from './text.mjs';
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -32,12 +37,33 @@ const INDEX_SCHEMA = 1;
 /** How often the records are made again because the run changed meanwhile, before the mutex is held throughout. */
 const OPTIMISTIC_TRIES = 3;
 
-function readIndex() {
-  let index = null;
-  try { index = readJson(historyIndexPath()); } catch { index = null; }
-  if (!isObject(index) || !isObject(index.harnesses)) return { schema: INDEX_SCHEMA, harnesses: {} };
-  return { schema: INDEX_SCHEMA, harnesses: { ...index.harnesses } };
+/** Write `text` to `file` unless it already holds exactly that. True when it was written. */
+function put(file, text) {
+  if (readText(file) === text) return false;
+  writeTextAtomic(file, text);
+  return true;
 }
+
+function readRun(paths) {
+  const run = readJson(paths.run);
+  if (!run || !Array.isArray(run.harnesses)) throw new RunError(`run ${paths.runId} not found`);
+  return run;
+}
+
+/**
+ * Test seam: NOVARC_HD_TEST_CRASH_AT names a point (`record-json`, `record-md`, `index`); the
+ * process dies there the way a killed one does, with its locks left behind. A test can then see
+ * what the next command makes of the half-written history.
+ */
+function crashForTests(point) {
+  if (process.env.NOVARC_HD_TEST_CRASH_AT !== point) return;
+  try { process.kill(process.pid, 'SIGKILL'); } catch { /* fall through */ }
+  process.exit(137);
+}
+
+// ---------------------------------------------------------------------------------------------
+// index.json: a cache of the records
+// ---------------------------------------------------------------------------------------------
 
 /** The `reviews` of one harness in index.json: one line per record, oldest first. */
 function reviewsOf(key) {
@@ -52,18 +78,110 @@ function reviewsOf(key) {
   }));
 }
 
-/** Write `text` to `file` unless it already holds exactly that. True when it was written. */
-function put(file, text) {
-  if (readText(file) === text) return false;
-  writeTextAtomic(file, text);
-  return true;
+/** The folder a display path names on this machine, or null. */
+function expandDisplay(display) {
+  if (typeof display !== 'string' || !display) return null;
+  if (display === '~') return homeBase();
+  if (display.startsWith('~/')) return path.join(homeBase(), display.slice(2));
+  return path.isAbsolute(display) ? path.normalize(display) : null;
 }
 
-function readRun(paths) {
-  const run = readJson(paths.run);
-  if (!run || !Array.isArray(run.harnesses)) throw new RunError(`run ${paths.runId} not found`);
-  return run;
+/**
+ * The absolute path of the harness `key` names: the one place a record does not keep. It is
+ * taken from whoever can say it (the run that is writing, the index as it was, the display path
+ * of the last record, the run directories of its records) and kept only when it is that
+ * harness's own: the key holds the hash of the path. null when nobody can say.
+ */
+function pathOf(key, records, hints, indexed) {
+  const last = records[records.length - 1].record;
+  for (const candidate of [hints.get(key), indexed.get(key), expandDisplay(last.path)]) {
+    if (ownsPath(key, last, candidate)) return candidate;
+  }
+  for (const { record } of records.slice(-5).reverse()) {
+    let run = null;
+    try { run = RUN_ID_RE.test(record.runId) ? readJson(runPaths(record.runId).run) : null; } catch { run = null; }
+    const h = run && Array.isArray(run.harnesses) ? run.harnesses.find((x) => isObject(x) && x.harnessKey === key) : null;
+    if (h && ownsPath(key, last, h.pathAbs)) return h.pathAbs;
+  }
+  return null;
 }
+
+/**
+ * index.json as the records say it should be. Nothing of the index on disk is trusted but the
+ * absolute path of each harness, and that only after `ownsPath` (see `pathOf`). `hints` gives
+ * the path of the harnesses a run is writing right now. null when this command could not read
+ * every record (a history larger than one command reads): an index is then not made at all,
+ * rather than made from a part.
+ */
+function expectedIndex(hints = new Map()) {
+  const indexed = indexedPaths();
+  const harnesses = {};
+  for (const key of harnessKeys()) {
+    const records = listRecords(key);
+    if (starved(key)) return null;
+    if (!records.length) continue;
+    const last = records[records.length - 1].record;
+    harnesses[key] = { kind: last.kind, provider: last.provider, name: last.name, path: last.path, pathAbs: pathOf(key, records, hints, indexed), reviews: reviewsOf(key) };
+  }
+  return toJsonText({ schema: INDEX_SCHEMA, harnesses });
+}
+
+/** The language a run was held in, when its directory is still there. */
+function languageOfRun(runId) {
+  try {
+    const run = RUN_ID_RE.test(runId) ? readJson(runPaths(runId).run) : null;
+    return run && (run.language === 'pt' || run.language === 'en') ? run.language : null;
+  } catch { return null; }
+}
+
+/** What the history folder lacks or holds differently from what its records say: `{ md, index }`. */
+function pendingRepairs() {
+  const md = [];
+  for (const key of harnessKeys()) {
+    for (const { file, record } of listRecords(key)) {
+      const mdFile = file.replace(/\.json$/, '.md');
+      const have = readTextCapped(mdFile, limits().recordBytes);
+      // A record that says its language gets its `.md` back whenever it differs; an older one
+      // only when it is missing, in the language of its run when that can still be told.
+      if (have.reason === 'missing') md.push({ file: mdFile, text: recordMarkdown(record, record.language || languageOfRun(record.runId) || 'en') });
+      else if (record.language && have.text !== recordMarkdown(record, record.language)) md.push({ file: mdFile, text: recordMarkdown(record, record.language) });
+    }
+  }
+  const index = expectedIndex();
+  const current = readTextCapped(historyIndexPath(), limits().indexBytes);
+  return { md, index: index === null || current.text === index ? null : index };
+}
+
+/**
+ * Put the history folder back in line with its records: a missing or outdated `.md`, and an
+ * index.json that is missing, unreadable or says something else. `{ index, md }`: whether the
+ * index was written, and how many `.md`. It never fails: a history that cannot be repaired now
+ * is repaired by the next command, and the records alone are what a run reads.
+ */
+export function healHistory() {
+  const healed = { index: false, md: 0 };
+  try {
+    if (!fs.existsSync(historyDir())) return healed;
+    const first = pendingRepairs();
+    if (first.index === null && !first.md.length) return healed;
+    withLock(historyMutex(), (lock) => {
+      // Someone may have written between the look and the lock: look again, now alone.
+      for (const key of harnessKeys()) recheckRecords(key);
+      const todo = pendingRepairs();
+      for (const { file, text } of todo.md) {
+        if (!lock.held()) return; // taken over: whoever holds it now does the rest
+        lock.touch();
+        if (put(file, text)) healed.md++;
+      }
+      if (todo.index !== null && lock.held()) healed.index = put(historyIndexPath(), todo.index);
+    });
+  } catch { /* the next command tries again */ }
+  return healed;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Writing the records of a run
+// ---------------------------------------------------------------------------------------------
 
 /** The harnesses of the run that get a record: all of them, or only those that already have one. */
 function targetsOf(run, onlyExisting) {
@@ -109,8 +227,9 @@ function gateForTests() {
 }
 
 /**
- * Make the records of a run without writing anything: `{ run, records: [{ h, key, record }] }`.
- * This is the slow part. Nothing is returned for writing unless every record fits its schema.
+ * Make the records of a run without writing anything:
+ * `{ run, records: [{ h, key, record, json }] }`. This is the slow part. Nothing is returned for
+ * writing unless every record fits its schema and the size a record may have.
  * Group ids must have been assigned (`assignGroups`).
  */
 function prepare(paths, { at, onlyExisting }) {
@@ -122,7 +241,12 @@ function prepare(paths, { at, onlyExisting }) {
   const status = loadStatus(paths);
   const ledger = readJson(paths.ledger) || { entries: [] };
   const events = readJsonl(paths.log).filter((l) => l.value).map((l) => l.value);
-  const matchers = homeMatchers();
+  // The items as the findings files hold them: what each revision is a hash of.
+  const stored = new Map();
+  for (const { data } of loadFindings(paths, run)) {
+    for (const i of Array.isArray(data.items) ? data.items : []) if (isObject(i) && typeof i.id === 'string' && !stored.has(i.id)) stored.set(i.id, i);
+  }
+  const max = limits().recordBytes;
   const records = [];
   const problems = [];
   for (const { h, key, existing } of targets) {
@@ -131,11 +255,18 @@ function prepare(paths, { at, onlyExisting }) {
     // The review ended when the run was closed: writing its record again keeps that moment.
     const closedAt = isDateTime(run.closedAt) ? run.closedAt : at;
     const reviewedAt = run.closed === true ? (existing ? existing.record.reviewedAt : closedAt) : at;
-    const made = makeRecord({ state, run, h, status, ledger, events, raw: isObject(raw) ? raw : null, reviewedAt, t });
-    // The same two barriers as the state: no absolute home path, no credential.
-    const record = maskDeep(scrubDeep(made, matchers));
+    const made = makeRecord({ state, run, h, status, ledger, events, stored, raw: isObject(raw) ? raw : null, reviewedAt, t });
+    // The barrier a record passes when it is read: what is written is what a later run sees.
+    const record = sanitizeRecord(made);
+    let json = toJsonText(record);
+    // A record over the size that is read back loses the text of its changes, the unapplied ones first.
+    for (const fixedToo of [false, true]) {
+      if (Buffer.byteLength(json) <= max) break;
+      if (slimRecord(record, fixedToo)) json = toJsonText(record);
+    }
+    if (Buffer.byteLength(json) > max) problems.push(`${h.id}: the record is larger than ${max} bytes even without the text of its changes`);
     for (const e of validateRecord(record).slice(0, 10)) problems.push(`${h.id}: ${e}`);
-    records.push({ h, key, record });
+    records.push({ h, key, record, json });
   }
   if (problems.length) throw new RunError('a review record does not fit templates/record.schema.json; nothing was written', { errors: problems.slice(0, 50) });
   gateForTests();
@@ -146,28 +277,34 @@ function prepare(paths, { at, onlyExisting }) {
  * Write prepared records, their `.md` and the index, under the history mutex. Returns one entry
  * per record: `{ harness, harnessKey, file, md, items, fixed, written }`, `file` and `md`
  * relative to the history folder, `written` false when the files already held exactly this.
+ * The record goes first: it is the truth, and a crash after it leaves only what `healHistory`
+ * makes again.
  */
 function commit({ run, records }) {
   if (!records.length) return [];
   const base = recordBaseName(run.runId, run.createdAt);
   return withLock(historyMutex(), () => {
-    const index = readIndex();
     const out = [];
-    for (const { h, key, record } of records) {
+    const hints = new Map();
+    for (const { h, key, record, json } of records) {
       const dir = path.join(historyDir(), key);
-      const wroteJson = put(path.join(dir, `${base}.json`), toJsonText(record));
-      const wroteMd = put(path.join(dir, `${base}.md`), recordMarkdown(record, run.language));
+      const wroteJson = put(path.join(dir, `${base}.json`), json);
+      crashForTests('record-json');
+      const wroteMd = put(path.join(dir, `${base}.md`), recordMarkdown(record, record.language));
       forgetRecords(key);
-      // The one place that keeps the absolute path of the harness.
-      index.harnesses[key] = { kind: record.kind, provider: record.provider, name: record.name, path: record.path, pathAbs: h.pathAbs, reviews: reviewsOf(key) };
+      hints.set(key, h.pathAbs);
       out.push({
         harness: h.id, harnessKey: key, file: `${key}/${base}.json`, md: `${key}/${base}.md`,
         items: record.items.length, fixed: record.items.filter((i) => i.status === 'fixed').length, written: wroteJson || wroteMd,
       });
     }
-    const sorted = {};
-    for (const key of Object.keys(index.harnesses).sort()) sorted[key] = index.harnesses[key];
-    put(historyIndexPath(), toJsonText({ schema: INDEX_SCHEMA, harnesses: sorted }));
+    crashForTests('record-md');
+    // The index is made from the records, every time: another run may have written since this
+    // process last looked at a harness.
+    for (const key of harnessKeys()) if (!hints.has(key)) recheckRecords(key);
+    const index = expectedIndex(hints);
+    if (index !== null) put(historyIndexPath(), index);
+    crashForTests('index');
     return out;
   });
 }
@@ -182,7 +319,8 @@ function commit({ run, records }) {
  * only ever held for a few file reads and writes, and a slow assemble cannot have the lock taken
  * for a stale one. A run that changes faster than its records can be made, OPTIMISTIC_TRIES
  * times in a row, gets them made under the mutex after all, with the lock refreshed before each
- * slow step.
+ * slow step; should the lock be lost all the same (one step outlived the stale time), nothing is
+ * written and the command says so.
  *   at            this moment (ISO): the `reviewedAt` of a run that is still open
  *   onlyExisting  write again the records the run already has, and no new one
  */
@@ -201,6 +339,7 @@ function withRecords(ctx, { at = nowIso(), onlyExisting = false } = {}, then = n
     assignGroups(paths);
     lock.touch();
     const made = prepare(paths, { at, onlyExisting });
+    if (!lock.held()) throw new RunError('the lock of the run directory was lost while the review records were being made; nothing was written, run the command again');
     lock.touch();
     return { records: commit(made), extra: then ? then() : undefined };
   });
@@ -229,10 +368,17 @@ export function refreshRecords(ctx, out) {
   return out;
 }
 
+/** `healed` for an answer, when something was put right. */
+function healedPart() {
+  const healed = healHistory();
+  return healed.index || healed.md ? { healed } : {};
+}
+
 /**
  * `run.mjs close`: write the review record of every harness, then mark the run closed. Closing a
  * run that is already closed changes nothing, except that a run closed before records existed
- * gets them.
+ * gets them. A run whose records were written and that was never marked closed (the command died
+ * in between) is closed here like any other.
  */
 export function closeRun(ctx) {
   const at = nowIso();
@@ -241,7 +387,7 @@ export function closeRun(ctx) {
     if (run.closed === true) return { runId: ctx.paths.runId, closed: true, closedAt: run.closedAt || null, already: true };
     return markClosed(ctx, at);
   });
-  return { ...extra, historyDir: historyDir(), records };
+  return { ...extra, historyDir: historyDir(), records, ...healedPart() };
 }
 
 /**
@@ -264,33 +410,32 @@ export function unrecordedRuns(limit = 25) {
   return out.sort();
 }
 
-const samePath = (a, b) => {
-  const norm = (p) => {
-    let real = path.resolve(p);
-    try { real = fs.realpathSync.native(real); } catch { /* gone: as written */ }
-    return process.platform === 'win32' ? real.toLowerCase() : real;
-  };
-  return norm(a) === norm(b);
-};
+// ---------------------------------------------------------------------------------------------
+// `run.mjs history`
+// ---------------------------------------------------------------------------------------------
 
-/** What `history` answers: every harness reviewed on this machine, its reviews, and what is due. */
+/**
+ * What `history` answers: every harness reviewed on this machine, its reviews, what is due, and
+ * what was found in the history folder that is not a record. Everything comes from the records;
+ * the index is not read for it.
+ */
 function historyReport(wanted) {
   const now = nowMs();
-  const index = readIndex();
-  let keys = Object.keys(index.harnesses);
-  try { keys = keys.concat(fs.readdirSync(historyDir()).filter((n) => HARNESS_KEY_RE.test(n))); } catch { /* no history yet */ }
   const harnesses = [];
-  for (const key of [...new Set(keys)].sort()) {
+  const ignored = [];
+  for (const key of harnessKeys()) {
     const records = listRecords(key);
+    let hit = wanted === undefined || wanted === key;
+    if (!hit && records.length) {
+      const last = records[records.length - 1].record;
+      hit = wanted.replace(/\\/g, '/').replace(/\/+$/, '') === last.path;
+      // A path names a harness when it gives the hash its key ends in.
+      if (!hit) { try { hit = ownsPath(key, last, normalizeInputPath(wanted)); } catch { hit = false; } }
+    }
+    if (!hit) continue;
+    for (const x of ignoredRecords(key)) ignored.push({ harness: key, file: x.file, ...(x.count ? { count: x.count } : {}), reason: x.reason });
     if (!records.length) continue;
     const last = records[records.length - 1].record;
-    const pathAbs = isObject(index.harnesses[key]) && typeof index.harnesses[key].pathAbs === 'string' ? index.harnesses[key].pathAbs : null;
-    if (wanted !== undefined) {
-      const display = wanted.replace(/\\/g, '/').replace(/\/+$/, '');
-      let hit = wanted === key || display === last.path;
-      if (!hit && pathAbs) { try { hit = samePath(normalizeInputPath(wanted), pathAbs); } catch { hit = false; } }
-      if (!hit) continue;
-    }
     harnesses.push({
       key, kind: last.kind, provider: last.provider, name: last.name, path: last.path,
       reviews: records.map(({ record }) => ({
@@ -312,6 +457,7 @@ function historyReport(wanted) {
     harnesses,
     due: harnesses.filter((h) => h.due).map((h) => h.key),
     unrecordedRuns: unrecordedRuns(),
+    ...(ignored.length ? { ignored } : {}),
   };
 }
 
@@ -324,7 +470,8 @@ function latestLanguage() {
 
 /**
  * `history [--harness <key|path>] [--json] [--lang pt|en]`: what was reviewed, when, and which
- * follow-ups are due; text for a person unless `--json`.
+ * follow-ups are due; text for a person unless `--json`. It first puts the history folder back in
+ * line with its records (`healHistory`).
  * `history --write [--run <id>]`: write the records of a run without closing it.
  */
 export function history(args) {
@@ -339,7 +486,8 @@ export function history(args) {
   if (args.json !== undefined && args.json !== true) throw new UsageError('--json takes no value');
   if (args.harness !== undefined && (typeof args.harness !== 'string' || !args.harness.trim())) throw new UsageError('--harness takes a harness key or the path of the harness');
   if (args.lang !== undefined && !['pt', 'en'].includes(args.lang)) throw new UsageError('--lang must be pt or en');
-  const report = historyReport(args.harness === undefined ? undefined : args.harness.trim());
+  const healed = healedPart();
+  const report = { ...historyReport(args.harness === undefined ? undefined : args.harness.trim()), ...healed };
   if (args.json === true) return report;
   return new Plain(historyText(report, args.lang || latestLanguage(), { filtered: args.harness !== undefined }));
 }

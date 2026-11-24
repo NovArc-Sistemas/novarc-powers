@@ -16,7 +16,7 @@ export const REVIEWER_STATUSES = ['open', 'ok', 'not-applicable'];
 const TOP_KEYS = ['unit', 'session', 'completedAt', 'rounds', 'items', 'inventory', 'defenses', 'leads', 'layers', 'groups', 'elements', 'fileRoles'];
 const LISTS = ['rounds', 'items', 'inventory', 'defenses', 'leads', 'layers', 'groups'];
 /** Item fields only the run writes; a reviewer's value is dropped with a warning. */
-const RUN_ONLY_ITEM_FIELDS = ['decision', 'question', 'verified', 'notVerified', 'backup', 'updatedAt', 'group', 'rev', 'history'];
+const RUN_ONLY_ITEM_FIELDS = ['decision', 'question', 'verified', 'notVerified', 'backup', 'updatedAt', 'group', 'rev', 'history', 'carriedFrom'];
 /** Used when the state schema cannot be loaded. */
 const ITEM_REQUIRED = ['id', 'harness', 'round', 'severity', 'class', 'title', 'finding', 'proposal', 'opinion'];
 
@@ -110,10 +110,11 @@ export function validateFindings(data, { unit, run, session, schemaRoot, now = n
     }
     if (itemSchema) checkShape(item, itemSchema, at);
     else for (const f of ITEM_REQUIRED) if (item[f] === undefined) errors.push(`${at}: missing required "${f}"`);
-    // `declined` is the user's word. It comes back from a reviewer only as an earlier decision,
-    // with `previous` naming the item the user declined (`complete` checks it against the record).
-    if (!REVIEWER_STATUSES.includes(item.status) && !(item.status === 'declined' && isObject(item.previous))) {
-      errors.push(`${at}/status: a reviewer may only set ${REVIEWER_STATUSES.join(', ')} (and declined, with \`previous\`, for a finding the user declined in an earlier review)`);
+    // `declined` is the user's word on one exact proposal, never a reviewer's. A decline of an
+    // earlier review is carried by the run itself when the same proposal comes back with
+    // `previous` naming the declined item (model.mjs, `loadItems`).
+    if (!REVIEWER_STATUSES.includes(item.status)) {
+      errors.push(`${at}/status: a reviewer may only set ${REVIEWER_STATUSES.join(', ')}${item.status === 'declined' ? ' (a decline of an earlier review is carried by the run: send the same proposal as open, with `previous`)' : ''}`);
     }
     if (ownsHarness(item.harness, at) && typeof item.id === 'string') {
       const h = harnesses.get(item.harness);

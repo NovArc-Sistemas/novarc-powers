@@ -600,6 +600,7 @@ footer .made { display: inline-flex; align-items: center; gap: 10px }
 .trail li b { color: var(--navy-900); font-weight: 600 }
 .trail li.now b { color: var(--signal-600) }
 .chist { margin-top: -8px; max-width: 56em; font: 400 12.5px/1.5 var(--term); color: var(--gray-500); overflow-wrap: anywhere }
+.chist.kept { color: var(--navy-900) }
 .fu-lead { margin-top: 2px; font: 600 16px/1.4 var(--sans); color: var(--navy-900) }
 .fu-nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; margin-top: 12px; border: 1px solid var(--line-2); border-radius: 14px; overflow: hidden; background: var(--line) }
 .fu-chg { font-weight: 600; color: var(--gray-700) }

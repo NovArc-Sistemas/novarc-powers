@@ -40,6 +40,42 @@ export function nowMs() {
 
 export function nowIso() { return new Date(nowMs()).toISOString(); }
 
+/**
+ * `obj[key] = value` as an own property, whatever the key. A plain assignment to `__proto__`
+ * replaces the prototype instead of adding a property, so a copy made with one loses that key,
+ * and a file read from disk can name any key it likes.
+ */
+export function setOwn(obj, key, value) {
+  if (key === '__proto__') Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+  else obj[key] = value;
+  return obj;
+}
+
+/**
+ * The text of a file of at most `maxBytes`, read through one handle: `{ text }`, or `{ reason }`
+ * with `missing`, `not-a-file`, `too-large` or `unreadable`. Nothing larger than the cap is ever
+ * read into memory, whatever the file became between a listing and the read.
+ */
+export function readTextCapped(file, maxBytes) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch (e) { return { reason: e && e.code === 'ENOENT' ? 'missing' : 'unreadable' }; }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { reason: 'not-a-file' };
+    if (st.size > maxBytes) return { reason: 'too-large' };
+    const buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < buf.length) {
+      const n = fs.readSync(fd, buf, got, buf.length - got, got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return { text: buf.subarray(0, got).toString('utf8'), bytes: got };
+  } catch { return { reason: 'unreadable' }; } finally {
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+}
+
 export function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 /** sha256 of a file's bytes, or null when it does not exist. */
 export function sha256File(file) {
@@ -87,7 +123,7 @@ export function readText(file) {
 export function readJson(file, fallback = null) {
   const text = readText(file);
   if (text === null) return fallback;
-  try { return JSON.parse(text.replace(/^﻿/, '')); } catch { throw new RunError(`${path.basename(file)} is not valid JSON`); }
+  try { return JSON.parse(text.replace(/^\uFEFF/, '')); } catch { throw new RunError(`${path.basename(file)} is not valid JSON`); }
 }
 
 /** Parsed lines of a JSONL file: `[{ line, value } | { line, error }]`. An unterminated last line is skipped. */
@@ -137,11 +173,25 @@ function breakIfStale(lockPath, staleMs) {
   }
 }
 
+let lost = 0;
+/**
+ * How many locks this process held and no longer owned when it came to release them: each one
+ * was taken over as stale while its section was still running. `run.mjs` says so in its answer.
+ */
+export function lostLocks() { return lost; }
+
 /**
  * Run `fn` while holding the lock file `lockPath` (exclusive create). Waits with jittered retries
  * up to `timeoutMs`; a lock older than `staleMs` belongs to a dead process and is broken.
- * `fn` must be synchronous and short. A holder that cannot be short gets `{ touch }` as its
+ * `fn` must be synchronous and short. A holder that cannot be short gets `{ touch, held }` as its
  * argument and calls `touch()` before each slow step: it tells the others the lock is alive.
+ *
+ * A holder that outlives `staleMs` without touching its lock loses it: another process removes
+ * the file and enters. Nothing interrupts the first holder, so for a moment two processes are in
+ * the section. Every write is a whole file (temp file and rename), so no file is ever torn, but
+ * the later write wins. `held()` says whether the lock still is this holder's; a section that
+ * writes after a slow step asks it first and gives up instead of writing over someone else. A
+ * lock that is found lost at release is counted (`lostLocks`), and the command reports it.
  */
 export function withLock(lockPath, fn, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? envNumber('NOVARC_HD_LOCK_TIMEOUT_MS', 20000);
@@ -170,10 +220,15 @@ export function withLock(lockPath, fn, opts = {}) {
         fs.utimesSync(lockPath, t, t);
       } catch { /* gone: nothing to keep alive */ }
     },
+    held() {
+      try { return fs.readFileSync(lockPath, 'utf8') === token; } catch { return false; }
+    },
   };
   try { return fn(lock); } finally {
     // Release only our own lock: if it was broken as stale, the file now belongs to someone else.
-    try { if (fs.readFileSync(lockPath, 'utf8') === token) fs.unlinkSync(lockPath); } catch { /* already gone */ }
+    let owner = null;
+    try { owner = retrying(() => fs.readFileSync(lockPath, 'utf8'), 20); } catch { owner = null; }
+    if (owner === token) { try { fs.unlinkSync(lockPath); } catch { /* already gone */ } } else lost++;
   }
 }
 

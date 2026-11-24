@@ -7,7 +7,7 @@ import { RunError, UsageError, readJson, readText, writeJsonAtomic, appendJsonLi
 import { runPaths, latestRunId, RUN_ID_RE } from './paths.mjs';
 import { staticUnits, unitsView } from './units.mjs';
 import { itemRev, groupRev, DECISION_STATUSES } from './rev.mjs';
-import { earlierRecords, previousItem } from './followup.mjs';
+import { earlierRecords, carriedDecline } from './followup.mjs';
 
 /** `--run <id>`, else the latest run. */
 export function resolveRunId(args) {
@@ -64,9 +64,18 @@ const OVERLAY_FIELDS = ['status', 'decision', 'question', 'verified', 'notVerifi
  * nothing downstream (the apply units, `mark`, `next`, the board) can act on a yes that was given
  * to another proposal. `outdated` maps each item whose last decision was made on another revision
  * to `{ status, decidedRev, currentRev }`, until the user decides again.
+ *
+ * The same rule holds across runs. A decline is the user's word on one exact proposal, so an item
+ * that is the same proposal the user declined in an earlier review of that harness (its
+ * `previous` names the declined item and the revisions are equal: `carriedDecline`, followup.mjs)
+ * is `declined` here, with the date of that decision in `updatedAt`, its note in `decision`, and
+ * `carriedFrom: { run, item }` saying where it comes from. A reviewer cannot set `declined`, and
+ * pointing at a declined item with another proposal carries nothing: that item is `open`.
+ * Whatever the user did to the item in this run comes first.
  */
 export function loadItems(paths, run, findings = loadFindings(paths, run), status = loadStatus(paths)) {
   const order = new Map(run.harnesses.map((h, i) => [h.id, i]));
+  const harnessOf = new Map(run.harnesses.map((h) => [h.id, h]));
   const seen = new Map();
   const duplicates = [];
   const outdated = new Map();
@@ -75,15 +84,20 @@ export function loadItems(paths, run, findings = loadFindings(paths, run), statu
       if (!raw || typeof raw.id !== 'string' || !order.has(raw.harness)) continue;
       if (seen.has(raw.id)) { duplicates.push(raw.id); continue; }
       const rev = itemRev(raw);
-      const item = { ...raw, status: raw.status || 'open', rev };
+      // A reviewer says `ok` or `not-applicable`; anything else is a finding to decide on.
+      const item = { ...raw, status: raw.status === 'ok' || raw.status === 'not-applicable' ? raw.status : 'open', rev };
       delete item.group; // assigned by build from the groups
-      // A reviewer hands a finding back as `declined` only when the user declined it in an
-      // earlier review (`previous` names it). Without that record it is a finding like any other.
-      if (raw.status === 'declined') {
-        const before = previousItem(run, run.harnesses.find((h) => h.id === raw.harness), raw.previous);
-        if (!before || before.item.status !== 'declined') item.status = 'open';
+      delete item.carriedFrom; // set here and nowhere else
+      const o = Object.hasOwn(status.items, raw.id) ? status.items[raw.id] : undefined;
+      if (item.status === 'open' && raw.previous !== undefined && !(o && o.status !== undefined)) {
+        const carried = carriedDecline(run, harnessOf.get(raw.harness), raw, rev);
+        if (carried) {
+          item.status = 'declined';
+          item.updatedAt = carried.at;
+          if (carried.note) item.decision = carried.note;
+          item.carriedFrom = { run: carried.run, item: carried.item };
+        }
       }
-      const o = status.items[raw.id];
       if (o) {
         const unbound = DECISION_STATUSES.includes(o.status) && o.rev !== rev;
         for (const f of OVERLAY_FIELDS) {

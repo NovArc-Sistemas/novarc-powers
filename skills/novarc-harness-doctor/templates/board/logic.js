@@ -214,12 +214,22 @@ function effectiveItems(state, overlay) {
 }
 
 /**
+ * True for a finding the user declined in an earlier review (`history.lastStatus`). When it is
+ * open again it came back with another proposal, so it is asked once more, after everything else.
+ */
+function declinedBefore(item) {
+  return !!item && !!item.history && typeof item.history === 'object' && item.history.lastStatus === 'declined';
+}
+
+/**
  * The decision queue of the Decide tab, fixed for a page load: groups that still have an open
- * member first, then every open item no such group covers, most severe first.
+ * member first, then every open item no such group covers, most severe first. An open item the
+ * user declined before comes after the ones never declined, in the same order among themselves.
  * Returns `[{ kind: 'group' | 'item', id }]`.
  */
 function decisionQueue(state) {
   var sev = { critical: 0, high: 1, medium: 2, low: 3 };
+  var again = function (i) { return declinedBefore(i) ? 1 : 0; };
   var byId = {};
   (state.items || []).forEach(function (i) { byId[i.id] = i; });
   var covered = {};
@@ -233,7 +243,7 @@ function decisionQueue(state) {
   (state.items || [])
     .filter(function (i) { return i.status === 'open' && !covered[i.id]; })
     .map(function (i, k) { return { i: i, k: k }; })
-    .sort(function (a, b) { return (sev[a.i.severity] - sev[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k); })
+    .sort(function (a, b) { return (again(a.i) - again(b.i)) || (sev[a.i.severity] - sev[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k); })
     .forEach(function (x) { queue.push({ kind: 'item', id: x.i.id }); });
   return queue;
 }
@@ -368,16 +378,35 @@ function metricUnit(m) {
 }
 
 /**
+ * The words under the name of a metric: its unit and, when the state says which base both numbers
+ * are on (`base`, on the wasted share), that base: "percent of the spend, in relative cost".
+ */
+function metricSubLabel(m, T) {
+  var unit = metricUnit(m);
+  var text = has(T.fu.unit, unit) ? T.fu.unit[unit] : unit;
+  return m && has(T.fu.base, m.base) ? text + ', ' + T.fu.base[m.base] : text;
+}
+
+/**
+ * Why a row reads "not measured" although both reviews have a number (`reason`), in words; null
+ * when the state gives none, or when the row is not a not-measured one.
+ */
+function notMeasuredReason(m, T) {
+  return m && m.verdict === 'not-measured' && has(T.fu.rowReason, m.reason) ? T.fu.rowReason[m.reason] : null;
+}
+
+/**
  * How one metric moved between the two reviews: `{ pct, dir, tone }`. `pct` is the state's
  * `changePct`, or the change from `before` to `after` when the state has none; it is null when
- * either side was not measured. `dir` is 'down', 'up', 'flat' or null. `tone` is 'good' for a
- * fall and 'bad' for a rise, and '' when the verdict is a neutral one or when `waiting` is true
- * (the sample is still too small for any verdict to count).
+ * either side was not measured, and for a row that reads "not measured" with both numbers there
+ * (they are on different bases, so their difference means nothing). `dir` is 'down', 'up',
+ * 'flat' or null. `tone` is 'good' for a fall and 'bad' for a rise, and '' when the verdict is a
+ * neutral one or when `waiting` is true (the sample is still too small for any verdict to count).
  */
 function metricChange(m, waiting) {
   var before = countOf(m && m.before);
   var after = countOf(m && m.after);
-  if (before === null || after === null) return { pct: null, dir: null, tone: '' };
+  if (before === null || after === null || m.verdict === 'not-measured') return { pct: null, dir: null, tone: '' };
   var pct = countOf(m.changePct);
   if (pct === null && before !== 0) pct = (after - before) / before * 100;
   var dir = after < before ? 'down' : after > before ? 'up' : 'flat';
@@ -471,14 +500,35 @@ function itemHistory(item) {
 }
 
 /**
+ * A decline carried from an earlier review (`carriedFrom`): the user declined this exact proposal
+ * there, so it was not asked again. Returns `{ at, note }`, the date and the note of that
+ * decision (each null when the records do not say), or null when the item carries none or is no
+ * longer declined. `status` is the status the page shows, which a decision made here can move.
+ */
+function carriedDecline(item, status) {
+  var from = item && item.carriedFrom;
+  if (!from || typeof from !== 'object' || (status === undefined ? item.status : status) !== 'declined') return null;
+  var h = item.history && typeof item.history === 'object' ? item.history : {};
+  return { at: dateOf(h.lastDecisionAt), note: typeof h.lastNote === 'string' && h.lastNote.trim() ? h.lastNote.trim() : null };
+}
+
+/** That carried decline in plain words, with the note the user left then. Same `T` and `f` as followUpLine. */
+function carriedLine(carried, T, f) {
+  var text = carried.at ? f.fill(T.hist.carried, { date: f.date(carried.at) }) : T.hist.carriedNoDate;
+  return carried.note ? text + ' ' + f.fill(T.hist.carriedNote, { note: carried.note }) : text;
+}
+
+/**
  * That history as one line: when it was first seen, in how many earlier reviews, and how the
  * last one left it, with the date and the note of that decision. Same `T` and `f` as followUpLine.
+ * `withoutLast` leaves the last decision out, for an item whose carried decline already says it;
+ * the line can then be empty.
  */
-function historyLine(hist, T, f) {
+function historyLine(hist, T, f, withoutLast) {
   var parts = [];
   if (hist.firstSeenAt) parts.push(f.fill(T.hist.first, { date: f.date(hist.firstSeenAt) }));
   if (hist.times) parts.push(f.plural(T.hist.times, hist.times));
-  if (hist.lastStatus) {
+  if (hist.lastStatus && !withoutLast) {
     var status = f.label(T.hist.status, hist.lastStatus);
     var last = hist.lastDecisionAt ? f.fill(T.hist.lastOn, { status: status, date: f.date(hist.lastDecisionAt) }) : status;
     parts.push(last + (hist.lastNote ? ': ' + hist.lastNote : ''));

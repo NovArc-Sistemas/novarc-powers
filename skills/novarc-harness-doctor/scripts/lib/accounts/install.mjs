@@ -2,19 +2,21 @@
 //
 // The check script is copied to a stable place under the home directory so it survives the skill
 // being fetched on demand. The hook entry is merged into the primary's settings.json (Claude
-// Code) or hooks.json (Codex) with a surgical edit: every other byte of the file is kept, and the
-// file is written so that a link on it survives and a failed write leaves it as it was.
+// Code) or hooks.json (Codex) with a surgical edit: every other byte of the file is kept. The
+// file is replaced, never written in place: a link on it survives, its known other names follow,
+// and a write that fails, or a process that dies, leaves it whole.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   IS_WIN, homeDir, syncDir, manifestFile, stableCheckPath, displayPath, lstatSafe, readBuf, readText,
   parseJson, sha256, hashFile, mkdirp, writeKeepingLinks, writeAtomic, removeLink, readManifest,
+  unknownNames, unknownNamesError,
 } from '../../sync-check.mjs';
 import { scanText } from '../../secret-scan.mjs';
 import { detectAccounts } from './detect.mjs';
 import { primaryFromManifest } from './diff.mjs';
-import { Run } from './apply.mjs';
+import { Run, peerCandidates, pendingNote } from './apply.mjs';
 import { appendIn, removeIn, removeItem, makePatch, revertPatch } from './jsonedit.mjs';
 
 const RECORD_VERSION = 1;
@@ -73,11 +75,23 @@ function pickPrimary({ primaryId, home, env }) {
   const accounts = detectAccounts({ home, env });
   if (!primaryId) {
     const known = primaryFromManifest(readManifest(manifestFile(home)), accounts);
-    return known ? { account: known } : { error: 'pass --primary <accountId>, or apply a plan first' };
+    return known ? { account: known, accounts } : { error: 'pass --primary <accountId>, or apply a plan first' };
   }
   const account = accounts.find((a) => a.id === primaryId);
   if (!account) return { error: `unknown account: ${primaryId}` };
-  return { account };
+  return { account, accounts };
+}
+
+/**
+ * The hook file may have other names (where symbolic links are refused, a linked account's
+ * settings.json is a hardlink to the primary's). Those the manifest records, or that sit at the
+ * same place in another account, are switched over with it. Any other name is not this tool's to
+ * detach: the file is then left alone and the count goes back to the user.
+ */
+function refuseUnknownNames(file, peers, home, base) {
+  const n = unknownNames(file, { home, peers });
+  if (!n) return null;
+  return { code: 1, out: { ok: false, refused: true, ...base, file: displayPath(file, home), unknownNames: n, error: `${path.basename(file)}: ${unknownNamesError(n).message}` } };
 }
 
 function manualStep(account, home) {
@@ -122,8 +136,12 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
   }
   if (findHooks(parsed.value, home).length) return { code: 0, out: { ok: true, installed: true, changed: false, ...base, file: shown, notes } };
 
-  // Backup first. A file that holds a secret is not copied: uninstall-check reverses the edit.
   const run = new Run(home, account.id);
+  run.accounts = picked.accounts;
+  const refusal = refuseUnknownNames(target.file, run.peersOf(target.file), home, base);
+  if (refusal) return refusal;
+
+  // Backup first. A file that holds a secret is not copied: uninstall-check reverses the edit.
   let backup = null;
   if (scanText(text).length) notes.push('No backup copy was made: the file holds a secret. uninstall-check removes exactly what was added.');
   else {
@@ -135,14 +153,16 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
   const next = appendIn(text, ['hooks', 'SessionStart'], target.entry);
   const patch = makePatch(text, next);
   const afterHash = sha256(Buffer.from(next, 'utf8'));
-  run.op({ op: 'patch', path: target.file, afterHash, patch });
-  try { writeKeepingLinks(target.file, next, { home }); } catch (err) {
+  const edit = run.intend({ op: 'patch', path: target.file, beforeHash: sha256(buf), afterHash, patch });
+  try { run.write(target.file, next); } catch (err) {
     run.unop(); // a failed write leaves the file as it was
     throw err;
   }
+  run.did(edit);
+  notes.push(...run.notes);
   const check = parseJson(readText(target.file));
   if (!check.ok || !findHooks(check.value, home).length) {
-    writeKeepingLinks(target.file, buf, { home });
+    run.write(target.file, buf);
     run.unop();
     return { code: 1, out: { ok: false, ...base, file: shown, error: 'verification failed; the file was restored' } };
   }
@@ -170,27 +190,33 @@ export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env =
   if (buf !== null) {
     out.file = displayPath(file, home);
     const text = buf.toString('utf8');
+    let next = null; // what the file should hold; null when nothing in it changes
     if (record && sha256(buf) === record.afterHash) {
       // Untouched since the install: restore the exact previous bytes.
-      if (record.created) removeLink(file);
-      else writeKeepingLinks(file, revertPatch(text, record.patch), { home });
-      out.changed = true;
+      if (record.created) { removeLink(file); out.changed = true; } else next = revertPatch(text, record.patch);
     } else {
       const parsed = parseJson(text);
       if (!parsed.ok) return { code: 1, out: { ok: false, refused: true, file: out.file, error: `${path.basename(file)} is not valid JSON; nothing was written. Remove the sync-check entry by hand.` } };
-      let next = text;
+      let edited = text;
       for (const h of findHooks(parsed.value, home).reverse()) {
-        next = h.alone ? removeItem(next, ['hooks', 'SessionStart'], h.group) : removeItem(next, ['hooks', 'SessionStart', h.group, 'hooks'], h.hook);
+        edited = h.alone ? removeItem(edited, ['hooks', 'SessionStart'], h.group) : removeItem(edited, ['hooks', 'SessionStart', h.group, 'hooks'], h.hook);
       }
-      if (next !== text) {
-        const now = parseJson(next).value;
+      if (edited !== text) {
+        const now = parseJson(edited).value;
         if (Array.isArray(now.hooks.SessionStart) && !now.hooks.SessionStart.length) {
-          next = removeIn(next, ['hooks', 'SessionStart']);
-          if (!Object.keys(parseJson(next).value.hooks).length) next = removeIn(next, ['hooks']);
+          edited = removeIn(edited, ['hooks', 'SessionStart']);
+          if (!Object.keys(parseJson(edited).value.hooks).length) edited = removeIn(edited, ['hooks']);
         }
-        writeKeepingLinks(file, next, { home });
-        out.changed = true;
+        next = edited;
       }
+    }
+    if (next !== null) {
+      const peers = peerCandidates(file, { manifests: [readManifest(manifestFile(home))], accounts: detectAccounts({ home, env }) });
+      const refusal = refuseUnknownNames(file, peers, home, { account: accountId });
+      if (refusal) return refusal;
+      const r = writeKeepingLinks(file, next, { home, peers });
+      if (r.pending.length) out.notes = [pendingNote(file, r, home)];
+      out.changed = true;
     }
   }
   for (const f of [stableCheckPath(home), recordFile(home)]) if (lstatSafe(f)) { removeLink(f); out.removedScript = true; }

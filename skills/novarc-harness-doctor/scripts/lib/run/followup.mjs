@@ -1,32 +1,40 @@
-// Review records, read side, and the follow-up (references/follow-up.md).
+// The follow-up (references/follow-up.md): what a run makes of the review records of its
+// harnesses.
 //
 // Every review leaves one record per harness under <home>/.novarc-powers/novarc-harness-doctor/
-// history/<harnessKey>/. This module is what a run needs from them: the stable key of a harness,
-// its records, the comparable metrics of a measurement, the comparison of "then" with "now", the
-// on-disk check of what was applied, the history of a finding, and the record of the present
-// review. history.mjs writes the files and answers `run.mjs history`.
+// history/<harnessKey>/. records.mjs reads them (limits, shape, privacy barrier); this module is
+// what a run needs from them: the earlier records of a harness, the comparable metrics of a
+// measurement, the comparison of "then" with "now", the history of a finding, a decline that
+// still stands, and the record of the present review. diskcheck.mjs checks on disk what was
+// applied; history.mjs writes the files and answers `run.mjs history`.
 //
 // Nothing here writes, and nothing here reads the clock: "now" is the end of the measured window,
-// so the same inputs always give the same comparison. The on-disk check reads harness files
-// through the absolute paths of run.json, read-only; only its verdict leaves this module.
+// so the same inputs always give the same comparison.
 import fs from 'node:fs';
 import path from 'node:path';
-import { RunError, readJson, sha256 } from './store.mjs';
-import { SKILL_DIR, homeBase, historyDir } from './paths.mjs';
-import { slugify } from './ids.mjs';
-import { loadStateSchema, validate, def, isDateTime } from './schema.mjs';
-import { maskCredentials } from './secrets.mjs';
+import { RunError, sha256 } from './store.mjs';
+import { SKILL_DIR } from './paths.mjs';
+import { isDateTime } from './schema.mjs';
+import { itemRev, canonicalJson } from './rev.mjs';
+import { RECORD_SCHEMA, harnessKeyOf, listRecords } from './records.mjs';
+import { checkItem, checkRoots } from './diskcheck.mjs';
 import { scoreHarness, wasteOf } from '../scoring.mjs';
 
-export const RECORD_SCHEMA = 1;
+export { RECORD_SCHEMA, HARNESS_KEY_RE, harnessHash, harnessKeyOf, recordBaseName, validateRecord, forgetRecords, listRecords, ignoredRecords } from './records.mjs';
+export { checkItem } from './diskcheck.mjs';
+
 const DAY = 86400000;
-const MAX_CHECK_BYTES = 4 * 1024 * 1024;
+/** What a record keeps of one text, at most (what `complete` accepts for one string). */
+const MAX_TEXT = 200 * 1024;
+/** Changes kept per item; an item with more keeps none (`changesOmitted`). */
+const MAX_CHANGES = 1000;
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const str = (v) => (typeof v === 'string' ? v : '');
 const round1 = (x) => Math.round(x * 10) / 10;
 const iso = (ms) => new Date(ms).toISOString();
+const clip = (s, n = MAX_TEXT) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 // ---------------------------------------------------------------------------------------------
 // Thresholds
@@ -51,114 +59,8 @@ export function loadThresholds() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The key of a harness
+// The earlier records of a harness
 // ---------------------------------------------------------------------------------------------
-
-export const HARNESS_KEY_RE = /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/;
-const keyMemo = new Map();
-
-/**
- * The 8 hex characters that tell one harness from another: the start of a SHA-256 over its kind,
- * its provider (empty for a project) and its real absolute path, joined by line feeds. The path
- * is lower-cased on Windows, where case does not tell two folders apart.
- */
-export function harnessHash(h) {
-  let real = path.resolve(str(h.pathAbs));
-  try { real = fs.realpathSync.native(real); } catch { /* the folder is gone: the path as it was written */ }
-  if (process.platform === 'win32') real = real.toLowerCase();
-  return sha256([str(h.kind), str(h.provider), real].join('\n')).slice(0, 8);
-}
-
-/**
- * `<slug of the name>-<8 hex>`: the name of the harness's folder under history/. `h` is a harness
- * entry of run.json; the key `init` wrote there wins. The name of a harness can change between
- * runs (an account label follows the language of the run), so a folder that already holds the
- * records of this same kind, provider and path keeps its name.
- */
-export function harnessKeyOf(h) {
-  if (typeof h.harnessKey === 'string' && HARNESS_KEY_RE.test(h.harnessKey)) return h.harnessKey;
-  const memo = JSON.stringify([historyDir(), h.kind, h.provider, h.pathAbs, h.name]);
-  if (keyMemo.has(memo)) return keyMemo.get(memo);
-  const hash = harnessHash(h);
-  let existing = null;
-  try { existing = fs.readdirSync(historyDir()).filter((n) => n.endsWith(`-${hash}`) && HARNESS_KEY_RE.test(n)).sort()[0] || null; } catch { existing = null; }
-  const key = existing || `${slugify(h.name, h.kind === 'user' ? 'account' : 'project')}-${hash}`;
-  keyMemo.set(memo, key);
-  return key;
-}
-
-/** File name of a record, without extension: the run id, which starts with the day it started. */
-export function recordBaseName(runId, startedAt) {
-  if (/^\d{8}-/.test(runId)) return runId;
-  const day = isDateTime(startedAt) ? startedAt.slice(0, 10).replace(/-/g, '') : '00000000';
-  return `${day}-${runId}`;
-}
-
-// ---------------------------------------------------------------------------------------------
-// The record schema
-// ---------------------------------------------------------------------------------------------
-
-let recordSchema;
-function loadRecordSchema() {
-  if (recordSchema !== undefined) return recordSchema;
-  try {
-    const s = JSON.parse(fs.readFileSync(path.join(SKILL_DIR, 'templates', 'record.schema.json'), 'utf8'));
-    recordSchema = s && s.properties && s.properties.schema && s.properties.schema.const === RECORD_SCHEMA ? s : null;
-  } catch { recordSchema = null; }
-  return recordSchema;
-}
-
-/**
- * Errors of `record` against templates/record.schema.json; its `outcome` is checked against the
- * `followUp` definition of the state schema, which is where that object comes from.
- */
-export function validateRecord(record) {
-  const schema = loadRecordSchema();
-  if (!schema) throw new RunError('templates/record.schema.json (schema 1) not found: the skill folder is incomplete');
-  const errors = validate(record, schema);
-  if (isObject(record) && isObject(record.outcome)) {
-    const state = loadStateSchema();
-    const followUp = state ? def(state.schema, 'followUp') : null;
-    if (followUp) validate(record.outcome, followUp, state.schema, '/outcome', errors);
-  }
-  return errors;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Reading records
-// ---------------------------------------------------------------------------------------------
-
-const cache = new Map();
-
-/** Forget what was read (after a write). Without a key, everything. */
-export function forgetRecords(key) {
-  if (key === undefined) cache.clear(); else cache.delete(key);
-}
-
-function readRecords(key) {
-  if (cache.has(key)) return cache.get(key);
-  const dir = path.join(historyDir(), key);
-  let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort(); } catch { names = []; }
-  const records = [];
-  const invalid = [];
-  for (const name of names) {
-    let record = null;
-    try { record = readJson(path.join(dir, name)); } catch { record = null; }
-    // A record that does not fit its schema is left out: what it holds would reach the state.
-    if (!isObject(record) || record.harnessKey !== key || validateRecord(record).length) { invalid.push(name); continue; }
-    records.push({ file: path.join(dir, name), name, record });
-  }
-  records.sort((a, b) => Date.parse(a.record.reviewedAt) - Date.parse(b.record.reviewedAt) || a.record.runId.localeCompare(b.record.runId));
-  const out = { records, invalid };
-  cache.set(key, out);
-  return out;
-}
-
-/** Every valid record of a harness key, oldest first: `[{ file, name, record }]`. */
-export function listRecords(key) { return readRecords(key).records; }
-/** File names under history/<key>/ that are not valid records. */
-export function invalidRecords(key) { return readRecords(key).invalid; }
 
 /**
  * The records of earlier reviews of harness `h` (an entry of run.json), oldest first: every
@@ -186,6 +88,36 @@ export function previousItem(run, h, previous) {
   const entry = earlierRecords(run, h).find((e) => e.record.runId === previous.run);
   const item = entry ? entry.record.items.find((i) => i.id === previous.item) : null;
   return item ? { entry, item } : null;
+}
+
+/**
+ * A decline that still stands. `raw` is an item as a reviewer handed it in, `rev` its revision.
+ * When its `previous` names an item the user declined in an earlier review of this harness, and
+ * what is proposed now is the same proposal, the answer is that decline:
+ * `{ run, item, at, note }`. Otherwise null: the user never said no to this.
+ *
+ * "The same proposal" is the revision (rev.mjs): the harness, the class, the target file, the
+ * proposal and every change. It is equal to the revision the record holds, or to the revision of
+ * what the record kept of that item (`class`, `file`, `proposal`, `changes`) under the harness id
+ * of this run, since a harness id belongs to the selection of one run and the record is read as
+ * the user saw it. Pointing at a declined item is never enough.
+ */
+export function carriedDecline(run, h, raw, rev) {
+  const before = previousItem(run, h, raw.previous);
+  if (!before || before.item.status !== 'declined') return null;
+  const r = before.item;
+  let same = r.rev === rev;
+  if (!same && typeof r.proposal === 'string' && r.changesOmitted !== true) {
+    same = itemRev({ harness: raw.harness, class: r.class, file: r.file, proposal: r.proposal, changes: r.changes }) === rev;
+  }
+  if (!same) return null;
+  const d = isObject(r.decision) ? r.decision : {};
+  return {
+    run: before.entry.record.runId,
+    item: r.id,
+    at: isDateTime(d.at) ? d.at : before.entry.record.reviewedAt,
+    note: typeof d.note === 'string' ? d.note : '',
+  };
 }
 
 /**
@@ -240,10 +172,62 @@ export function metricUnit(metric) {
 }
 
 /**
+ * The share of a measurement that was waste, on each base it can be told on:
+ * `{ base, weighted?, raw? }`, or null when waste was not measured. `raw` is waste tokens over
+ * all tokens; `weighted` is the same in input-token equivalents, known only when every kind of
+ * waste was weighted. The two are different quantities (cache reads weigh little, so the same
+ * usage can be 5% on one and 20% on the other) and are never compared with each other. `base`
+ * names the one `waste-share` shows: weighted when it is known.
+ */
+export function wasteShareOf(impact) {
+  if (!isObject(impact) || !Array.isArray(impact.waste)) return null;
+  const w = wasteOf(impact);
+  const out = {};
+  if (w.weighted !== null) out.weighted = round1((w.weighted / impact.weightedTotal) * 100);
+  if (isNum(impact.totalTokens) && impact.totalTokens > 0) out.raw = round1((w.tokens / impact.totalTokens) * 100);
+  if (out.weighted === undefined && out.raw === undefined) return null;
+  return { base: out.weighted !== undefined ? 'weighted' : 'raw', ...out };
+}
+
+/**
+ * Which price weights the weighted numbers of a measurement were made with:
+ * `{ source, verifiedAt?, families: [{ id, hash }] }`, or null when nothing was weighted. `hash`
+ * is 12 hex characters of a SHA-256 over the ratios applied to that model family, so two
+ * measurements can be told to be on the same prices without keeping the price list.
+ */
+export function weightsOf(impact) {
+  if (!isObject(impact) || !isNum(impact.weightedTotal) || !isObject(impact.weights)) return null;
+  const w = impact.weights;
+  const families = [];
+  for (const [id, fam] of Object.entries(isObject(w.perModelFamily) ? w.perModelFamily : {})) {
+    if (!isObject(fam) || !id || id.length > 120) continue;
+    const ratios = { ratios: isObject(fam.ratios) ? fam.ratios : null, longContext: isObject(fam.longContext) ? fam.longContext : null };
+    families.push({ id, hash: sha256(canonicalJson(ratios)).slice(0, 12) });
+  }
+  families.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const out = { source: clip(str(w.source), 200) };
+  if (typeof w.verifiedAt === 'string' && w.verifiedAt) out.verifiedAt = clip(w.verifiedAt, 40);
+  out.families = families.slice(0, 200);
+  return out;
+}
+
+/**
+ * Were two measurements weighted with different prices? True when they name another weights
+ * file, or apply other ratios to a model family both used. A side that does not say (a record
+ * written before weights were kept) is not known to differ.
+ */
+export function weightsChanged(then, now) {
+  if (!isObject(then) || !isObject(now)) return false;
+  if (str(then.source) !== str(now.source)) return true;
+  const before = new Map((Array.isArray(then.families) ? then.families : []).map((f) => [f.id, f.hash]));
+  return (Array.isArray(now.families) ? now.families : []).some((f) => before.has(f.id) && before.get(f.id) !== f.hash);
+}
+
+/**
  * The comparable numbers of one measurement. `impact` is the harness's impact as the state holds
  * it; `raw` is the probe's own output (impact.json), which also has what the state leaves out:
  * shell output, and how many sessions each median was taken over. A metric that was not measured
- * is absent, never 0.
+ * is absent, never 0. `waste-share` is on the base `wasteShareOf` names.
  */
 export function metricsOf(impact, raw) {
   const m = {};
@@ -257,9 +241,8 @@ export function metricsOf(impact, raw) {
   if (measured(impact.contextAtStart, r.contextAtStart) && isNum(impact.contextAtStart.perSessionMedian)) m['context-at-start'] = impact.contextAtStart.perSessionMedian;
   if (measured(impact.contextPeak, r.contextPeak) && isNum(impact.contextPeak.median)) m['context-peak'] = impact.contextPeak.median;
   if (Array.isArray(impact.waste)) {
-    const w = wasteOf(impact);
-    if (w.weighted !== null) m['waste-share'] = round1((w.weighted / impact.weightedTotal) * 100);
-    else if (isNum(impact.totalTokens) && impact.totalTokens > 0) m['waste-share'] = round1((w.tokens / impact.totalTokens) * 100);
+    const share = wasteShareOf(impact);
+    if (share) m['waste-share'] = share[share.base];
     if (sessions) for (const row of impact.waste) if (isObject(row) && WASTE_KINDS.includes(row.kind) && isNum(row.tokens)) m[`waste:${row.kind}`] = perSession(row.tokens);
   }
   if (sessions && isObject(r.toolOutput) && isNum(r.toolOutput.shellResultChars)) m['tool-output'] = perSession(r.toolOutput.shellResultChars);
@@ -295,16 +278,31 @@ function measureOf(hs, raw) {
   const measure = { window, sessions: impact.sessions };
   if (isNum(impact.activeDays)) measure.activeDays = impact.activeDays;
   measure.metrics = metricsOf(impact, raw);
+  // The base of each number that has more than one: what the next review needs to compare like with like.
+  const share = wasteShareOf(impact);
+  if (share) measure.wasteShare = share;
+  const weights = weightsOf(impact);
+  if (weights) measure.weights = weights;
   const unused = impact.unusedContext;
   if (isObject(unused)) {
-    measure.unused = {
-      skills: Array.isArray(unused.skillsNeverInvoked) ? unused.skillsNeverInvoked.filter((x) => typeof x === 'string') : [],
-      mcpServers: Array.isArray(unused.mcpServersNeverCalled) ? unused.mcpServersNeverCalled.filter((x) => typeof x === 'string') : [],
-    };
+    const names = (list) => (Array.isArray(list) ? list.filter((x) => typeof x === 'string' && x.length <= 300).slice(0, 5000) : []);
+    measure.unused = { skills: names(unused.skillsNeverInvoked), mcpServers: names(unused.mcpServersNeverCalled) };
   }
   const coverage = coverageOf(raw);
   if (Object.keys(coverage).length) measure.coverage = coverage;
   return { measure, skipped: null };
+}
+
+/**
+ * The waste share a record holds, with its base. A record written before the base was kept says
+ * one number: without weighted totals it can only be raw; with them it may be either, and is not
+ * compared (`{ base: null }`).
+ */
+function shareOfRecord(measure) {
+  if (isObject(measure.wasteShare)) return measure.wasteShare;
+  const value = measure.metrics['waste-share'];
+  if (!isNum(value)) return null;
+  return isNum(measure.metrics['weighted-per-session']) ? { base: null } : { base: 'raw', raw: value };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -326,86 +324,6 @@ export function followUpWindow(record, nowMs, runWindow, t = loadThresholds()) {
   const days = Math.max(0, Math.floor((nowMs - referenceOf(record)) / DAY));
   const sinceReview = days >= t.minDays;
   return { days, windowDays: sinceReview ? Math.max(1, Math.min(days, runWindow)) : runWindow, sinceReview };
-}
-
-// ---------------------------------------------------------------------------------------------
-// The on-disk check of a fixed item
-// ---------------------------------------------------------------------------------------------
-
-const CHECK_RANK = { 'not-checked': 0, 'in-place': 1, changed: 2, reverted: 3, missing: 4 };
-
-/**
- * Absolute path of a change's display path, or null when it is not one this harness can name.
- * A path under the harness's own display path, or relative to its root, resolves inside its
- * folder; `~/...` resolves inside the home. An absolute path, or one that climbs out with `..`,
- * is never followed: the path comes from a record, and the check stays where the review was.
- */
-function resolveChangePath(display, h) {
-  if (typeof display !== 'string' || !display || typeof h.pathAbs !== 'string') return null;
-  const p = display.replace(/\\/g, '/');
-  let base = h.pathAbs;
-  let rest;
-  if (typeof h.path === 'string' && h.path && (p === h.path || p.startsWith(`${h.path}/`))) rest = p.slice(h.path.length);
-  else if (p.startsWith('~/')) { base = homeBase(); rest = p.slice(2); }
-  else if (p.startsWith('./')) rest = p.slice(2);
-  else if (!p.startsWith('/') && !/^[A-Za-z]:/.test(p) && !p.startsWith('~')) rest = p;
-  else return null;
-  const abs = path.join(base, rest);
-  const rel = path.relative(base, abs);
-  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? abs : null;
-}
-
-const lf = (s) => s.replace(/\r\n/g, '\n');
-
-/** One change against the file on disk (the table in references/follow-up.md). */
-function checkChange(c, h) {
-  if (!isObject(c)) return 'not-checked';
-  const before = lf(str(c.before));
-  const after = lf(str(c.after));
-  const hasText = !!before.trim() || !!after.trim();
-  const hashAfter = typeof c.hashAfter === 'string' ? c.hashAfter : null;
-  if (!hasText && !hashAfter && c.deleted !== true) return 'not-checked';
-  const abs = resolveChangePath(c.path, h);
-  if (!abs) return 'not-checked';
-  let buf;
-  try {
-    const st = fs.statSync(abs);
-    if (!st.isFile() || st.size > MAX_CHECK_BYTES) return 'not-checked';
-    buf = fs.readFileSync(abs);
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return c.deleted === true ? 'in-place' : 'missing';
-    return 'not-checked';
-  }
-  if (c.deleted === true) return 'reverted'; // the file the change removed is back
-  if (hashAfter && sha256(buf) === hashAfter) return 'in-place';
-  if (!hasText) return 'not-checked'; // another change may have touched the file since: no text to tell
-  const text = lf(buf.toString('utf8'));
-  // A record quotes a secret masked; the file holds it in full. Look in the file masked the same way too.
-  const views = before.includes('…') || after.includes('…') ? [text, lf(maskCredentials(buf.toString('utf8')))] : [text];
-  const holds = (needle) => views.some((v) => v.includes(needle));
-  // The text before, outside any place that holds the text after (which often contains it).
-  const holdsBefore = () => views.some((v) => (after.trim() ? v.split(after).join('\u0000') : v).includes(before));
-  if (after.trim()) {
-    if (holds(after)) return 'in-place';
-    if (before.trim()) return holdsBefore() ? 'reverted' : 'changed';
-    // A pure insertion that is gone: taken out again, unless the place it went into is gone too.
-    const anchor = lf(str(c.insertAfter));
-    return anchor.trim() && !holds(anchor) ? 'changed' : 'reverted';
-  }
-  return holdsBefore() ? 'reverted' : 'in-place'; // a removal
-}
-
-/**
- * Is what a fixed item changed still on disk? The worst result of its changes:
- * missing > reverted > changed > in-place; `not-checked` when no change has anything to look for.
- */
-export function checkItem(item, h) {
-  let worst = 'not-checked';
-  for (const c of Array.isArray(item.changes) ? item.changes : []) {
-    const result = checkChange(c, h);
-    if (CHECK_RANK[result] > CHECK_RANK[worst]) worst = result;
-  }
-  return worst;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -434,6 +352,32 @@ function verdictOf({ before, after, expected, tooFew }, t) {
 }
 
 /**
+ * The two sides of one metric as they can be compared: `{ before, after, base?, reason? }`,
+ * `base` and `reason` being the fields of that name on a row of `$defs.followUp`.
+ * A number that has more than one base is compared on a base both sides have, never across:
+ *   waste-share            weighted with weighted when both have it and the price weights did not
+ *                          change, else raw with raw; with no common base, `no-common-base`
+ *   weighted-per-session   not compared when the price weights changed: `weights-changed`
+ * A row that cannot be compared keeps today's number and no earlier one, so nothing is read as a
+ * change.
+ */
+function sidesOf(metric, then, now, bases) {
+  const before = isNum(then[metric]) ? then[metric] : null;
+  const after = isNum(now[metric]) ? now[metric] : null;
+  if (metric === 'weighted-per-session') {
+    return bases.weightsDiffer && before !== null && after !== null ? { before: null, after, reason: 'weights-changed' } : { before, after };
+  }
+  if (metric !== 'waste-share') return { before, after };
+  const a = bases.shareThen;
+  const b = bases.shareNow;
+  if (!a || !b) return { before, after };
+  const both = (base) => isNum(a[base]) && isNum(b[base]);
+  const base = both('weighted') && !bases.weightsDiffer ? 'weighted' : both('raw') ? 'raw' : null;
+  if (base) return { before: a[base], after: b[base], base };
+  return { before: null, after, base: b.base, reason: both('weighted') ? 'weights-changed' : 'no-common-base' };
+}
+
+/**
  * `harnesses[].followUp` of the state (`$defs.followUp`): harness `h` now against `record`.
  *   hs        the harness entry being built for the state (its `impact`, when measured)
  *   raw       the probe's impact.json, or null
@@ -455,10 +399,17 @@ export function followUpFor({ record, run, h, hs, raw, items, scoreNow, t = load
   else sample = { sessions: impact.sessions, enough: true };
   const tooFew = sample.reason === 'too-few-days' || sample.reason === 'too-few-sessions';
 
-  const then = record.measure ? record.measure.metrics : {};
+  const measure = isObject(record.measure) ? record.measure : null;
+  const then = measure ? measure.metrics : {};
   // A window that reaches back before that review measured something else: nothing counts as "now".
-  const now = impact && sample.reason !== 'not-measured' ? metricsOf(impact, raw) : {};
-  const sessionsThen = record.measure && record.measure.sessions > 0 ? record.measure.sessions : 0;
+  const counted = !!impact && sample.reason !== 'not-measured';
+  const now = counted ? metricsOf(impact, raw) : {};
+  const bases = {
+    shareThen: measure ? shareOfRecord(measure) : null,
+    shareNow: counted ? wasteShareOf(impact) : null,
+    weightsDiffer: !!measure && counted && weightsChanged(measure.weights, weightsOf(impact)),
+  };
+  const sessionsThen = measure && measure.sessions > 0 ? measure.sessions : 0;
   const fixed = record.items.filter((i) => i.status === 'fixed');
   const expectedBy = new Map();
   let expectedTokens = 0;
@@ -478,8 +429,7 @@ export function followUpFor({ record, run, h, hs, raw, items, scoreNow, t = load
     // One row for every metric measured on either side.
     if (!isNum(then[metric]) && !isNum(now[metric])) continue;
     const named = expectedBy.get(metric);
-    const before = isNum(then[metric]) ? then[metric] : null;
-    const after = isNum(now[metric]) ? now[metric] : null;
+    const { before, after, base, reason } = sidesOf(metric, then, now, bases);
     // A saving is in tokens: it sets an expectation only for a metric counted in tokens per session.
     const expected = named && before !== null && sessionsThen && metricUnit(metric) === 'tokens/session' ? Math.max(0, Math.round(before - named.tokens / sessionsThen)) : null;
     const row = {
@@ -487,6 +437,8 @@ export function followUpFor({ record, run, h, hs, raw, items, scoreNow, t = load
       changePct: before !== null && after !== null && before !== 0 ? round1(((after - before) / before) * 100) : null,
       verdict: verdictOf({ before, after, expected, tooFew }, t),
     };
+    if (base) row.base = base;
+    if (reason) row.reason = reason;
     if (named) row.items = named.items;
     metrics.push(row);
   }
@@ -496,12 +448,13 @@ export function followUpFor({ record, run, h, hs, raw, items, scoreNow, t = load
     if (i.harness !== h.id || !isObject(i.previous) || i.previous.run !== record.runId) continue;
     if (!nowOf.has(i.previous.item)) nowOf.set(i.previous.item, i.id);
   }
+  const roots = checkRoots(run, h);
   const carried = [];
   for (const i of record.items) {
     if (!CARRIED.includes(i.status)) continue;
     const entry = { id: i.id, title: i.title, round: i.round, status: i.status };
     if (i.status === 'fixed') {
-      entry.check = checkItem(i, h);
+      entry.check = checkItem(i, h, roots);
       const paths = [...new Set((Array.isArray(i.changes) ? i.changes : []).map((c) => c.path).filter((p) => typeof p === 'string' && p))];
       if (paths.length) entry.paths = paths;
     }
@@ -539,15 +492,21 @@ export function followUpFor({ record, run, h, hs, raw, items, scoreNow, t = load
 
 const ACTION_OF = { approved: 'approve', 'in-progress': 'approve', fixed: 'approve', failed: 'approve', declined: 'decline', deferred: 'defer' };
 const displayKey = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+const LINK_RE = /^.{1,60}$/s;
 
 /**
  * The record of harness `h` (an entry of run.json) for this run, from the state as `build`
  * assembles it, so every text in it is already masked.
  *   status, ledger, events   status.json, ledger.json and the lines of log.jsonl
+ *   stored                   the items as the findings files hold them, by id: what each `rev` is a hash of
  *   raw                      the probe's impact.json, or null
  *   reviewedAt               when this review ended (ISO)
+ *
+ * Every item keeps what its revision is made of (`class`, `file`, `proposal`, `changes`), whatever
+ * its status: the on-disk check needs it for a fixed item, and the next review needs it to tell
+ * whether a proposal is the one the user already declined.
  */
-export function makeRecord({ state, run, h, status, ledger, events, raw, reviewedAt, t = loadThresholds() }) {
+export function makeRecord({ state, run, h, status, ledger, events, stored = new Map(), raw, reviewedAt, t = loadThresholds() }) {
   const hs = state.harnesses.find((x) => x.id === h.id);
   const score = scoreHarness(state, h.id);
   const entries = (isObject(ledger) && Array.isArray(ledger.entries) ? ledger.entries : []).filter((e) => isObject(e) && !e.undoneAt);
@@ -556,36 +515,52 @@ export function makeRecord({ state, run, h, status, ledger, events, raw, reviewe
 
   const applied = [];
   const items = state.items.filter((i) => i.harness === h.id).map((i) => {
-    const o = (isObject(status.items) && status.items[i.id]) || {};
-    const out = { id: i.id, rev: i.rev, round: i.round, severity: i.severity, class: i.class, title: i.title, status: i.status };
+    const o = (isObject(status.items) && Object.hasOwn(status.items, i.id) && status.items[i.id]) || {};
+    const handed = isObject(stored.get(i.id)) ? stored.get(i.id) : {};
+    const out = { id: i.id, rev: i.rev, round: i.round, severity: i.severity, class: i.class, title: clip(str(i.title)), status: i.status };
+    if (typeof handed.file === 'string' && typeof i.file === 'string' && i.file.length <= 200) out.file = i.file;
+    out.proposal = clip(str(i.proposal));
     if (isDateTime(o.decidedAt) && ACTION_OF[i.status]) {
       out.decision = { action: ACTION_OF[i.status], at: o.decidedAt };
-      if (typeof i.decision === 'string' && i.decision) out.decision.note = i.decision;
-    } else if (i.status === 'declined' && isObject(i.history) && isDateTime(i.history.lastDecisionAt)) {
-      // Declined in an earlier review and handed back as it was: that decision still stands.
-      out.decision = { action: 'decline', at: i.history.lastDecisionAt };
-      if (typeof i.decision === 'string' && i.decision) out.decision.note = i.decision;
+      if (typeof i.decision === 'string' && i.decision) out.decision.note = clip(i.decision);
+    } else if (i.status === 'declined' && o.status === undefined && isObject(i.previous) && isObject(i.history) && i.history.lastStatus === 'declined') {
+      // Declined in an earlier review and proposed again as it was: that decision still stands.
+      out.decision = { action: 'decline', at: isDateTime(i.updatedAt) ? i.updatedAt : (isDateTime(i.history.lastDecisionAt) ? i.history.lastDecisionAt : reviewedAt) };
+      if (typeof i.decision === 'string' && i.decision) out.decision.note = clip(i.decision);
+      out.decision.carriedFrom = { run: str(i.previous.run), item: str(i.previous.item) };
     }
     if (i.status === 'fixed' && fixedAt.has(i.id)) { out.fixedAt = fixedAt.get(i.id); applied.push(out.fixedAt); }
-    if (typeof i.verified === 'string') out.verified = i.verified;
-    if (typeof i.notVerified === 'string') out.notVerified = i.notVerified;
-    if (isObject(i.lesson) && typeof i.lesson.principle === 'string' && i.lesson.principle) out.principle = i.lesson.principle;
-    if (isObject(i.saves)) out.saves = { ...i.saves };
-    if (isObject(i.previous)) out.previous = { run: i.previous.run, item: i.previous.item };
+    if (typeof i.verified === 'string') out.verified = clip(i.verified);
+    if (typeof i.notVerified === 'string') out.notVerified = clip(i.notVerified);
+    if (isObject(i.lesson) && typeof i.lesson.principle === 'string' && i.lesson.principle) out.principle = clip(i.lesson.principle);
+    if (isObject(i.saves)) {
+      out.saves = { ...i.saves };
+      if (typeof out.saves.how === 'string') out.saves.how = clip(out.saves.how);
+    }
+    if (isObject(i.previous) && LINK_RE.test(str(i.previous.run)) && LINK_RE.test(str(i.previous.item))) out.previous = { run: i.previous.run, item: i.previous.item };
     const mine = entries.filter((e) => e.item === i.id);
     // A change counts as applied while its item is fixed or being applied: one that failed was put back.
     if (i.status === 'fixed' || i.status === 'in-progress') for (const e of mine) if (isDateTime(e.at)) applied.push(e.at);
-    if (i.status === 'fixed' && Array.isArray(i.changes)) {
-      out.changes = i.changes.map((c) => {
-        const change = { path: c.path, before: c.before, after: c.after };
-        if (typeof c.insertAfter === 'string') change.insertAfter = c.insertAfter;
-        const last = mine.filter((e) => typeof e.display === 'string' && displayKey(e.display) === displayKey(c.path)).pop();
-        if (last) {
-          change.hashAfter = typeof last.hashAfter === 'string' ? last.hashAfter : null;
-          if (change.hashAfter === null) change.deleted = true;
-        }
-        return change;
-      });
+    if (Array.isArray(i.changes) && i.changes.length) {
+      const fits = i.changes.length <= MAX_CHANGES && i.changes.every((c) => isObject(c) && [c.path, c.before, c.after, c.insertAfter].every((s) => s === undefined || (typeof s === 'string' && s.length <= MAX_TEXT)));
+      if (!fits) out.changesOmitted = true;
+      else {
+        const handedChanges = Array.isArray(handed.changes) ? handed.changes : [];
+        out.changes = i.changes.map((c, n) => {
+          const change = { path: c.path, before: c.before, after: c.after };
+          if (typeof c.insertAfter === 'string') change.insertAfter = c.insertAfter;
+          // The file id is part of the revision only when the reviewer wrote one (`build` links the rest).
+          const given = isObject(handedChanges[n]) ? handedChanges[n].file : undefined;
+          if (typeof given === 'string' && given.length <= 200) change.file = given;
+          if (i.status !== 'fixed') return change;
+          const last = mine.filter((e) => typeof e.display === 'string' && displayKey(e.display) === displayKey(c.path)).pop();
+          if (last) {
+            change.hashAfter = typeof last.hashAfter === 'string' ? last.hashAfter : null;
+            if (change.hashAfter === null) change.deleted = true;
+          }
+          return change;
+        });
+      }
     }
     return out;
   });
@@ -596,12 +571,13 @@ export function makeRecord({ state, run, h, status, ledger, events, raw, reviewe
 
   const record = {
     schema: RECORD_SCHEMA,
-    skillVersion: state.skillVersion,
+    skillVersion: clip(str(state.skillVersion), 64),
     harnessKey: harnessKeyOf(h),
     runId: run.runId,
+    language: run.language === 'pt' ? 'pt' : 'en',
     kind: h.kind,
-    provider: typeof h.provider === 'string' ? h.provider : null,
-    name: hs.name,
+    provider: typeof h.provider === 'string' ? clip(h.provider, 64) : null,
+    name: clip(str(hs.name), 300),
     path: hs.path,
     startedAt: run.createdAt,
     reviewedAt,
@@ -619,4 +595,21 @@ export function makeRecord({ state, run, h, status, ledger, events, raw, reviewe
   record.items = items;
   if (isObject(hs.followUp)) record.outcome = hs.followUp;
   return record;
+}
+
+/**
+ * A record that is too large to keep, made smaller: the changes of the items that were not fixed
+ * go first (each one is marked `changesOmitted`), then those of the fixed ones. Returns true when
+ * something was left out. What is lost is the on-disk check of those items, and telling a
+ * declined proposal by its content; every decision, date and number stays.
+ */
+export function slimRecord(record, fixedToo) {
+  let cut = false;
+  for (const i of record.items) {
+    if (!Array.isArray(i.changes) || (i.status === 'fixed' && !fixedToo)) continue;
+    delete i.changes;
+    i.changesOmitted = true;
+    cut = true;
+  }
+  return cut;
 }

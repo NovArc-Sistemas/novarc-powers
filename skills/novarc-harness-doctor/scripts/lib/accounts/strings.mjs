@@ -61,6 +61,10 @@ const en = {
     codexOverride: '{id}: AGENTS.override.md exists, so Codex ignores {file} in that folder.',
     closeApps: 'Close the agent apps of the accounts involved before applying: a running app can rewrite its own config and undo a change.',
     otherPrimary: 'The accounts are already synced from {id}. Applying this plan needs --new-primary and starts the bookkeeping over; undo the earlier run first if its links should go.',
+    unfinished: {
+      one: 'An earlier run did not finish (the process died or was stopped): {stamps}. Take back what it had done first, with "node accounts.mjs undo --stamp {stamps} --yes", then plan again.',
+      other: '{n} earlier runs did not finish (the process died or was stopped): {stamps}. Take back what they had done first, newest first, with "node accounts.mjs undo --stamp <stamp> --yes" for each, then plan again.',
+    },
   },
   instruction: {
     noSource: 'the primary has no instruction file to generate it from',
@@ -225,6 +229,10 @@ const pt = {
     codexOverride: '{id}: existe AGENTS.override.md, então o Codex ignora o {file} dessa pasta.',
     closeApps: 'Feche os apps de agente das contas envolvidas antes de aplicar: um app em execução pode reescrever a própria configuração e desfazer uma mudança.',
     otherPrimary: 'As contas já estão sincronizadas a partir de {id}. Aplicar este plano exige --new-primary e reinicia o registro; desfaça a execução anterior antes, se os vínculos dela devem sair.',
+    unfinished: {
+      one: 'Uma execução anterior não terminou (o processo morreu ou foi interrompido): {stamps}. Desfaça antes o que ela chegou a fazer, com "node accounts.mjs undo --stamp {stamps} --yes", e planeje de novo.',
+      other: '{n} execuções anteriores não terminaram (o processo morreu ou foi interrompido): {stamps}. Desfaça antes o que elas chegaram a fazer, da mais recente para a mais antiga, com "node accounts.mjs undo --stamp <stamp> --yes" para cada uma, e planeje de novo.',
+    },
   },
   instruction: {
     noSource: 'a conta principal não tem arquivo de instruções para gerá-lo',

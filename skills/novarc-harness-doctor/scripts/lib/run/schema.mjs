@@ -2,10 +2,15 @@
 // `complete` checks what a reviewer handed in, and probe output is pruned to the schema so a
 // diagnostic field a probe adds never breaks the board. Supports the JSON Schema subset the state
 // schema uses (type, const, enum, required, properties, additionalProperties: false, items,
-// minItems, minimum, maximum, pattern, format: date-time, $ref into #/$defs). Messages name the
-// path and the rule, never the offending value.
+// minItems, maxItems, minimum, maximum, maxLength, pattern, format: date-time, $ref into
+// #/$defs). Messages name the path and the rule, never the offending value.
+//
+// A property is looked up as an own property of the schema, never through the prototype: a file
+// read from disk may name a key `__proto__` or `constructor`, and that is an unknown property like
+// any other.
 import fs from 'node:fs';
 import path from 'node:path';
+import { setOwn } from './store.mjs';
 import { SKILL_DIR } from './paths.mjs';
 
 export const SCHEMA_VERSION = 2;
@@ -79,16 +84,19 @@ export function validate(value, schema, root = schema, at = '', errors = [], opt
   }
   const t = typeOf(value);
   if (t === 'object') {
-    if (!opts.partial) for (const k of s.required || []) if (!(k in value)) errors.push(`${where}: missing required "${k}"`);
+    if (!opts.partial) for (const k of s.required || []) if (!Object.hasOwn(value, k)) errors.push(`${where}: missing required "${k}"`);
     const props = s.properties || {};
     for (const [k, v] of Object.entries(value)) {
-      if (props[k]) validate(v, props[k], root, `${at}/${k}`, errors);
-      else if (s.additionalProperties === false) errors.push(`${where}: unknown property "${k}"`);
+      if (Object.hasOwn(props, k)) validate(v, props[k], root, `${at}/${k}`, errors);
+      else if (s.additionalProperties === false) errors.push(`${where}: unknown property "${k.length > 60 ? `${k.slice(0, 59)}…` : k}"`);
     }
   } else if (t === 'array') {
     if (s.minItems !== undefined && value.length < s.minItems) errors.push(`${where}: needs at least ${s.minItems} item(s)`);
+    // A list over its limit is not walked: its size is the finding.
+    if (s.maxItems !== undefined && value.length > s.maxItems) { errors.push(`${where}: more than ${s.maxItems} item(s)`); return errors; }
     if (s.items) value.forEach((v, i) => validate(v, s.items, root, `${at}/${i}`, errors));
   } else if (t === 'string') {
+    if (s.maxLength !== undefined && value.length > s.maxLength) { errors.push(`${where}: longer than ${s.maxLength} characters`); return errors; }
     if (s.pattern && !new RegExp(s.pattern, 'u').test(value)) errors.push(`${where}: does not match ${s.pattern}`);
     if (s.format === 'date-time' && !isDateTime(value)) errors.push(`${where}: not an RFC 3339 date-time`);
   } else if (t === 'integer' || t === 'number') {
@@ -110,8 +118,8 @@ export function prune(value, schema, root = schema) {
     const props = s.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      if (props[k]) out[k] = prune(v, props[k], root);
-      else if (s.additionalProperties !== false) out[k] = v;
+      if (Object.hasOwn(props, k)) setOwn(out, k, prune(v, props[k], root));
+      else if (s.additionalProperties !== false) setOwn(out, k, v);
     }
     return out;
   }

@@ -20,6 +20,8 @@ const ROUNDS_79 = [{ round: 1, status: 'done', score: 79 }, ...[2, 3, 4, 5, 6, 7
 const METRICS = { 'tokens-per-session': 100000, 'weighted-per-session': 20000, 'context-at-start': 50000, 'context-peak': 120000, 'waste-share': 5, 'waste:retry': 5000, 'tool-output': 40000 };
 const MEASURE = {
   window: { from: '2025-12-11T10:00:00.000Z', to: '2026-01-10T10:00:00.000Z', days: 30 }, sessions: 20, activeDays: 12, metrics: METRICS,
+  // The share of waste on both bases, and which one `waste-share` is.
+  wasteShare: { base: 'weighted', weighted: 5, raw: 5 },
   unused: { skills: ['alpha'], mcpServers: [] }, coverage: { claude: 'complete', codex: 'not-read' },
 };
 /** Start a run from the sandbox's selection at `at`; remembers it as the current run. */
@@ -53,7 +55,7 @@ test('close writes the record, the .md and the index: exactly what was decided a
   const [f101, f102, f103, f104] = first.findings.items;
   const record = history.record(key, first.runId);
   assert.deepEqual(record, {
-    schema: 1, skillVersion: SKILL_VERSION, harnessKey: key, runId: first.runId,
+    schema: 1, skillVersion: SKILL_VERSION, harnessKey: key, runId: first.runId, language: 'en',
     kind: 'project', provider: null, name: 'acme-shop', path: '~/dev/acme-shop',
     startedAt: FIRST.started, reviewedAt: FIRST.closed, changesAppliedAt: FIRST.fixed, followUpAfter: '2026-02-09T12:00:00.000Z',
     // Found: 5 + 2 + 15 + 5 points lost. Left: the fixed one costs nothing, the declined one half.
@@ -62,18 +64,27 @@ test('close writes the record, the .md and the index: exactly what was decided a
     elements: {},
     items: [
       {
-        id: 'ACME-101', rev: itemRev(f101), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-101', status: 'fixed',
+        id: 'ACME-101', rev: itemRev(f101), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-101', status: 'fixed', proposal: 'What to change.',
         decision: { action: 'approve', at: FIRST.decided, note: 'yes, do it' }, fixedAt: FIRST.fixed, verified: 'Read the file back.', principle: 'The rule to keep.',
         saves: { tokens: 200000, basis: 'measured', metric: 'context-at-start', how: 'Loaded in every session.' },
         changes: [{ path: './CLAUDE.md', before: 'line one', after: 'line one, improved', hashAfter: sha('# Rules\nline one, improved\nline two\n') }],
       },
-      { id: 'ACME-102', rev: itemRev(f102), round: 1, severity: 'low', class: 'additive', title: 'Finding ACME-102', status: 'declined', decision: { action: 'decline', at: FIRST.decided, note: 'not now' }, principle: 'The rule to keep.' },
-      { id: 'ACME-103', rev: itemRev(f103), round: 1, severity: 'high', class: 'reversible', title: 'Finding ACME-103', status: 'deferred', decision: { action: 'defer', at: FIRST.decided }, principle: 'The rule to keep.' },
-      { id: 'ACME-104', rev: itemRev(f104), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-104', status: 'open', principle: 'The rule to keep.' },
+      {
+        id: 'ACME-102', rev: itemRev(f102), round: 1, severity: 'low', class: 'additive', title: 'Finding ACME-102', status: 'declined', proposal: 'What to change.',
+        decision: { action: 'decline', at: FIRST.decided, note: 'not now' }, principle: 'The rule to keep.',
+        changes: [{ path: './AGENTS.md', before: '', after: 'A new rule.\n' }],
+      },
+      { id: 'ACME-103', rev: itemRev(f103), round: 1, severity: 'high', class: 'reversible', title: 'Finding ACME-103', status: 'deferred', file: './settings.json', proposal: 'What to change.', decision: { action: 'defer', at: FIRST.decided }, principle: 'The rule to keep.' },
+      { id: 'ACME-104', rev: itemRev(f104), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-104', status: 'open', file: './README.md', proposal: 'What to change.', principle: 'The rule to keep.' },
     ],
   });
   assert.deepEqual(validateRecord(record), [], 'the record fits templates/record.schema.json');
-  assert.ok(!('changes' in record.items[1]), 'changes are kept for fixed items only');
+  // Every item keeps what its revision is made of, whatever its status: the next review can tell
+  // from the record alone whether a proposal is the one the user already answered.
+  for (const i of record.items) {
+    assert.equal(itemRev({ harness: 'acme-shop', class: i.class, file: i.file, proposal: i.proposal, changes: i.changes }), i.rev, `${i.id}: the record holds what its rev is a hash of`);
+  }
+  assert.ok(!('hashAfter' in record.items[1].changes[0]), 'only a change that was applied has the hash of its file');
 
   assert.equal(history.md(key, first.runId), [
     '# Review of acme-shop, 2026-01-10',
@@ -357,10 +368,11 @@ test('undo after close rewrites the record: it never claims a change that was un
 
   const record = history.record(first.key, first.runId);
   assert.deepEqual(record.items[0], {
-    id: 'ACME-101', rev: itemRev(first.findings.items[0]), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-101', status: 'approved',
+    id: 'ACME-101', rev: itemRev(first.findings.items[0]), round: 1, severity: 'medium', class: 'reversible', title: 'Finding ACME-101', status: 'approved', proposal: 'What to change.',
     decision: { action: 'approve', at: FIRST.decided, note: 'yes, do it' }, principle: 'The rule to keep.',
     saves: { tokens: 200000, basis: 'measured', metric: 'context-at-start', how: 'Loaded in every session.' },
-  }, 'approved again, with no change, no fixedAt and nothing verified');
+    changes: [{ path: './CLAUDE.md', before: 'line one', after: 'line one, improved' }],
+  }, 'approved again: the change as proposed, with no hash of an applied file, no fixedAt and nothing verified');
   assert.deepEqual({ reviewedAt: record.reviewedAt, changesAppliedAt: record.changesAppliedAt, followUpAfter: record.followUpAfter }, { reviewedAt: FIRST.closed, changesAppliedAt: null, followUpAfter: '2026-02-09T12:00:00.000Z' }, 'the review still ended when it was closed');
   // What is approved but not applied counts in full now, and as fixed in the projection.
   assert.deepEqual({ baseline: record.scores.baseline, current: record.scores.current, projected: record.scores.projected, grade: record.scores.grade }, { baseline: 73, current: 74, projected: 79, grade: 'C' });

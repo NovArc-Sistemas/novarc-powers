@@ -6,8 +6,10 @@
 // is dropped with a warning, so one odd value never costs the user the whole board. What a
 // reviewer wrote was validated by `complete` and is taken as it is.
 //
-// Two barriers run over the finished state, whatever its parts came from: absolute home paths
-// become `~`, and credentials are masked (secrets.mjs). Each one reports where it acted.
+// Three barriers run over the finished state, whatever its parts came from: absolute home paths
+// become `~`, prose follows the prose policy (prose.mjs: e-mail addresses masked, absolute paths
+// shown as a harness's display path or by their last two segments), and credentials are masked
+// (secrets.mjs). Each one reports where it acted.
 //
 // A harness that was reviewed before (it has a review record, references/follow-up.md) also gets
 // its history and the comparison with its last review. That part reads the record and, to check
@@ -21,11 +23,12 @@ import { loadStateSchema, skillVersion, validate, prune, sub, def, sanitizeList,
 import { homeMatchers, scrubDeep } from './scrub.mjs';
 import { loadFindings, loadItems, loadStatus, resolveGroups, withGroupRevs, inputsFingerprint } from './model.mjs';
 import { maskDeep } from './secrets.mjs';
+import { applyProse, proseContext, runRoots, STATE_PROSE } from './prose.mjs';
 import { ROUNDS, roundApplies } from './units.mjs';
 import { ELEMENT_RULES } from './findings.mjs';
 import { AGENTS, CHANNELS } from './init.mjs';
 import { logText } from './text.mjs';
-import { harnessKeyOf, earlierRecords, lastRecordOf, invalidRecords, itemHistory, harnessHistory, followUpFor } from './followup.mjs';
+import { harnessKeyOf, earlierRecords, lastRecordOf, ignoredRecords, itemHistory, harnessHistory, followUpFor } from './followup.mjs';
 import { scoreHarness } from '../scoring.mjs';
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -319,13 +322,16 @@ export function assembleState(ctx, root, groups) {
       continue;
     }
     item.history = found.history;
-    // Declined before and handed back as it was: the note the user left then still says why.
-    const decidedNow = status.items[item.id] && status.items[item.id].status;
-    if (item.status === 'declined' && !decidedNow && item.decision === undefined && found.history.lastNote) item.decision = found.history.lastNote;
   }
+  // A decline carried from an earlier review says where it comes from in `carriedFrom`: `loadItems`
+  // (model.mjs) set it, and it is the one kind of declined item no decision of this run stands behind.
   run.harnesses.forEach((h, n) => {
     const entry = harnesses[n];
-    for (const name of invalidRecords(entry.key)) warnings.push({ source: `history/${entry.key}/${name}`, problem: 'not a valid review record; ignored' });
+    for (const x of ignoredRecords(entry.key)) {
+      warnings.push(x.file
+        ? { source: `history/${entry.key}/${x.file}`, problem: `not a review record this version reads (${x.reason}); ignored` }
+        : { source: `history/${entry.key}`, problem: `${x.count || 1} file(s) ignored (${x.reason})` });
+    }
     const earlier = earlierRecords(run, h);
     if (!earlier.length) return;
     const { scores, ...rest } = entry;
@@ -390,11 +396,17 @@ export function assembleState(ctx, root, groups) {
   const clean = scrubDeep(state, homeMatchers(), hits);
   if (hits.length) warnings.push({ source: 'state', problem: `absolute home path replaced by ~ in ${hits.length} place(s), first at ${hits[0]}` });
 
+  // Prose says no more of a person or a machine than it needs to (prose.mjs). File content and
+  // the text of a change are not prose: they must keep matching the files.
+  const rewritten = [];
+  const worded = applyProse(clean, STATE_PROSE, proseContext(runRoots(run)), rewritten);
+  if (rewritten.length) warnings.push({ source: 'state', problem: `e-mail address or absolute path rewritten in prose in ${rewritten.length} place(s), first at ${rewritten[0]}` });
+
   // And no credential. Findings and notes are refused at the door and snapshots are masked when
   // they are taken, so anything found here came by another path: it is masked, and the board is
   // still built, with a warning that says where.
   const masked = [];
-  const safe = maskDeep(clean, masked);
+  const safe = maskDeep(worded, masked);
   for (const at of masked.slice(0, MAX_MASK_WARNINGS)) warnings.push({ source: 'state', problem: `credential masked at ${at}` });
   if (masked.length > MAX_MASK_WARNINGS) warnings.push({ source: 'state', problem: `credential masked in ${masked.length - MAX_MASK_WARNINGS} more place(s)` });
   return { state: safe, warnings };

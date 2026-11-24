@@ -40,8 +40,8 @@ Two ways. Offer both in one sentence each and let the user choose:
 2. **Private page on claude.ai (Artifact).** A page the user can open anywhere and decide on
    with the same buttons. `run.mjs build --channel artifact` renders a compact board: every
    finding, score and measurement, with the text of the files that have changes; files without
-   changes are listed without their text. That text (secrets masked) goes to claude.ai, so say
-   so and publish only on a yes. Publish `<run>/board.html` with the Artifact tool and the
+   changes are listed without their text. That text (secrets and e-mail addresses masked) goes to
+   claude.ai, so say so and publish only on a yes. Publish `<run>/board.html` with the Artifact tool and the
    capabilities `{ "db": {}, "user": {} }`. The file built for this channel is a page fragment
    (no doctype, `html`, `head` or `body`: the publisher adds them), with its data one entry per
    line; it is not meant to be opened from disk or served. To go back to the local page, build

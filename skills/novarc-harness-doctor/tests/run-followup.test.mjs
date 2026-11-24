@@ -78,7 +78,8 @@ test('31 days later: the expected saving happened, by half, not at all, and the 
       { metric: 'weighted-per-session', unit: 'tokens/session', before: 20000, expected: null, after: 20000, changePct: 0, verdict: 'no-change' },
       { metric: 'context-at-start', unit: 'tokens/session', before: 50000, expected: 40000, after: 40000, changePct: -20, verdict: 'confirmed', items: ['ACME-101'] },
       { metric: 'context-peak', unit: 'tokens/session', before: 120000, expected: null, after: null, changePct: null, verdict: 'not-measured' },
-      { metric: 'waste-share', unit: 'percent', before: 5, expected: null, after: 5.2, changePct: 4, verdict: 'no-change' },
+      // Both reviews weighted their waste: the share is compared on that base, and the row says so.
+      { metric: 'waste-share', unit: 'percent', before: 5, expected: null, after: 5.2, changePct: 4, verdict: 'no-change', base: 'weighted' },
       { metric: 'waste:retry', unit: 'tokens/session', before: 5000, expected: null, after: 5200, changePct: 4, verdict: 'no-change' },
       { metric: 'tool-output', unit: 'chars/session', before: 40000, expected: null, after: 50000, changePct: 25, verdict: 'worse' },
     ],
@@ -198,7 +199,7 @@ test('is what was applied still there: in place, reverted, rewritten, removed', 
   for (const spelling of [sb.home, sb.home.replace(/\\/g, '\\\\'), sb.home.replace(/\\/g, '/')]) assert.ok(!seen.text.includes(spelling), 'nothing absolute enters the state');
 });
 
-test('a finding seen before: `previous` links it, the state says what happened then, and a declined one stays declined', (t) => {
+test('a finding seen before: `previous` links it, the state says what happened then, and the same proposal stays declined', (t) => {
   const sb = one(t);
   const first = firstReview(sb);
   followUp(sb, SECOND);
@@ -214,8 +215,8 @@ test('a finding seen before: `previous` links it, the state says what happened t
 
   const prev = (id) => ({ run: first.runId, item: id });
   const again = [
-    // Declined then, nothing changed: handed back as declined.
-    item('ACME-101', 'acme-shop', 1, { status: 'declined', previous: prev('ACME-102'), class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
+    // Declined then, nothing changed: the same proposal again, open like any finding a reviewer sends.
+    item('ACME-101', 'acme-shop', 1, { previous: prev('ACME-102'), class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
     // Deferred then: open again.
     item('ACME-102', 'acme-shop', 1, { previous: prev('ACME-103'), severity: 'high', changes: undefined, file: './settings.json' }),
     // Fixed then, and the same problem is back in another place.
@@ -227,13 +228,12 @@ test('a finding seen before: `previous` links it, the state says what happened t
   ];
   const findings = (items) => ({ rounds: [{ harness: 'acme-shop', round: 1, status: 'done' }], items });
 
-  // `declined` is the user's word: a reviewer may only hand back what the user declined.
-  const invented = sb.complete('review:security', findings([{ ...again[4], status: 'declined' }]), 'rev');
-  assert.equal(invented.code, 1);
-  assert.match(invented.json.errors[0], /^\/items\/0\/status: a reviewer may only set open, ok, not-applicable \(and declined, with `previous`/);
-  const notDeclined = sb.complete('review:security', findings([{ ...again[0], previous: prev('ACME-103') }]), 'rev');
-  assert.equal(notDeclined.code, 1);
-  assert.deepEqual(notDeclined.json.errors, ['/items/0/status: declined is only for a finding the user declined in an earlier review, and `previous` does not point at one']);
+  // `declined` is the user's word: a reviewer never sets it, not even on what the user did decline.
+  for (const handedBack of [{ ...again[4], status: 'declined' }, { ...again[0], status: 'declined' }]) {
+    const refused = sb.complete('review:security', findings([handedBack]), 'rev');
+    assert.equal(refused.code, 1);
+    assert.deepEqual(refused.json.errors, ['/items/0/status: a reviewer may only set open, ok, not-applicable (a decline of an earlier review is carried by the run: send the same proposal as open, with `previous`)']);
+  }
   const misshapen = sb.complete('review:security', findings([{ ...again[1], previous: { run: first.runId } }]), 'rev');
   assert.equal(misshapen.code, 1);
   assert.match(misshapen.json.errors.join('\n'), /^\/items\/0\/previous: missing required "item"$/m);
@@ -242,14 +242,20 @@ test('a finding seen before: `previous` links it, the state says what happened t
   const done = sb.complete('review:security', findings(again), 'rev');
   assert.equal(done.code, 0, done.stdout + done.stderr);
   assert.deepEqual(done.json.warnings, ['/items/3/previous: no review record of this harness holds this run and item']);
+  assert.deepEqual(done.json.declinedBefore, { same: ['ACME-101'], changed: [] }, 'the reviewer is told that the decline still stands');
 
   const { harness, state, warnings } = build(sb);
   assert.deepEqual(warnings.filter((w) => /previous/.test(w.problem)), [{ source: 'findings', problem: 'item ACME-104: `previous` points at a run or item that no review record of this harness holds; its history is left out' }]);
   const of = (id) => state.items.find((i) => i.id === id);
-  assert.deepEqual({ status: of('ACME-101').status, decision: of('ACME-101').decision, history: of('ACME-101').history }, {
-    status: 'declined', decision: 'not now',
+  // The decline is carried with its date and its note, and says where it comes from; no decision
+  // of this run stands behind it.
+  assert.deepEqual({ status: of('ACME-101').status, decision: of('ACME-101').decision, updatedAt: of('ACME-101').updatedAt, carriedFrom: of('ACME-101').carriedFrom, history: of('ACME-101').history }, {
+    status: 'declined', decision: 'not now', updatedAt: FIRST.decided, carriedFrom: { run: first.runId, item: 'ACME-102' },
     history: { firstSeenAt: FIRST.closed, times: 1, lastStatus: 'declined', lastDecisionAt: FIRST.decided, lastNote: 'not now' },
   });
+  assert.deepEqual(state.items.filter((i) => 'carriedFrom' in i).map((i) => i.id), ['ACME-101'], 'only a carried decline has it');
+  assert.deepEqual(state.decisions, []);
+  assert.deepEqual(sb.read('status.json').items, {}, 'nothing was decided in this run');
   assert.deepEqual({ status: of('ACME-102').status, history: of('ACME-102').history }, { status: 'open', history: { firstSeenAt: FIRST.closed, times: 1, lastStatus: 'deferred', lastDecisionAt: FIRST.decided } });
   assert.deepEqual(of('ACME-103').history, { firstSeenAt: FIRST.closed, times: 1, lastStatus: 'fixed', lastDecisionAt: FIRST.decided, lastNote: 'yes, do it' });
   assert.ok(!('history' in of('ACME-104')) && !('history' in of('ACME-105')) && !('previous' in of('ACME-105')));
@@ -272,7 +278,9 @@ test('a finding seen before: `previous` links it, the state says what happened t
   assert.deepEqual(validateRecord(second), []);
   assert.deepEqual(second.followUpOf, { runId: first.runId, reviewedAt: FIRST.closed });
   assert.deepEqual(second.outcome, harness.followUp);
-  assert.deepEqual({ status: second.items[0].status, decision: second.items[0].decision, previous: second.items[0].previous }, { status: 'declined', decision: { action: 'decline', at: FIRST.decided, note: 'not now' }, previous: prev('ACME-102') });
+  assert.deepEqual({ status: second.items[0].status, decision: second.items[0].decision, previous: second.items[0].previous }, {
+    status: 'declined', decision: { action: 'decline', at: FIRST.decided, note: 'not now', carriedFrom: { run: first.runId, item: 'ACME-102' } }, previous: prev('ACME-102'),
+  });
   assert.deepEqual(history.index().harnesses[first.key].reviews.map((r) => [r.runId, r.score, r.fixed]), [[first.runId, 79, 1], [sb.runId, 69, 0]]);
   const md = history.md(first.key, sb.runId).split('\n');
   assert.deepEqual(md.slice(0, 5), [
@@ -294,7 +302,7 @@ test('a finding seen before: `previous` links it, the state says what happened t
     '## This review',
     `- Run: ${sb.runId}, started 2026-02-10. Follow-up of the review of 2026-01-10 (${first.runId})`,
     '- **ACME-101** Finding ACME-101 (low, additive)',
-    '  - Decision: declined on 2026-01-10. "not now"',
+    `  - Decision: declined on 2026-01-10, kept from run ${first.runId}: the same proposal came back. "not now"`,
     `  - Same finding as ACME-102 of run ${first.runId}.`,
   ]) assert.ok(md.includes(line), line);
 
@@ -305,16 +313,16 @@ test('a finding seen before: `previous` links it, the state says what happened t
   writeImpact(sb, 'acme-shop', since({}, '2026-03-15T13:00:00.000Z'));
   assert.equal(sb.complete('review:security', findings([
     item('ACME-101', 'acme-shop', 1, { previous: { run: secondRun, item: 'ACME-102' }, severity: 'high', changes: undefined, file: './settings.json' }),
-    item('ACME-102', 'acme-shop', 1, { status: 'declined', previous: { run: secondRun, item: 'ACME-101' }, class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
+    item('ACME-102', 'acme-shop', 1, { previous: { run: secondRun, item: 'ACME-101' }, class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
   ])).code, 0);
   const now = build(sb);
   assert.deepEqual(now.harness.history.map((h) => [h.runId, h.reviewedAt, h.score, h.fixed]), [[first.runId, FIRST.closed, 79, 1], [secondRun, closedAt, 69, 0]], 'oldest first');
   assert.deepEqual(now.harness.followUp.of, { runId: secondRun, reviewedAt: closedAt });
   assert.deepEqual(now.state.items[0].history, { firstSeenAt: FIRST.closed, times: 2, lastStatus: 'open' }, 'deferred in January, open in February, here again');
-  assert.deepEqual({ status: now.state.items[1].status, decision: now.state.items[1].decision, history: now.state.items[1].history }, {
-    status: 'declined', decision: 'not now',
+  assert.deepEqual({ status: now.state.items[1].status, decision: now.state.items[1].decision, carriedFrom: now.state.items[1].carriedFrom, history: now.state.items[1].history }, {
+    status: 'declined', decision: 'not now', carriedFrom: { run: secondRun, item: 'ACME-101' },
     history: { firstSeenAt: FIRST.closed, times: 2, lastStatus: 'declined', lastDecisionAt: FIRST.decided, lastNote: 'not now' },
-  });
+  }, 'carried again, from the review that carried it: the date is still the day the user said no');
 });
 
 test('a harness with no record gets nothing from all this: its part of the state is what it always was', (t) => {
@@ -382,10 +390,16 @@ test('a record that is not a valid record is ignored, and said', (t) => {
   const { harness, warnings } = build(sb);
   assert.deepEqual(harness.history.map((h) => h.runId), [first.runId]);
   assert.deepEqual(warnings.filter((w) => /review record/.test(w.problem)), [
-    { source: `history/${first.key}/20251101-junk.json`, problem: 'not a valid review record; ignored' },
-    { source: `history/${first.key}/20251201-old1.json`, problem: 'not a valid review record; ignored' },
+    { source: `history/${first.key}/20251101-junk.json`, problem: 'not a review record this version reads (not-json); ignored' },
+    { source: `history/${first.key}/20251201-old1.json`, problem: 'not a review record this version reads (invalid); ignored' },
   ]);
-  assert.deepEqual(sb.run(['history', '--json']).json.harnesses[0].reviews.map((r) => r.runId), [first.runId]);
+  const listed = sb.run(['history', '--json']).json;
+  assert.deepEqual(listed.harnesses[0].reviews.map((r) => r.runId), [first.runId]);
+  assert.deepEqual(listed.ignored, [
+    { harness: first.key, file: '20251101-junk.json', reason: 'not-json' },
+    { harness: first.key, file: '20251201-old1.json', reason: 'invalid' },
+  ]);
+  assert.match(sb.run(['history']).stdout, /^2 files under history\/ are not review records this version reads and were ignored \(run\.mjs history --json says which\)\.$/m);
 });
 
 test('the record of a follow-up, to read: it leads with the comparison, in the language of the run', (t) => {
@@ -396,7 +410,7 @@ test('the record of a follow-up, to read: it leads with the comparison, in the l
   assert.equal(sb.complete('review:security', {
     rounds: [{ harness: 'acme-shop', round: 1, status: 'done' }],
     items: [
-      item('ACME-101', 'acme-shop', 1, { status: 'declined', previous: { run: first.runId, item: 'ACME-102' }, class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
+      item('ACME-101', 'acme-shop', 1, { previous: { run: first.runId, item: 'ACME-102' }, class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
       item('ACME-102', 'acme-shop', 1, { previous: { run: first.runId, item: 'ACME-103' }, severity: 'high', changes: undefined, file: './settings.json' }),
     ],
   }).code, 0);
@@ -459,7 +473,7 @@ test('the record of a follow-up, to read: it leads with the comparison, in the l
     '## Recusados (1)',
     '',
     '- **ACME-101** Finding ACME-101 (baixa, aditiva)',
-    '  - Decisão: recusado em 2026-01-10. "not now"',
+    `  - Decisão: recusado em 2026-01-10, mantido da execução ${first.runId}: a mesma proposta voltou. "not now"`,
     '  - Para levar: The rule to keep.',
     `  - Mesmo achado que ACME-102 da execução ${first.runId}.`,
     '',
@@ -642,7 +656,8 @@ test('the on-disk check, change by change', (t) => {
   put('../outside.md', 'other plans\n');
   assert.equal(check({ path: '../outside.md', before: 'x', after: 'other plans' }), 'not-checked', 'a path that climbs out of the harness is never followed');
   assert.equal(check({ path: './sub/../../outside.md', before: 'x', after: 'other plans' }), 'not-checked');
-  assert.equal(check({ path: '~/dev/outside.md', before: 'x', after: 'other plans' }), 'in-place', 'a file named from the home is looked for in the home');
+  assert.equal(check({ path: '~/dev/outside.md', before: 'x', after: 'other plans' }), 'not-checked', 'a file of the home is not a file of this project');
+  assert.equal(check({ path: '~/dev/acme/CLAUDE.md', before: 'x', after: 'Run the tests. Then run the linter.' }), 'in-place', 'the display path of the project names its own files');
   assert.equal(check({ path: '~/../outside-the-home.md', before: 'x', after: 'y' }), 'not-checked');
   assert.equal(check({ path: path.join(root, 'CLAUDE.md'), before: 'x', after: 'Run the tests. Then run the linter.' }), 'not-checked', 'an absolute path is never taken from a record');
   assert.equal(check({ path: './dev', before: 'x', after: 'y' }), 'missing');

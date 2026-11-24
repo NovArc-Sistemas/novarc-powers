@@ -51,6 +51,12 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); 
   outro nome, nunca trunca antes de gravar, e confere o conteúdo por trás de um link antes de
   aplicar um plano. Um desfazer parcial pode ser repetido até completar.
 - As sondas de uma conta não leem mais nada de outra conta.
+- Nenhum arquivo é gravado no lugar: o conteúdo novo entra por troca atômica, e uma execução
+  interrompida é terminada ou desfeita pela seguinte.
+- Registros de revisão lidos do disco passam pelas mesmas barreiras da gravação, e a
+  conferência em disco nunca sai da pasta do harness.
+- Em textos livres, e-mails são mascarados e caminhos absolutos encurtados; no painel publicado
+  como Artifact, os e-mails são mascarados também no texto dos arquivos.
 - Uma contagem que não pôde ser medida aparece como "não medido", nunca como zero: uma skill
   ou um servidor MCP só é dado como sem uso quando isso foi de fato medido.
 

@@ -120,33 +120,81 @@ test('install-check: a file that is not valid JSON is refused and left untouched
   }
 });
 
-test('install-check: a link on settings.json survives, because the file is written in place', (t) => {
+test('install-check: a symbolic link on settings.json survives: the file it leads to is replaced', { skip: !CAN_SYMLINK && 'symbolic links cannot be created here' }, (t) => {
   const h = buildHome({ second: false, codex: false, agents: false });
   t.after(() => rmrf(h.root));
   const settings = path.join(h.claude, 'settings.json');
   const real = path.join(h.root, 'mirror', 'settings.json');
-  write(real, read(settings));
+  const original = read(settings);
+  write(real, original);
   fs.rmSync(settings);
-  if (CAN_SYMLINK) fs.symlinkSync(real, settings, 'file');
-  else fs.linkSync(real, settings); // the fallback path: a hardlink must survive as well
+  fs.symlinkSync(real, settings, 'file');
   const r = acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']);
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  if (CAN_SYMLINK) assert.ok(isLink(settings), 'the symlink was replaced by a regular file');
-  else assert.equal(fs.statSync(settings).nlink, 2, 'the hardlink was broken');
+  assert.ok(isLink(settings), 'the symlink was replaced by a regular file');
   assert.equal(read(real), read(settings), 'both paths still show the same file');
   assert.equal(sessionStart(real).length, 1);
-  // A hardlink, on every OS.
-  const other = path.join(h.root, 'mirror', 'hard.json');
-  acc(h.home, ['uninstall-check', '--yes']);
-  dropLink(settings);
-  fs.linkSync(real, settings);
-  fs.linkSync(real, other);
-  assert.equal(acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']).code, 0);
-  assert.equal(fs.statSync(settings).nlink, 3);
-  assert.equal(sessionStart(other).length, 1);
+  assert.deepEqual(fs.readdirSync(path.dirname(real)), ['settings.json'], 'a temp file was left beside the real file');
   assert.equal(acc(h.home, ['uninstall-check', '--yes']).code, 0);
-  assert.equal(fs.statSync(settings).nlink, 3, 'uninstall keeps the links too');
-  assert.equal(json(other).hooks.SessionStart, undefined);
+  assert.ok(isLink(settings));
+  assert.equal(read(real), original, 'uninstall restores the file behind the link byte for byte');
+});
+
+test('install-check: a settings.json hardlinked into another account is replaced, and that account follows', (t) => {
+  // Where symbolic links are refused, a linked account's settings.json is a second name of the
+  // primary's. Here the link was made by hand: no manifest records it, the account folder does.
+  const h = buildHome({ codex: false, agents: false });
+  t.after(() => rmrf(h.root));
+  const P = path.join(h.claude, 'settings.json');
+  const S = path.join(h.acc, 'settings.json');
+  const original = read(P);
+  fs.rmSync(S);
+  fs.linkSync(P, S);
+  const r = acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.notEqual(read(P), original);
+  assert.equal(read(S), read(P), 'the other account no longer shows the same bytes');
+  assert.equal(fs.statSync(P).nlink, 2, 'the two names are no longer one file');
+  assert.equal(String(fs.statSync(P, { bigint: true }).ino), String(fs.statSync(S, { bigint: true }).ino));
+  assert.equal(sessionStart(S).length, 1);
+  for (const dir of [h.claude, h.acc]) assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('.nhd-')), [], 'a temp name was left behind');
+  assert.ok(!exists(path.join(h.sync, 'recovery')), 'the record of a finished write was left behind');
+  assert.equal(acc(h.home, ['uninstall-check', '--yes']).code, 0);
+  assert.deepEqual([read(P), read(S), fs.statSync(P).nlink], [original, original, 2], 'uninstall keeps the link too');
+});
+
+test('install-check: a settings.json with names nobody recorded is refused, with the count, and left alone', (t) => {
+  const h = buildHome({ second: false, codex: false, agents: false });
+  t.after(() => rmrf(h.root));
+  const settings = path.join(h.claude, 'settings.json');
+  const original = read(settings);
+  // Two more names of the same file, outside every account: a mirror kept by hand.
+  const one = path.join(h.root, 'mirror', 'settings.json');
+  const two = path.join(h.root, 'mirror', 'hard.json');
+  fs.mkdirSync(path.dirname(one));
+  fs.linkSync(settings, one);
+  fs.linkSync(settings, two);
+  const r = acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']);
+  assert.equal(r.code, 1);
+  assert.deepEqual({ ok: r.json.ok, refused: r.json.refused, file: r.json.file, unknownNames: r.json.unknownNames }, { ok: false, refused: true, file: '~/.claude/settings.json', unknownNames: 2 });
+  assert.equal(r.json.error, 'settings.json: the file has 2 other names (hardlinks) that this tool has no record of; replacing it would leave them behind with the old content, so nothing was written. Remove them or turn them into symbolic links, then run this again');
+  assert.deepEqual([read(settings), read(one), read(two), fs.statSync(settings).nlink], [original, original, original, 3]);
+  assert.ok(!exists(path.join(h.sync, 'backups')), 'a refused install left a backup run behind');
+  assert.equal(acc(h.home, ['diff', '--primary', 'claude-1']).json.syncInstalled, false);
+  // One name fewer is still one too many; with none left, the install goes through.
+  fs.rmSync(two);
+  const again = acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']);
+  assert.deepEqual([again.code, again.json.unknownNames], [1, 1]);
+  assert.match(again.json.error, /^settings\.json: the file has 1 other name \(hardlink\) that this tool has no record of; replacing it would leave it behind/);
+  fs.rmSync(one);
+  assert.equal(acc(h.home, ['install-check', '--yes', '--primary', 'claude-1']).code, 0);
+  assert.equal(sessionStart(settings).length, 1);
+  // Uninstall is held to the same rule, and only when it has something to write.
+  fs.linkSync(settings, one);
+  const installed = read(settings);
+  const un = acc(h.home, ['uninstall-check', '--yes']);
+  assert.deepEqual([un.code, un.json.refused, un.json.unknownNames], [1, true, 1]);
+  assert.deepEqual([read(settings), read(one)], [installed, installed]);
 });
 
 test('install-check: a settings file with a secret is not copied into the backups', (t) => {

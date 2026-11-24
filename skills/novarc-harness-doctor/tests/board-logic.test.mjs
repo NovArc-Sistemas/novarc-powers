@@ -17,7 +17,8 @@ const read = (...p) => fs.readFileSync(path.join(SKILL_DIR, ...p), 'utf8');
 const NAMES = ['ACTION_STATUS', 'DECIDABLE', 'PRIMARY_TARGET', 'REV_RE', 'quoteArg', 'decisionCommand', 'uuidFromBytes', 'revOf', 'makeDecision', 'cleanDecision',
   'latestPerTarget', 'groupsOfItems', 'overlayFor', 'effectiveOf', 'effectiveItems', 'decisionQueue',
   'parseRoute', 'routeKey', 'routeExists', 'routeToRestore', 'safeStore', 'triState', 'countOf', 'wasteGroups',
-  'FU_VERDICT_TONE', 'FU_CHECK_TONE', 'metricUnit', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail', 'itemHistory', 'historyLine'];
+  'FU_VERDICT_TONE', 'FU_CHECK_TONE', 'metricUnit', 'metricSubLabel', 'notMeasuredReason', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail',
+  'itemHistory', 'historyLine', 'carriedDecline', 'carriedLine', 'declinedBefore'];
 const L = new Function(`${read('templates', 'board', 'logic.js')}\nreturn { ${NAMES.join(', ')} };`)();
 
 const item = (id, status, extra = {}) => ({ id, harness: 'h', round: 1, severity: 'medium', class: 'none', status, ...extra });
@@ -189,6 +190,39 @@ test('the decision queue: groups with an open item first, then open items by sev
   assert.deepEqual(L.decisionQueue(state), [
     { kind: 'group', id: 'G-1' }, { kind: 'item', id: 'A-2' }, { kind: 'item', id: 'B-1' }, { kind: 'item', id: 'B-2' },
   ]);
+});
+
+test('the decision queue: what the user declined in an earlier review is asked after everything else', () => {
+  const last = (lastStatus) => ({ history: { firstSeenAt: T1, times: 1, lastStatus } });
+  const items = [
+    item('A-1', 'open', { severity: 'critical', ...last('declined') }), // back with another proposal: last, whatever its severity
+    item('A-2', 'open', { severity: 'low' }),
+    item('A-3', 'open', { severity: 'high', ...last('deferred') }), // seen before, never declined: in its usual place
+    item('A-4', 'open', { severity: 'medium', ...last('declined') }),
+    item('A-5', 'open', { severity: 'medium', previous: { run: 'r', item: 'A-5' } }), // a link alone changes nothing
+    item('A-6', 'open', { severity: 'critical', round: 2, ...last('declined') }),
+    item('A-7', 'declined', { severity: 'critical', ...last('declined'), carriedFrom: { run: 'r', item: 'A-7' } }), // kept declined: not asked at all
+    item('B-1', 'open', { severity: 'low', ...last('declined') }),
+    item('B-2', 'open', { severity: 'low' }),
+  ];
+  const ids = (state) => L.decisionQueue(state).map((e) => e.id);
+  // Never declined first, most severe first; then the ones declined before, in the same order among themselves.
+  assert.deepEqual(ids({ items }), ['A-3', 'A-5', 'A-2', 'B-2', 'A-1', 'A-6', 'A-4', 'B-1']);
+  // A group still comes first, and still covers its members, declined before or not.
+  assert.deepEqual(ids({ items, groups: [{ id: 'G-1', title: 't', round: 1, items: ['B-1', 'B-2'] }] }), ['G-1', 'A-3', 'A-5', 'A-2', 'A-1', 'A-6', 'A-4']);
+  // Without that history the order is the one it always was.
+  const plain = items.map((i) => { const c = { ...i }; delete c.history; return c; });
+  assert.deepEqual(ids({ items: plain }), ['A-1', 'A-6', 'A-3', 'A-4', 'A-5', 'A-2', 'B-1', 'B-2']);
+  assert.deepEqual([undefined, null, {}, { history: 'declined' }, { history: {} }, { history: { lastStatus: 'deferred' } }, { history: { lastStatus: 'declined' } }].map(L.declinedBefore),
+    [false, false, false, false, false, false, true]);
+
+  // The example has one: a medium finding that now waits behind the low ones.
+  const ex = JSON.parse(read('templates', 'state.example.json'));
+  const queue = ids(ex);
+  const again = ex.items.filter((i) => i.status === 'open' && L.declinedBefore(i)).map((i) => i.id);
+  assert.deepEqual(again, ['LOJA-103']);
+  assert.equal(queue[queue.length - 1], 'LOJA-103');
+  assert.ok(queue.indexOf('LOJA-302') < queue.indexOf('LOJA-103'), 'a low finding never declined comes before it');
 });
 
 test('parseRoute reads every route the page writes, and anything else is the overview', () => {
@@ -393,6 +427,53 @@ test('the history of an item is one line; a previous link alone says nothing', (
   }
 });
 
+test('a decline kept from an earlier review says so in plain words, with the note of that decision', () => {
+  const history = { firstSeenAt: '2026-09-14T15:05:00Z', times: 2, lastStatus: 'declined', lastDecisionAt: '2026-10-18T15:31:00Z', lastNote: ' Only I use that profile. ' };
+  const kept = { status: 'declined', previous: { run: 'r', item: 'A-1' }, carriedFrom: { run: 'r', item: 'A-1' }, history };
+  assert.deepEqual(L.carriedDecline(kept), { at: '2026-10-18T15:31:00Z', note: 'Only I use that profile.' });
+  const say = (item, lang = 'en', status) => L.carriedLine(L.carriedDecline(item, status), STRINGS[lang], FMT);
+  assert.equal(say(kept), 'Decline kept from the review of 2026-10-18: the same proposal came back. Your note then: Only I use that profile.');
+  assert.equal(say(kept, 'pt'), 'Recusa mantida da revisão de 2026-10-18: a mesma proposta voltou. Sua nota na época: Only I use that profile.');
+  // Without a date or a note in the records the sentence stays true and says less.
+  assert.equal(say({ ...kept, history: { lastStatus: 'declined' } }), 'Decline kept from an earlier review: the same proposal came back.');
+  assert.equal(say({ ...kept, history: undefined }, 'pt'), 'Recusa mantida de uma revisão anterior: a mesma proposta voltou.');
+  assert.equal(say({ ...kept, history: { ...history, lastNote: '  ' } }), 'Decline kept from the review of 2026-10-18: the same proposal came back.');
+  // Only a declined item carries one: not an item without the field, and not one the user has since decided otherwise.
+  for (const none of [undefined, {}, { status: 'declined', history }, { ...kept, status: 'open' }, { ...kept, carriedFrom: 'r' }]) assert.equal(L.carriedDecline(none), null);
+  assert.equal(L.carriedDecline(kept, 'approved'), null, 'the status the page shows wins over the one in the state');
+  assert.deepEqual(L.carriedDecline({ ...kept, status: 'open' }, 'declined'), { at: '2026-10-18T15:31:00Z', note: 'Only I use that profile.' });
+
+  // The history line then leaves the last decision to that sentence.
+  const hist = L.itemHistory(kept);
+  assert.equal(L.historyLine(hist, STRINGS.en, FMT, true), 'First seen on 2026-09-14 · seen in 2 earlier reviews');
+  assert.equal(L.historyLine(hist, STRINGS.en, FMT), 'First seen on 2026-09-14 · seen in 2 earlier reviews · declined on 2026-10-18: Only I use that profile.');
+  assert.equal(L.historyLine(L.itemHistory({ history: { lastStatus: 'declined' } }), STRINGS.en, FMT, true), '', 'nothing else to say');
+});
+
+test('a follow-up row: the base of a share, and why two numbers do not compare', () => {
+  const sub = (m, lang = 'en') => L.metricSubLabel(m, STRINGS[lang]);
+  assert.equal(sub({ metric: 'waste-share', base: 'weighted' }), 'percent of the spend, in relative cost');
+  assert.equal(sub({ metric: 'waste-share', base: 'raw' }), 'percent of the spend, in raw tokens');
+  assert.equal(sub({ metric: 'waste-share', base: 'weighted' }, 'pt'), 'por cento do gasto, em custo relativo');
+  assert.equal(sub({ metric: 'waste-share', base: 'raw' }, 'pt'), 'por cento do gasto, em tokens brutos');
+  // Without a base, or with one the board does not know, the sub-label is the unit alone, as before.
+  for (const m of [{ metric: 'waste-share' }, { metric: 'waste-share', base: 'toString' }, { metric: 'waste-share', base: null }]) assert.equal(sub(m), 'percent of the spend');
+  assert.deepEqual(['context-at-start', 'tool-output'].map((metric) => sub({ metric })), ['tokens per session', 'characters per session']);
+  assert.equal(sub({ metric: 'tool-output' }, 'pt'), 'caracteres por sessão');
+
+  const why = (m, lang = 'en') => L.notMeasuredReason(m, STRINGS[lang]);
+  const row = (reason, verdict = 'not-measured') => ({ metric: 'weighted-per-session', before: 181000, expected: null, after: 175000, verdict, reason });
+  assert.equal(why(row('weights-changed')), 'the price weights changed between the two reviews, so the relative cost cannot be compared');
+  assert.equal(why(row('no-common-base')), 'one review measured in relative cost and the other in raw tokens');
+  assert.equal(why(row('weights-changed'), 'pt'), 'os pesos de preço mudaram entre as duas revisões, então o custo relativo não é comparável');
+  assert.equal(why(row('no-common-base'), 'pt'), 'uma revisão mediu em custo relativo e a outra em tokens brutos');
+  // No reason, an unknown one, or a row that has a verdict: nothing is said.
+  for (const m of [row(undefined), row('constructor'), row('weights-changed', 'improved'), undefined]) assert.equal(why(m), null);
+  // Two numbers on different bases have no difference worth showing, whatever changePct the state carries.
+  assert.deepEqual(L.metricChange({ ...row('weights-changed'), changePct: -3.3 }), { pct: null, dir: null, tone: '' });
+  assert.deepEqual(L.metricChange(row(undefined)), { pct: null, dir: null, tone: '' });
+});
+
 test('every metric, verdict, check and reason of the schema has a label in both languages', () => {
   const schema = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
   const fu = schema.$defs.followUp.properties;
@@ -403,6 +484,8 @@ test('every metric, verdict, check and reason of the schema has a label in both 
     ['verdict', metricRow.verdict.enum, (T) => T.fu.verdict],
     ['check', fu.items.items.properties.check.enum, (T) => T.fu.check],
     ['reason', fu.sample.properties.reason.enum, (T) => T.fu.reason],
+    ['base of a share', metricRow.base.enum, (T) => T.fu.base],
+    ['reason a row is not measured', metricRow.reason.enum, (T) => T.fu.rowReason],
     ['carried status', fu.items.items.properties.status.enum, (T) => T.status],
     ['last status', schema.properties.items.items.properties.history.properties.lastStatus.enum, (T) => T.hist.status],
   ];
@@ -418,6 +501,8 @@ test('every metric, verdict, check and reason of the schema has a label in both 
     assert.deepEqual(Object.keys(STRINGS[lang].fu.metric).sort(), [...schema.$defs.metric.enum].sort());
     assert.deepEqual(Object.keys(STRINGS[lang].fu.verdict).sort(), [...metricRow.verdict.enum].sort());
     assert.deepEqual(Object.keys(STRINGS[lang].fu.check).sort(), [...fu.items.items.properties.check.enum].sort());
+    assert.deepEqual(Object.keys(STRINGS[lang].fu.base).sort(), [...metricRow.base.enum].sort());
+    assert.deepEqual(Object.keys(STRINGS[lang].fu.rowReason).sort(), [...metricRow.reason.enum].sort());
     // A waste kind reads the same in the follow-up table as in the list of measured waste.
     for (const [kind, text] of Object.entries(STRINGS[lang].waste)) assert.equal(STRINGS[lang].fu.metric[`waste:${kind}`], text, `${lang} waste:${kind}`);
   }

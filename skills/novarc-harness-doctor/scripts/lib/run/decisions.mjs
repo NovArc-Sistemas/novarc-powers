@@ -23,6 +23,7 @@ import { isDateTime } from './schema.mjs';
 import { loadFindings, loadItems, loadStatus, resolveGroups, withGroupRevs, appendLog } from './model.mjs';
 import { REV_RE, DECISION_STATUSES, builtRevs } from './rev.mjs';
 import { hasCredential, CREDENTIAL_HINT } from './secrets.mjs';
+import { maskEmails } from './prose.mjs';
 import { refreshRecords } from './history.mjs';
 
 export const ACTIONS = ['approve', 'decline', 'defer', 'ask'];
@@ -119,6 +120,18 @@ export function extractDecisions(json) {
 }
 
 /**
+ * A file of an export as an answer may name it: its base name, without control characters, with
+ * an e-mail address masked, at most 80 characters. A name that looks like a credential is not
+ * repeated at all: the file is named by its place among the JSON files of the directory, in name
+ * order. A file name is data like any other, and it is printed.
+ */
+function ingestSource(name, position) {
+  const base = path.basename(String(name)).replace(/[\u0000-\u001f\u007f]/g, '');
+  if (hasCredential(base)) return `file #${position} (its name is withheld: it looks like a credential)`;
+  return `file ${maskEmails(base.length > 80 ? `${base.slice(0, 79)}…` : base)}`;
+}
+
+/**
  * `--ingest <directory>`: the shape an Artifact database export gives, one JSON file per
  * document, named after the document id (which is the target). Files that are not `.json` are
  * ignored; one that cannot be read or parsed is reported and the rest is still taken in.
@@ -131,7 +144,7 @@ export function readIngestDir(dir) {
   const out = { entries: [], sources: [], rejected: [], files: 0, ignored: 0 };
   for (const name of names) {
     if (!/\.json$/i.test(name)) { out.ignored++; continue; }
-    const source = `file ${name.slice(0, 120)}`;
+    const source = ingestSource(name, out.files + 1);
     if (out.files >= MAX_INGEST_FILES) { out.rejected.push({ source: 'directory', reason: `more than ${MAX_INGEST_FILES} JSON files; the rest was not read` }); break; }
     out.files++;
     let json;
@@ -140,7 +153,7 @@ export function readIngestDir(dir) {
       const st = fs.statSync(file);
       if (!st.isFile()) { out.rejected.push({ source, reason: 'cannot be read: not a file' }); continue; }
       if (st.size > MAX_INGEST_FILE_BYTES) { out.rejected.push({ source, reason: 'larger than 1 MB' }); continue; }
-      json = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+      json = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
     } catch (e) {
       // Never the parser's message: it quotes the input.
       out.rejected.push({ source, reason: e instanceof SyntaxError ? 'not valid JSON' : 'cannot be read' });
@@ -402,7 +415,7 @@ export function decisions(ctx, ingestPath) {
     return { ...report, ingest: { files: got.files, ignored: got.ignored } };
   }
   let json;
-  try { json = JSON.parse(fs.readFileSync(ingestPath, 'utf8').replace(/^﻿/, '')); } catch (e) {
+  try { json = JSON.parse(fs.readFileSync(ingestPath, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {
     throw new RunError(e && e.code === 'ENOENT' ? '--ingest file not found' : '--ingest file is not valid JSON');
   }
   return takeIn(ctx, extractDecisions(json), 'board');

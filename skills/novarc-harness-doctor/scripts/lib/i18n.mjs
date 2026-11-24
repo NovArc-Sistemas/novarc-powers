@@ -740,6 +740,13 @@ const en = {
       'chars/session': 'characters per session',
       percent: 'percent of the spend',
     },
+    // The base both numbers of the wasted share are on, added to its unit.
+    base: { weighted: 'in relative cost', raw: 'in raw tokens' },
+    // Why a row reads "not measured" although both reviews have a number.
+    rowReason: {
+      'weights-changed': 'the price weights changed between the two reviews, so the relative cost cannot be compared',
+      'no-common-base': 'one review measured in relative cost and the other in raw tokens',
+    },
     verdict: {
       confirmed: 'confirmed',
       partial: 'partly confirmed',
@@ -776,6 +783,13 @@ const en = {
     first: 'first seen on {date}',
     times: { one: 'seen in 1 earlier review', other: 'seen in {n} earlier reviews' },
     lastOn: '{status} on {date}',
+    // A decline the user made on this exact proposal in an earlier review, kept without asking again.
+    carried: 'Decline kept from the review of {date}: the same proposal came back.',
+    carriedNoDate: 'Decline kept from an earlier review: the same proposal came back.',
+    carriedNote: 'Your note then: {note}',
+    keptChip: 'decline kept',
+    // An open finding the user declined before: it came back with another proposal.
+    declinedBefore: 'declined before',
     status: {
       open: 'left open',
       approved: 'approved',
@@ -1519,6 +1533,11 @@ const pt = {
       'chars/session': 'caracteres por sessão',
       percent: 'por cento do gasto',
     },
+    base: { weighted: 'em custo relativo', raw: 'em tokens brutos' },
+    rowReason: {
+      'weights-changed': 'os pesos de preço mudaram entre as duas revisões, então o custo relativo não é comparável',
+      'no-common-base': 'uma revisão mediu em custo relativo e a outra em tokens brutos',
+    },
     verdict: {
       confirmed: 'confirmado',
       partial: 'confirmado em parte',
@@ -1554,6 +1573,11 @@ const pt = {
     first: 'visto pela primeira vez em {date}',
     times: { one: 'apareceu em 1 revisão anterior', other: 'apareceu em {n} revisões anteriores' },
     lastOn: '{status} em {date}',
+    carried: 'Recusa mantida da revisão de {date}: a mesma proposta voltou.',
+    carriedNoDate: 'Recusa mantida de uma revisão anterior: a mesma proposta voltou.',
+    carriedNote: 'Sua nota na época: {note}',
+    keptChip: 'recusa mantida',
+    declinedBefore: 'recusado antes',
     status: {
       open: 'ficou em aberto',
       approved: 'aprovado',

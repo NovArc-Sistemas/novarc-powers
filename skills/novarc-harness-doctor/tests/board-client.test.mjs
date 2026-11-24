@@ -922,3 +922,224 @@ test('a state without any of the new fields renders exactly the sections it rend
   assert.deepEqual(measured.view.querySelectorAll('section').map((s) => s.getAttribute('class')), ['sec first']);
   assert.equal(measured.view.querySelector('section .sec-k').textContent, 'Impact');
 });
+
+// ---------------------------------------------------------------------------------------------
+// A decline that was kept, a finding declined before, and what a follow-up row is measured on
+// ---------------------------------------------------------------------------------------------
+
+const KEPT_NOTE = 'The import is fine on my other machine.';
+/**
+ * reviewedBefore, where the decline of U1-201 comes from the last review: the same proposal came
+ * back, so the user was not asked again (`carriedFrom`). `mutate(item, state, u1FollowUp, shopFollowUp)`.
+ */
+function keptPage(lang, hash, mutate) {
+  const state = reviewedBefore(lang, (u, s, st) => {
+    const kept = st.items.find((i) => i.id === 'U1-201');
+    kept.previous = { run: PREV.runId, item: 'U1-201' };
+    kept.history = { firstSeenAt: '2025-11-01T12:00:00Z', times: 2, lastStatus: 'declined', lastDecisionAt: '2025-12-01T12:20:00Z', lastNote: KEPT_NOTE };
+    kept.carriedFrom = { run: PREV.runId, item: 'U1-201' };
+    if (mutate) mutate(kept, st, u, s);
+  });
+  return load(board(state, { lang: lang || 'en' }), { hash });
+}
+/** The chips in the header of a case: severity, round, class, then the status and what goes beside it. */
+const headOf = (page, id) => tagsOf(page.view.querySelector(`#case-${id} .chead`));
+
+test('a decline kept from an earlier review says so with the earlier note, and can still be changed', async () => {
+  const sentence = `Decline kept from the review of ${day('2025-12-01T12:20:00Z')}: the same proposal came back. Your note then: ${KEPT_NOTE}`;
+  const seen = `First seen on ${day('2025-11-01T12:00:00Z')} · seen in 2 earlier reviews`;
+  const page = keptPage('en', '#/h/u1/diagnosis?item=U1-201');
+  const lines = (p) => p.view.querySelectorAll('#case-U1-201 .chist').map((x) => [x.textContent, x.getAttribute('class')]);
+  // In the case: its own line under the finding, then the history without that decision.
+  assert.deepEqual(lines(page), [[sentence, 'chist kept'], [seen, 'chist']]);
+  assert.deepEqual(page.view.querySelector('#case-U1-201').children.slice(0, 5).map((c) => c.getAttribute('class')), ['chead', 'ctitle', 'cfind', 'chist kept', 'chist']);
+  // Beside the status, wherever the status is shown: the case, the margin card in the file, a group's member list.
+  assert.deepEqual(headOf(page, 'U1-201').slice(-2), [['declined', 'tag st '], ['decline kept', 'tag dashed']]);
+  assert.equal(page.view.querySelector('#case-U1-201 .chead .tag.dashed').getAttribute('title'), sentence);
+  page.go('#/h/u1/file/fu1-1');
+  const margin = page.view.querySelectorAll('.ann').find((a) => a.querySelector('.cid').textContent === 'U1-201');
+  assert.deepEqual(tagsOf(margin).map((t) => t[0]), ['declined', 'decline kept']);
+  const grouped = keptPage('en', '#/overview', (kept, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 2, items: ['U1-201', 'U1-401'] }]; });
+  assert.deepEqual(tagsOf(grouped.view.querySelector('.mlist')).map((t) => t[0]), ['declined', 'decline kept']);
+
+  // It was not asked again: it is not in the decide queue.
+  const queue = keptPage('en', '#/decide/U1-201');
+  assert.equal(queue.view.querySelector('#case-U1-201'), null);
+  assert.equal(queue.view.querySelector('.dc-prog').textContent, '1 of 3');
+
+  // It stays decidable like any declined item: "change" opens the buttons again.
+  page.go('#/h/u1/diagnosis?item=U1-201');
+  assert.equal(page.view.querySelector('#case-U1-201 [data-fk="dec:U1-201:approve"]'), null);
+  page.press('chg:U1-201');
+  page.press('dec:U1-201:approve');
+  await page.settle();
+  assert.deepEqual(page.texts('.paste code'), ['run.mjs decide --run 20260110-ab12 --target U1-201 --action approve']);
+  // Decided otherwise now: the sentence and its chip go, and the history says what the last review left.
+  assert.deepEqual(lines(page), [[`${seen} · declined on ${day('2025-12-01T12:20:00Z')}: ${KEPT_NOTE}`, 'chist']]);
+  assert.deepEqual(headOf(page, 'U1-201').slice(-1), [['approved', 'tag st info']]);
+
+  const pt = keptPage('pt', '#/h/u1/diagnosis?item=U1-201');
+  assert.deepEqual(lines(pt).map((l) => l[0]), [
+    `Recusa mantida da revisão de ${day('2025-12-01T12:20:00Z', 'pt')}: a mesma proposta voltou. Sua nota na época: ${KEPT_NOTE}`,
+    `Visto pela primeira vez em ${day('2025-11-01T12:00:00Z', 'pt')} · apareceu em 2 revisões anteriores`,
+  ]);
+  assert.deepEqual(headOf(pt, 'U1-201').slice(-2).map((t) => t[0]), ['recusado', 'recusa mantida']);
+
+  // Records that say little: the sentence stays true and says less, and there is no second line.
+  const sparse = keptPage('en', '#/h/u1/diagnosis?item=U1-201', (kept) => { kept.history = { lastStatus: 'declined' }; });
+  assert.deepEqual(lines(sparse), [['Decline kept from an earlier review: the same proposal came back.', 'chist kept']]);
+  // Without the field the same item reads as it did before: a declined item with its history line.
+  const plain = keptPage('en', '#/h/u1/diagnosis?item=U1-201', (kept) => { delete kept.carriedFrom; });
+  assert.deepEqual(lines(plain), [[`${seen} · declined on ${day('2025-12-01T12:20:00Z')}: ${KEPT_NOTE}`, 'chist']]);
+  assert.deepEqual(headOf(plain, 'U1-201').slice(-1), [['declined', 'tag st ']]);
+});
+
+test('an open finding that was declined before is marked, and asked after the others', async () => {
+  // In reviewedBefore, U1-101 (critical) was declined in the last review and is open again.
+  const chips = [['open', 'tag st warn'], ['declined before', 'tag dashed']];
+  const page = pageOf('en', '#/h/u1/diagnosis?item=U1-101');
+  assert.deepEqual(headOf(page, 'U1-101').slice(-2), chips);
+  assert.deepEqual(headOf(page, 'U1-401').slice(-2), [['gate', 'tag'], ['open', 'tag st warn']], 'a finding the records do not know has no chip');
+  assert.equal(page.texts('#case-U1-101 .chist').length, 1, 'the history line already says when and with what note');
+
+  // The queue: the findings never declined first, most severe first; the critical one waits at the end.
+  const progress = (p) => p.view.querySelector('.dc-prog').textContent;
+  const decide = pageOf('en', '#/decide');
+  assert.ok(decide.view.querySelector('#case-U1-401') && !decide.view.querySelector('#case-U1-101'));
+  assert.equal(progress(decide), '1 of 3');
+  decide.go('#/decide/SHOP-501');
+  assert.equal(progress(decide), '2 of 3');
+  decide.go('#/decide/U1-101');
+  assert.equal(progress(decide), '3 of 3');
+  assert.deepEqual(headOf(decide, 'U1-101').slice(-2), chips);
+  // "Decide the next N" opens the same first one, and deciding walks the queue in that order.
+  decide.go('#/overview');
+  const next = decide.root.querySelector('[data-fk="tray:go"]');
+  assert.deepEqual([next.textContent, next.getAttribute('href')], ['Decide the next 3', '#/decide']);
+  decide.go('#/decide');
+  decide.press('dec:U1-401:approve');
+  assert.ok(decide.view.querySelector('#case-SHOP-501'), 'then the medium one');
+  decide.press('dec:SHOP-501:defer');
+  assert.ok(decide.view.querySelector('#case-U1-101'), 'then the one declined before');
+  decide.press('dec:U1-101:approve');
+  await decide.settle();
+  assert.equal(decide.view.querySelector('.dc-prog'), null, 'nothing left: the summary');
+  // Once decided here it is no longer open, so the chip goes.
+  decide.go('#/h/u1/diagnosis?item=U1-101');
+  assert.deepEqual(headOf(decide, 'U1-101').slice(-1), [['approved', 'tag st info']]);
+
+  const pt = pageOf('pt', '#/decide/U1-101');
+  assert.deepEqual(headOf(pt, 'U1-101').slice(-2).map((t) => t[0]), ['aberto', 'recusado antes']);
+  assert.equal(pt.root.querySelector('[data-fk="tray:go"]').textContent, 'Decidir as próximas 3');
+
+  // A group still comes first and covers its members, declined before or not.
+  const grouped = pageOf('en', '#/decide', (u, s, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 1, items: ['U1-101', 'U1-401'] }]; });
+  assert.equal(progress(grouped), '1 of 2');
+  assert.equal(grouped.view.querySelector('.case .cid').textContent, 'G-1');
+
+  // Left for later last time, not declined: its usual place at the head of the queue, and no chip.
+  const usual = pageOf('en', '#/decide', (u, s, st) => { st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred'; });
+  assert.ok(usual.view.querySelector('#case-U1-101'));
+  assert.equal(progress(usual), '1 of 3');
+  assert.deepEqual(headOf(usual, 'U1-101').slice(-2), [['secret', 'tag'], ['open', 'tag st warn']]);
+});
+
+test('follow-up rows: the base of the wasted share, and why two numbers are not compared', () => {
+  const rows = (lang, mutate, hash = '#/h/u1/impact') => cellsOf(pageOf(lang, hash, mutate).view.querySelector('#since table'));
+  const add = (u) => {
+    u.metrics.find((m) => m.metric === 'waste-share').base = 'weighted';
+    u.metrics.push({ metric: 'weighted-per-session', before: 181000, expected: null, after: 175000, changePct: -3.3, verdict: 'not-measured', reason: 'weights-changed' });
+    u.metrics.push({ metric: 'waste:loop', before: 900, expected: null, after: 1200, changePct: null, verdict: 'not-measured', reason: 'no-common-base' });
+  };
+  const en = rows('en', add);
+  // The sub-label of the share says which base both numbers are on.
+  assert.deepEqual(en[4], [['Share of the spend wasted', 'percent of the spend, in relative cost'], ['2.6%'], ['-'], ['2%'], ['-23.1%'], ['improved']]);
+  // Both reviews have a number, on bases that do not compare: both are shown, no difference is, and the row says why.
+  assert.deepEqual(en[6], [['Relative cost', 'tokens per session'], ['181k'], ['-'], ['175k'], ['-'],
+    ['not measured', 'the price weights changed between the two reviews, so the relative cost cannot be compared']]);
+  assert.deepEqual(en[7], [['Identical calls repeated in a row', 'tokens per session'], ['900'], ['-'], ['1.2k'], ['-'],
+    ['not measured', 'one review measured in relative cost and the other in raw tokens']]);
+  // A row that is not measured because one side is missing says nothing more, as before.
+  assert.deepEqual(en[5], [['Shell output read by the agent', 'characters per session'], ['96k'], ['-'], ['not measured'], ['-'], ['not measured']]);
+
+  const pt = rows('pt', add);
+  assert.deepEqual(pt[4][0], ['Parcela do gasto que foi à toa', 'por cento do gasto, em custo relativo']);
+  assert.deepEqual(pt[6][5], ['sem medição', 'os pesos de preço mudaram entre as duas revisões, então o custo relativo não é comparável']);
+  assert.deepEqual(pt[7][5], ['sem medição', 'uma revisão mediu em custo relativo e a outra em tokens brutos']);
+  assert.equal(rows('en', (u) => { u.metrics[4].base = 'raw'; })[4][0][1], 'percent of the spend, in raw tokens');
+  assert.equal(rows('pt', (u) => { u.metrics[4].base = 'raw'; })[4][0][1], 'por cento do gasto, em tokens brutos');
+
+  // A reason only explains a row that is not measured; while the sample is too small it goes with the verdict.
+  assert.deepEqual(rows('en', (u) => { u.metrics[0].reason = 'weights-changed'; })[0][5], ['confirmed']);
+  assert.deepEqual(rows('en', (u, s) => { Object.assign(s.metrics[0], { verdict: 'not-measured', reason: 'weights-changed' }); }, '#/h/fixture-shop/impact')[0].slice(4), [['-'], ['not enough data yet']]);
+  // Without the two fields a row reads as it did: the unit alone, and a verdict with nothing under it.
+  const plain = rows('en');
+  assert.deepEqual(plain[4], [['Share of the spend wasted', 'percent of the spend'], ['2.6%'], ['-'], ['2%'], ['-23.1%'], ['improved']]);
+  assert.ok(plain.every((r) => r[5].length === 1));
+});
+
+test('a state without carriedFrom, a declined-before finding, base or reason renders as before', () => {
+  const NEW_WORDS = (T) => [T.hist.keptChip, T.hist.declinedBefore, T.hist.carriedNoDate.slice(0, 14), T.fu.rowReason['weights-changed'], T.fu.rowReason['no-common-base']];
+  const states = [
+    ['en', fixture()],
+    ['pt', withUnknowns('pt')],
+    // A second review where nothing was declined before: U1-101 was left for later.
+    ['en', reviewedBefore('en', (u, s, st) => { st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred'; })],
+  ];
+  for (const [lang, state] of states) {
+    applyScores(state);
+    const page = load(board(state, { lang }));
+    const routes = ['#/overview', '#/decide', '#/decide/summary'];
+    for (const h of state.harnesses) routes.push(`#/h/${h.id}`, `#/h/${h.id}/diagnosis`, `#/h/${h.id}/impact`);
+    for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`, `#/decide/${i.id}`);
+    for (const f of state.files) routes.push(`#/h/${f.harness}/file/${f.id}`);
+    for (const r of routes) {
+      page.go(r);
+      assert.equal(page.root.querySelectorAll('.kept').length, 0, `${lang} ${r}`);
+      for (const word of NEW_WORDS(STRINGS[lang])) assert.ok(!page.view.textContent.includes(word), `${lang} ${r}: ${word}`);
+    }
+  }
+  // And the queue is in the order it always had: most severe first.
+  const page = load(board(states[2][1]), { hash: '#/decide' });
+  assert.ok(page.view.querySelector('#case-U1-101'));
+  assert.equal(page.view.querySelector('.dc-prog').textContent, '1 of 3');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The board that leaves the machine draws no e-mail address
+// ---------------------------------------------------------------------------------------------
+
+test('a published board draws no e-mail address, and the change that quotes one is still in its file', () => {
+  const OWNER = 'alice.smith@example.com';
+  const BACKUP = 'bo@mail.example.org';
+  const state = fixture();
+  const file = state.files.find((f) => f.id === 'fu1-1');
+  file.content += `\nOwner: ${OWNER}\nBackup contact: ${BACKUP}\nPinned: react@18.3.1 from git@host.example:owner/repo\n`;
+  state.items.find((i) => i.id === 'U1-203').changes.push({ file: 'fu1-1', path: file.path, before: `Owner: ${OWNER}`, after: `Owner: ${OWNER}, on call`, why: `What ${OWNER} asked for.` });
+  applyScores(state);
+  const routes = ['#/overview', '#/decide', '#/h/u1', '#/h/u1/diagnosis', '#/h/u1/file/fu1-1', '#/h/u1/file/fu1-1?at=U1-203.1', '#/h/fixture-shop/file/fshop-1'];
+  for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`);
+  /** Everything a route puts on the page: its text, and the texts kept in attributes. */
+  const drawn = (page) => `${page.document.body.textContent}\n${page.document.body.querySelectorAll('[title]').map((n) => n.getAttribute('title')).join('\n')}`;
+  const lines = (page) => page.view.querySelectorAll('.fv-code.hunk .tx').map((n) => n.textContent);
+
+  const published = load(board(state, { channel: 'artifact' }));
+  for (const r of routes) {
+    published.go(r);
+    for (const address of [OWNER, BACKUP]) assert.ok(!drawn(published).includes(address), `${r}: ${address}`);
+  }
+  // The file is drawn with the addresses masked, and the change sits in it, on its line.
+  published.go('#/h/u1/file/fu1-1');
+  assert.ok(lines(published).includes('Owner: al…@example.com') && lines(published).includes('Owner: al…@example.com, on call'), lines(published).join(' | '));
+  assert.ok(published.view.textContent.includes('Backup contact: b…@mail.example.org'));
+  assert.ok(published.view.textContent.includes('What al…@example.com asked for.'));
+  assert.ok(published.view.textContent.includes('react@18.3.1 from git@host.example:owner/repo'), 'what only looks like an address is left as written');
+  assert.equal(published.view.querySelectorAll('.fv-sec').length, 0, 'no change is left outside the file');
+
+  // The same state on a board that stays on the machine is drawn as it is on disk, at the same place.
+  const local = load(board(state, { channel: 'file' }), { hash: '#/h/u1/file/fu1-1' });
+  assert.ok(lines(local).includes(`Owner: ${OWNER}`) && lines(local).includes(`Owner: ${OWNER}, on call`));
+  assert.ok(local.view.textContent.includes(`Backup contact: ${BACKUP}`));
+  assert.equal(lines(local).length, lines(published).length);
+  assert.equal(local.view.querySelectorAll('.ln').length, published.view.querySelectorAll('.ln').length, 'line for line the same file');
+});

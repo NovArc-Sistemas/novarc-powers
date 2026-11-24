@@ -13,6 +13,7 @@
 // and the kind of credential.
 import { scanText, redactText } from '../../secret-scan.mjs';
 import { maskText } from '../snapshot/mask.mjs';
+import { setOwn } from './store.mjs';
 
 /** What to write instead; appended to every refusal. */
 export const CREDENTIAL_HINT = 'write it masked (the first 4 characters, … and the length, as the snapshot shows it) or as a placeholder such as <token>';
@@ -88,7 +89,7 @@ export function maskDeep(value, hits = [], at = '') {
     for (const [k, v] of Object.entries(value)) {
       const key = maskCredentials(k);
       if (key !== k) hits.push(`${at}/${MASKED_SEGMENT}`);
-      out[key] = maskDeep(v, hits, `${at}/${key !== k ? MASKED_SEGMENT : segment(k)}`);
+      setOwn(out, key, maskDeep(v, hits, `${at}/${key !== k ? MASKED_SEGMENT : segment(k)}`));
     }
     return out;
   }

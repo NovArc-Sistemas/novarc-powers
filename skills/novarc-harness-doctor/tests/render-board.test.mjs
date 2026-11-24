@@ -4,9 +4,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FIXTURES, tmpDir, rmrf, runScript } from './helpers.mjs';
-import { validateState, SCHEMA_PATH, FONTS_URL, HOMEPAGE_URL, scoreHarness, applyScores, renderHtml, renderMarkdown, embedJson, embedJsonLines, decideCommand, SHELLS, shellOf } from '../scripts/render-board.mjs';
+import {
+  validateState, SCHEMA_PATH, FONTS_URL, HOMEPAGE_URL, scoreHarness, applyScores, renderHtml, renderMarkdown, embedJson, embedJsonLines, decideCommand, SHELLS, shellOf,
+  emailsIn, maskStateEmails, UNPLACED_WHEN_MASKED,
+} from '../scripts/render-board.mjs';
 import { anchorState } from '../scripts/lib/anchors.mjs';
 import { STRINGS } from '../scripts/lib/i18n.mjs';
+import { maskEmails } from '../scripts/lib/run/prose.mjs';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DATA_RE = /<script type="application\/json" id="board-data">([\s\S]*?)<\/script>/;
@@ -791,6 +795,84 @@ test('board.md: "Since the last review" per harness, with the metric table and t
   assert.ok(!bare.includes('Score at that review') && !bare.includes('fix still in place'));
 });
 
+test('board.md: a decline that was kept, a finding declined before, and what a row is measured on', () => {
+  const build = (mutate) => {
+    const st = reviewedBefore(fixture());
+    const prev = st.harnesses[0].followUp.of;
+    // U1-201 is declined in the fixture: here that decline comes from the last review, kept because the same proposal came back.
+    const kept = st.items.find((i) => i.id === 'U1-201');
+    kept.previous = { run: prev.runId, item: 'U1-201' };
+    kept.history = { firstSeenAt: '2025-11-01T09:00:00Z', times: 2, lastStatus: 'declined', lastDecisionAt: '2025-12-01T09:20:00Z', lastNote: 'The import is fine on my other machine.' };
+    kept.carriedFrom = { run: prev.runId, item: 'U1-201' };
+    const fu = st.harnesses[0].followUp;
+    fu.metrics.find((m) => m.metric === 'waste-share').base = 'weighted';
+    fu.metrics.push({ metric: 'weighted-per-session', before: 181000, expected: null, after: 175000, changePct: null, verdict: 'not-measured', reason: 'weights-changed' });
+    if (mutate) mutate(st, fu);
+    assert.deepEqual(validateState(st, schema()), []);
+    applyScores(st);
+    return st;
+  };
+  const md = renderMarkdown(build(), 'en');
+  const has = (text, s) => assert.ok(text.includes(s), `board.md has "${s}"`);
+  for (const s of [
+    // 1. The decline that was kept: beside the status, and in words with the note of that decision.
+    '| U1-201 | high | declined (decline kept) | reversible | active | Broken import in CLAUDE.md |\n',
+    '  - History: Decline kept from the review of 2025-12-01: the same proposal came back. Your note then: The import is fine on my other machine. · First seen on 2025-11-01 · seen in 2 earlier reviews\n',
+    // 2. The open finding that was declined before (U1-101 in this state): marked, and asked after the others.
+    '| U1-101 | critical | open (declined before) | secret | active | Token inline in helper script |\n',
+    '- **U1-101** (critical, Claude Code account 1, declined before) Token inline in helper script\n',
+    '  - History: First seen on 2025-11-01 · seen in 2 earlier reviews · declined on 2025-12-01: The script is going away.\n',
+    // 3. The base of the share, and why a row with two numbers is not compared.
+    '| Share of the spend wasted (percent of the spend, in relative cost) | 2.6% | - | 2% | -23.1% | improved |\n',
+    '| Relative cost (tokens per session) | 181k | - | 175k | - | not measured: the price weights changed between the two reviews, so the relative cost cannot be compared |\n',
+    '| Shell output read by the agent (characters per session) | 96k | - | not measured | - | not measured |\n',
+  ]) has(md, s);
+  const asked = (text, heading, next) => [...text.slice(text.indexOf(heading), text.indexOf(next)).matchAll(/^- \*\*([A-Z0-9]+-[0-9]+)\*\* \(/gm)].map((m) => m[1]);
+  assert.deepEqual(asked(md, '## Pending decisions', '## Claude Code account 1'), ['U1-401', 'SHOP-501', 'U1-101'], 'the critical one comes last: it was declined before');
+  assert.ok(!md.includes('--target U1-201 '), 'a kept decline is not among the pending decisions');
+
+  const pt = renderMarkdown(build(), 'pt');
+  for (const s of [
+    '| U1-201 | alta | recusado (recusa mantida) |',
+    '  - Histórico: Recusa mantida da revisão de 2025-12-01: a mesma proposta voltou. Sua nota na época: The import is fine on my other machine. · Visto pela primeira vez em 2025-11-01 · apareceu em 2 revisões anteriores\n',
+    '| U1-101 | crítica | aberto (recusado antes) |',
+    'Claude Code account 1, recusado antes) Token inline in helper script',
+    '| Parcela do gasto que foi à toa (por cento do gasto, em custo relativo) | 2,6% | - | 2% | -23,1% | melhorou |',
+    '| Custo relativo (tokens por sessão) | 181 mil | - | 175 mil | - | sem medição: os pesos de preço mudaram entre as duas revisões, então o custo relativo não é comparável |',
+  ]) has(pt, s);
+  for (const text of [md, pt]) assert.ok(!/[–—]|\p{Extended_Pictographic}/u.test(text), 'no dash or emoji');
+
+  // The other base, the other reason, and a kept decline the records say little about.
+  const other = renderMarkdown(build((st, fu) => {
+    fu.metrics.find((m) => m.metric === 'waste-share').base = 'raw';
+    fu.metrics[fu.metrics.length - 1].reason = 'no-common-base';
+    st.items.find((i) => i.id === 'U1-201').history = { lastStatus: 'declined' };
+  }), 'en');
+  has(other, '| Share of the spend wasted (percent of the spend, in raw tokens) |');
+  has(other, '| not measured: one review measured in relative cost and the other in raw tokens |');
+  has(other, '  - History: Decline kept from an earlier review: the same proposal came back.\n');
+  // While the sample is too small the reason is left out with the verdict it explains.
+  const waiting = renderMarkdown(build((st, fu) => { fu.sample = { enough: false, reason: 'too-few-days' }; }), 'en');
+  has(waiting, '| Relative cost (tokens per session) | 181k | - | 175k | - | not enough data yet |\n');
+
+  // A state without these fields reads as it did: no chip beside a status, the usual order, the unit alone.
+  const plain = renderMarkdown(build((st, fu) => {
+    const kept = st.items.find((i) => i.id === 'U1-201');
+    delete kept.carriedFrom; delete kept.history; delete kept.previous;
+    st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred';
+    delete fu.metrics.find((m) => m.metric === 'waste-share').base;
+    fu.metrics.pop();
+  }), 'en');
+  for (const s of [
+    '| U1-201 | high | declined | reversible | active | Broken import in CLAUDE.md |\n',
+    '| U1-101 | critical | open | secret | active | Token inline in helper script |\n',
+    '- **U1-101** (critical, Claude Code account 1) Token inline in helper script\n',
+    '| Share of the spend wasted (percent of the spend) | 2.6% | - | 2% | -23.1% | improved |\n',
+  ]) has(plain, s);
+  assert.deepEqual(asked(plain, '## Pending decisions', '## Claude Code account 1'), ['U1-101', 'U1-401', 'SHOP-501']);
+  for (const word of ['decline kept', 'Decline kept', 'declined before', 'in relative cost', 'in raw tokens', 'price weights']) assert.ok(!plain.includes(word), word);
+});
+
 test('board.md: a state without any follow-up field says nothing new', () => {
   for (const [lang, words] of [['en', ['Since the last review', 'Earlier reviews', 'History:', 'Follow-up', 'Two periods are compared']], ['pt', ['Desde a última revisão', 'Revisões anteriores', 'Histórico:', 'Acompanha', 'dois períodos']]]) {
     const md = renderMarkdown(fixture(), lang);
@@ -909,9 +991,21 @@ test('the example renders as stored, and board.md carries its relative cost and 
       '| Trabalho que você precisou corrigir (tokens por sessão) | 21,5 mil | 18,5 mil | 24,5 mil | +14,4% | piorou |',
       '- **U1-206** Checklist de release carregado em toda sessão: desfeito · ~/.claude/CLAUDE.md · economia esperada 52 mil tokens · nesta revisão: U1-202',
       '- **LOJA-303** Guia de deploy descrevia um servidor desativado: o arquivo sumiu · ./docs/deploy.md',
+      // A decline kept from that review, an open finding that was declined before (asked last), and
+      // the two shares: one on relative cost in both reviews, one on bases that do not compare.
+      '| LOJA-104 | baixa | recusado (recusa mantida) | permissão | opcional do projeto | O perfil local opcional libera o deploy |',
+      '  - Histórico: Recusa mantida da revisão de 2026-10-18: a mesma proposta voltou. Sua nota na época: Só eu uso esse perfil, e de propósito. · Visto pela primeira vez em 2026-10-18 · apareceu em 1 revisão anterior',
+      '| LOJA-103 | média | aberto (recusado antes) | permissão | exemplo | O exemplo de configuração sugere liberar tudo |',
+      '- **LOJA-103** (média, loja-web, recusado antes) O exemplo de configuração sugere liberar tudo',
+      '| Parcela do gasto que foi à toa (por cento do gasto, em custo relativo) | 2,6% | - | 2% | -23,1% | melhorou |',
+      '| Parcela do gasto que foi à toa (por cento do gasto) | 3,9% | - | 1,7% | - | sem medição: uma revisão mediu em custo relativo e a outra em tokens brutos |',
       'A revisão de 2026-11-16, há 4 dias, contra o que foi medido desde então. 14 sessões desde então. Ainda sem dados suficientes: pronto para comparar em 2026-11-23.',
       '  - Histórico: Visto pela primeira vez em 2026-09-14 · apareceu em 2 revisões anteriores · deixado para depois em 2026-10-18: Depois de migrar o último projeto para npm.',
     ]) assert.ok(md.includes(s), `board.md has "${s}"`);
+    // Among the pending decisions, the finding declined before comes after every other one.
+    const pending = md.slice(md.indexOf('## Decisões pendentes'), md.indexOf('## Claude Code · conta 1'));
+    const asked = [...pending.matchAll(/^- \*\*([A-Z0-9]+-[0-9]+)\*\* \(/gm)].map((m) => m[1]);
+    assert.deepEqual(asked.slice(-2), ['LOJA-302', 'LOJA-103'], asked.join(' '));
     assert.ok(!md.includes('\u2014'));
   } finally { rmrf(dir); }
 });
@@ -967,7 +1061,8 @@ test('the example follow-up is internally consistent and exercises every kind of
   const round1 = (n) => Math.round(n * 10) / 10;
   const days = (from, to) => (Date.parse(to) - Date.parse(from)) / 86400000;
   const verdictOf = (m) => {
-    if (m.before === null || m.after === null) return 'not-measured';
+    // Missing on one side, or both there on bases that do not compare (the row then says why).
+    if (m.before === null || m.after === null || m.reason) return 'not-measured';
     const pct = (m.after - m.before) / m.before * 100;
     if (m.expected !== null) {
       const share = (m.before - m.after) / (m.before - m.expected);
@@ -1032,7 +1127,7 @@ test('the example follow-up is internally consistent and exercises every kind of
       const where = `${at} ${m.metric}`;
       assert.equal(m.verdict, verdictOf(m), `${where} verdict`);
       if (m.after !== null) assert.equal(m.after, measuredNow(h, m.metric), `${where} is what this run measured`);
-      if (m.before !== null && m.after !== null) assert.equal(m.changePct, round1((m.after - m.before) / m.before * 100), `${where} change`);
+      if (m.before !== null && m.after !== null && m.verdict !== 'not-measured') assert.equal(m.changePct, round1((m.after - m.before) / m.before * 100), `${where} change`);
       else assert.equal(m.changePct, null, where);
       if (m.expected === null) { assert.equal(m.items, undefined, where); continue; }
       assert.ok(m.items.length > 0 && m.expected < m.before, where);
@@ -1063,7 +1158,227 @@ test('the example follow-up is internally consistent and exercises every kind of
   for (const i of ex.items) assert.equal(Boolean(i.history), Boolean(i.previous), i.id);
   assert.ok(followed.some((h) => h.followUp.items.some((i) => i.check === 'reverted' && i.now)));
   assert.ok(ex.items.some((i) => i.history && i.history.lastNote && i.history.lastDecisionAt));
+  // A share says which base both numbers are on. Two numbers on different bases are not compared,
+  // and the row says why: that review of the project had no price weights, so no relative cost either.
+  const rowOf = (id, name) => ex.harnesses.find((h) => h.id === id).followUp.metrics.find((m) => m.metric === name);
+  assert.deepEqual([rowOf('u1', 'waste-share').base, rowOf('u1', 'waste-share').verdict], ['weighted', 'improved']);
+  const mixed = rowOf('loja-web', 'waste-share');
+  assert.deepEqual([mixed.verdict, mixed.reason, mixed.changePct, mixed.base], ['not-measured', 'no-common-base', null, undefined]);
+  assert.ok(typeof mixed.before === 'number' && typeof mixed.after === 'number');
+  assert.equal(rowOf('loja-web', 'weighted-per-session').before, null);
+  // One decline was kept: the same proposal came back, so it was not asked again in this run.
+  const kept = ex.items.filter((i) => i.carriedFrom);
+  assert.deepEqual(kept.map((i) => [i.id, i.status, i.history.lastStatus]), [['LOJA-104', 'declined', 'declined']]);
+  assert.deepEqual(kept[0].carriedFrom, kept[0].previous);
+  assert.ok(kept[0].history.lastDecisionAt && kept[0].history.lastNote);
+  assert.ok(!ex.decisions.some((d) => d.target === kept[0].id), 'no decision of this run names it');
+  // One open finding was declined before: it came back with another proposal, so it is asked again.
+  const again = ex.items.filter((i) => i.status === 'open' && i.history && i.history.lastStatus === 'declined');
+  assert.deepEqual(again.map((i) => [i.id, Boolean(i.carriedFrom)]), [['LOJA-103', false]]);
   // Each expected saving of this run names where the next review will look for it.
   const metrics = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8')).$defs.metric.enum;
   for (const i of ex.items.filter((x) => x.saves)) assert.ok(metrics.includes(i.saves.metric), `${i.id} saves.metric`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// E-mail addresses on the board that leaves the machine (the artifact channel)
+// ---------------------------------------------------------------------------------------------
+
+const OWNER = 'alice.smith@example.com';
+const BACKUP = 'bo@mail.example.org';
+const DRIVE = 'carol@example.net';
+const LOOKALIKES = ['react@18.3.1', 'git@host.example:owner/repo', 'logo@2x.png'];
+/**
+ * The fixture with two addresses in the account's instruction file (the text of a file is kept as
+ * it is on disk), one of them quoted by the `before` and the `after` of a change, a third one in
+ * the name of a folder, and three things that only look like addresses.
+ */
+function withAddresses(st) {
+  const file = st.files.find((f) => f.id === 'fu1-1');
+  file.content += `\nOwner: ${OWNER}\nBackup contact: ${BACKUP}\nPinned: ${LOOKALIKES[0]}, cloned from ${LOOKALIKES[1]}, icon ${LOOKALIKES[2]}\n`;
+  const item = st.items.find((i) => i.id === 'U1-203');
+  item.changes.push({ file: 'fu1-1', path: file.path, before: `Owner: ${OWNER}`, after: `Owner: ${OWNER} (asks before any deploy)`, why: `Says what ${OWNER} decides.` });
+  // A change already on disk is found by its `after` text.
+  item.changes.push({ file: 'fu1-1', path: file.path, before: 'Backup contact: nobody', after: `Backup contact: ${BACKUP}`, applied: true });
+  // A file under a folder named after an account, and a change that finds it by its path alone.
+  const synced = `~/Library/CloudStorage/Drive-${DRIVE}/notes/AGENTS.md`;
+  st.files.push({ id: 'fu1-7', harness: 'u1', path: synced, category: 'instructions', content: 'Keep notes short.\n' });
+  st.items.find((i) => i.id === 'U1-201').changes.push({ path: synced, before: 'Keep notes short.', after: 'Keep notes short, and in English.' });
+  // The same addresses anywhere else the board embeds text.
+  st.run.title = `Board of ${BACKUP}`;
+  st.log.push({ at: '2026-01-10T11:00:00Z', text: `Asked ${BACKUP} and ${OWNER}.` });
+  return st;
+}
+// The folder name is part of the address as the library reads it: everything up to the @ that can be in one.
+const MASKED = { [OWNER]: 'al…@example.com', [BACKUP]: 'b…@mail.example.org', [`Drive-${DRIVE}`]: 'Dr…@example.net' };
+
+test('artifact channel: every e-mail address is masked, in file and change text too, and each change stays in its file', () => {
+  const { dir, p } = stage(withAddresses);
+  const run = (channel, extra = []) => {
+    const out = path.join(dir, channel + extra.join(''));
+    const r = runScript('render-board.mjs', [p, '--channel', channel, '--out-dir', out, ...extra]);
+    assert.equal(r.code, 0, r.stderr);
+    return { r, html: fs.readFileSync(path.join(out, 'board.html'), 'utf8'), md: fs.readFileSync(path.join(out, 'board.md'), 'utf8') };
+  };
+  try {
+    // The boards that stay on the machine first; the first render also writes the scores into the state.
+    const before = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const file = run('file');
+    const settled = fs.readFileSync(p, 'utf8');
+    const after = JSON.parse(settled);
+    for (const st of [before, after]) for (const h of st.harnesses) delete h.scores;
+    assert.deepEqual(after, before, 'only the scores were written into the state');
+    const server = run('server');
+    const art = run('artifact');
+    const changedOnly = run('artifact', ['--files', 'changed']);
+    assert.equal(fs.readFileSync(p, 'utf8'), settled, 'the state on disk is byte-identical: nothing in it is masked');
+    assert.ok(settled.includes(OWNER) && settled.includes(BACKUP) && settled.includes(DRIVE));
+
+    for (const x of [art, changedOnly]) {
+      // Neither literal address is anywhere in the page: markup, data or script.
+      for (const address of [OWNER, BACKUP, DRIVE]) assert.ok(!x.html.includes(address), `${address} is not in the published board`);
+      assert.deepEqual(emailsIn(x.html), [], 'and nothing else in it reads as an address');
+      for (const form of Object.values(MASKED)) assert.ok(x.html.includes(form), `${form} is`);
+      // What only looks like an address is left as written.
+      for (const text of LOOKALIKES) assert.ok(x.html.includes(text), text);
+      assert.ok(x.html.includes('@rules/git.md'));
+      // Every change is still found in its file: the anchoring warnings are the ones of the state, none.
+      assert.deepEqual(x.r.json.warnings, []);
+      assert.equal(x.r.json.bytes, Buffer.byteLength(x.html));
+    }
+    assert.ok(art.html.startsWith('<title>Harness doctor · Board of b…@mail.example.org</title>\n'));
+
+    // The embedded state: the same text reads the same in the file and in the change that quotes it.
+    const shown = JSON.parse(DATA_RE.exec(art.html)[1]).state;
+    const state = JSON.parse(settled);
+    const content = shown.files.find((f) => f.id === 'fu1-1').content;
+    assert.ok(content.includes('Owner: al…@example.com\nBackup contact: b…@mail.example.org\nPinned: react@18.3.1, cloned from git@host.example:owner/repo, icon logo@2x.png\n'));
+    const [, quoted, applied] = shown.items.find((i) => i.id === 'U1-203').changes;
+    assert.deepEqual([quoted.before, quoted.after, quoted.why], ['Owner: al…@example.com', 'Owner: al…@example.com (asks before any deploy)', 'Says what al…@example.com decides.']);
+    assert.deepEqual([applied.before, applied.after, applied.applied], ['Backup contact: nobody', 'Backup contact: b…@mail.example.org', true]);
+    const synced = '~/Library/CloudStorage/Dr…@example.net/notes/AGENTS.md';
+    assert.equal(shown.files.find((f) => f.id === 'fu1-7').path, synced);
+    assert.equal(shown.items.find((i) => i.id === 'U1-201').changes[1].path, synced);
+    assert.equal(shown.log[shown.log.length - 1].text, 'Asked b…@mail.example.org and al…@example.com.');
+    // Only strings changed: the copy has the shape of the state, value for value.
+    const shape = (v) => (Array.isArray(v) ? v.map(shape) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shape(x)])) : typeof v === 'string' ? 's' : v);
+    assert.deepEqual(shape(shown), shape(state));
+    // The page anchors the masked state by itself, and draws every change where the state has it.
+    const place = (st) => Object.values(anchorState(st).files).flatMap((res) => res.segments.filter((s) => s.type === 'hunk').map((s) => [`${s.item}#${s.change}`, s.curStart, s.removed.length, s.added.length, s.applied])).sort();
+    assert.deepEqual(anchorState(shown).warnings, []);
+    assert.deepEqual(place(shown), place(state));
+    assert.equal(place(state).length, 6, 'the six changes of the state');
+    const drawn = Object.values(anchorState(shown).files).flatMap((res) => res.segments).filter((s) => s.type === 'hunk' && s.item === 'U1-203' && s.change === 1)[0];
+    assert.deepEqual([drawn.removed, drawn.added], [['Owner: al…@example.com'], ['Owner: al…@example.com (asks before any deploy)']]);
+
+    // The boards that stay on the machine keep the text as it is on disk, and so does board.md.
+    for (const x of [file, server]) {
+      for (const address of [OWNER, BACKUP, DRIVE]) assert.ok(x.html.includes(address), `${address} stays in a board that stays on the machine`);
+      assert.ok(!x.html.includes('al…@example.com'));
+      assert.deepEqual(JSON.parse(DATA_RE.exec(x.html)[1]).state, state);
+      assert.deepEqual(x.r.json.warnings, []);
+    }
+    for (const x of [server, art, changedOnly]) assert.equal(x.md, file.md, 'board.md does not depend on the channel');
+    assert.ok(file.md.includes(`Asked ${BACKUP} and ${OWNER}.`));
+  } finally { rmrf(dir); }
+});
+
+test('the renderer finds e-mail addresses the way the run library masks them', () => {
+  const samples = [
+    'alice@example.com', 'a@example.com', 'ab@example.com', 'abc@example.com', 'UPPER.Case@EXAMPLE.COM',
+    'Mail alice.smith+tag@mail.eu.example.org today.', '<bob@example.org>', '"carol_d@example.net",', 'mailto:dave@example.com?subject=x',
+    'two: a.b@x.example.com and c-d@y.example.net.', 'alice@example.com: a note', 'alice@example.com:8080', 'line one alice@example.com\nline two bob@example.org\n',
+    // What only looks like an address.
+    'react@18.3.1', '@scope/pkg@2.0.0', 'actions/checkout@v4', 'git@host.example:owner/repo', 'git@github.com:owner/repo.git', 'logo@2x.png', 'icon@3X.webp',
+    'user@localhost', '@example.com', 'alice@', 'alice@example.com-backup', 'x@y', '@rules/git.md',
+    // Already masked, or starred out.
+    'al…@example.com', 'a…@example.com', '***@example.com',
+  ];
+  for (const s of samples) {
+    let mine = s;
+    for (const address of emailsIn(s)) mine = mine.split(address).join(maskEmails(address));
+    assert.equal(mine, maskEmails(s), s);
+    // Each address found is one the library masks on its own, and masking is settled after one pass.
+    for (const address of emailsIn(s)) assert.notEqual(maskEmails(address), address, address);
+    assert.deepEqual(emailsIn(maskEmails(s)), [], `nothing left in ${maskEmails(s)}`);
+  }
+  assert.deepEqual(emailsIn('Mail alice.smith+tag@mail.eu.example.org today.'), ['alice.smith+tag@mail.eu.example.org']);
+  assert.deepEqual(emailsIn('two: a.b@x.example.com and c-d@y.example.net.'), ['a.b@x.example.com', 'c-d@y.example.net']);
+  for (const none of ['react@18.3.1', 'git@host.example:owner/repo', 'logo@2x.png', 'al…@example.com', '', 'no at sign', undefined, null, 42]) assert.deepEqual(emailsIn(none), [], String(none));
+  assert.deepEqual([maskEmails('alice@example.com'), maskEmails('ab@example.com'), maskEmails('a@example.com')], ['al…@example.com', 'a…@example.com', 'a…@example.com']);
+});
+
+test('masking for a published board: a change that cuts through an address is kept in place, or reported', () => {
+  const hunksOf = (st) => new Map(Object.values(anchorState(st).files).flatMap((res) => res.segments.filter((s) => s.type === 'hunk').map((s) => [`${s.item}#${s.change}`, s])));
+  const build = (lines, change) => {
+    const st = fixture();
+    st.files.find((f) => f.id === 'fu1-1').content += lines;
+    st.items.find((i) => i.id === 'U1-203').changes.push({ file: 'fu1-1', path: '~/.claude/CLAUDE.md', ...change });
+    assert.deepEqual(validateState(st, schema()), []);
+    assert.deepEqual(anchorState(st).warnings, [], 'the change is found in the file as it is on disk');
+    return st;
+  };
+  const check = (st, drawnAs) => {
+    const { state: shown, unplaced } = maskStateEmails(st);
+    assert.deepEqual(unplaced, []);
+    assert.deepEqual(emailsIn(JSON.stringify(shown)), [], 'no address in any string of the copy');
+    const [was, now] = [hunksOf(st).get('U1-203#1'), hunksOf(shown).get('U1-203#1')];
+    assert.deepEqual([now.curStart, now.removed.length, now.added.length], [was.curStart, was.removed.length, was.added.length], 'drawn at the same lines');
+    assert.deepEqual([now.removed, now.added], drawnAs);
+    assert.deepEqual(anchorState(shown).warnings, []);
+    // The other changes of the file are where they were.
+    for (const key of ['U1-201#0', 'U1-203#0']) assert.equal(hunksOf(shown).get(key).curStart, hunksOf(st).get(key).curStart, key);
+    return shown.items.find((i) => i.id === 'U1-203').changes[1];
+  };
+
+  // The text of the change starts inside the address: masked alone it would not be found again.
+  let change = check(build('Owner: alice.smith@example.com\n', { before: 'smith@example.com', after: 'smith@example.com, on call' }),
+    [['Owner: al…@example.com'], ['Owner: al…@example.com, on call']]);
+  assert.deepEqual([change.before, change.after], ['Owner: al…@example.com', 'Owner: al…@example.com, on call'], 'rewritten as the whole line it replaces');
+  // It ends inside the address.
+  check(build('Owner: alice.smith@example.com\n', { before: 'Owner: alice', after: 'Lead: alice' }), [['Owner: al…@example.com'], ['Lead: al…@example.com']]);
+  // It replaces the local part alone: the new address exists only once the page puts the line together.
+  change = check(build('Owner: alice.smith@example.com\n', { before: 'alice.smith', after: 'bob' }), [['Owner: al…@example.com'], ['Owner: bo…@example.com']]);
+  assert.deepEqual([change.before, change.after], ['Owner: al…@example.com', 'Owner: bo…@example.com']);
+  // The file has no address at all, and the change makes one out of what is there.
+  change = check(build('cc: @example.com\n', { before: 'cc: ', after: 'cc: dana' }), [['cc: @example.com'], ['cc: da…@example.com']]);
+  assert.deepEqual([change.before, change.after], ['cc: @example.com', 'cc: da…@example.com']);
+  // A change already on disk that cuts through an address is found by what it left there.
+  change = check(build('Owner: alice.smith@example.com\n', { before: 'smith@example.org', after: 'smith@example.com', applied: true }), [['Owner: al…@example.org'], ['Owner: al…@example.com']]);
+  assert.deepEqual([change.before, change.after, change.applied], ['Owner: al…@example.org', 'Owner: al…@example.com', true]);
+  // A change that quotes the address whole is left exactly as it is, masked: it needs no rewriting.
+  change = check(build('Owner: alice.smith@example.com\n', { before: 'alice.smith@example.com', after: 'alice.smith@example.com and the on-call' }),
+    [['Owner: al…@example.com'], ['Owner: al…@example.com and the on-call']]);
+  assert.deepEqual([change.before, change.after], ['al…@example.com', 'al…@example.com and the on-call']);
+});
+
+test('masking for a published board: a state without addresses is not copied, and a change masking cannot keep is reported', () => {
+  const plain = fixture();
+  assert.equal(maskStateEmails(plain).state, plain, 'nothing to mask: the state itself');
+  assert.deepEqual(maskStateEmails(plain).unplaced, []);
+
+  // Two addresses that read the same once masked: swapping one for the other is no change at all there.
+  const mutate = (st) => {
+    st.files.find((f) => f.id === 'fu1-1').content += 'Owner: alice@example.com\n';
+    st.items.find((i) => i.id === 'U1-203').changes.push({ file: 'fu1-1', path: '~/.claude/CLAUDE.md', before: 'Owner: alice@example.com', after: 'Owner: alan@example.com' });
+  };
+  const st = fixture();
+  mutate(st);
+  assert.deepEqual(anchorState(st).warnings, []);
+  const { state: shown, unplaced } = maskStateEmails(st);
+  assert.deepEqual(unplaced, [{ item: 'U1-203', change: 1 }]);
+  assert.deepEqual(emailsIn(JSON.stringify(shown)), [], 'masking wins: no address is published to keep a change in place');
+
+  const art = render(mutate, ['--channel', 'artifact']);
+  const file = render(mutate, ['--channel', 'file']);
+  try {
+    assert.equal(art.r.code, 0, art.r.stderr);
+    // The published board says so, as a warning of its own kind after the anchoring ones; the others have nothing to say.
+    assert.deepEqual(art.r.json.warnings, [{ item: 'U1-203', change: 1, problem: UNPLACED_WHEN_MASKED }]);
+    assert.match(art.r.stderr, /warning: U1-203 change 2: not drawn in its file on the published board/);
+    assert.deepEqual(file.r.json.warnings, []);
+    assert.ok(!art.read('board.html').includes('alice@example.com') && !art.read('board.html').includes('alan@example.com'));
+    assert.ok(!art.read('board.md').includes('published board'), 'board.md is the same for every channel');
+    assert.equal(art.read('board.md'), file.read('board.md'));
+  } finally { rmrf(art.dir); rmrf(file.dir); }
 });

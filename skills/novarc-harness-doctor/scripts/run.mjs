@@ -10,13 +10,15 @@
 // (stdout then holds { "ok": false, "error": ... }). Without --run the latest run is used.
 // Nothing is ever written outside the run directory, except by `undo`, which restores the files
 // the run itself changed, and by what leaves a review record under history/ next to runs/: `close`
-// and `history --write`, then `mark`, `record` and `undo` for a run that already has one.
+// and `history --write`, then whatever changes a status for a run that already has one. `history`,
+// `init` and `close` also put that folder back in line with its records (a missing `.md`, an index
+// that says something else).
 // NOVARC_POWERS_HOME replaces the home directory and NOVARC_HD_NOW the clock (tests).
 import { parseArgs, isMain, printJson, warn, normalizeInputPath } from './lib/common.mjs';
-import { RunError, UsageError, Plain, sleepSync } from './lib/run/store.mjs';
+import { RunError, UsageError, Plain, sleepSync, lostLocks } from './lib/run/store.mjs';
 import { resolveRunId, loadRun } from './lib/run/model.mjs';
 import { init, listRuns } from './lib/run/init.mjs';
-import { closeRun, history } from './lib/run/history.mjs';
+import { closeRun, history, healHistory } from './lib/run/history.mjs';
 import { probe } from './lib/run/probe.mjs';
 import { claim, release, complete, requireSession } from './lib/run/claims.mjs';
 import { build } from './lib/run/build.mjs';
@@ -24,6 +26,7 @@ import { decide, decisions } from './lib/run/decisions.mjs';
 import { mark, record, undo } from './lib/run/apply.mjs';
 import { statusReport, next } from './lib/run/overview.mjs';
 import { homeMatchers, scrubString } from './lib/run/scrub.mjs';
+import { maskDeep, maskCredentials } from './lib/run/secrets.mjs';
 import { DEFAULT_TTL_MINUTES } from './lib/run/units.mjs';
 
 const UNIT_RE = /^(review:[a-z-]+(#[0-9]{1,3})?|accounts|apply:[a-z0-9][a-z0-9-]*)$/;
@@ -59,7 +62,9 @@ const COMMANDS = {
       '--follow-up <runId|latest> [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <a>]',
     ],
     about: 'Start a run from a selection of accounts and projects, or over the harnesses of an earlier run (the ones that still exist). A harness that has a review record is measured since that review.',
-    run: (args) => init(args),
+    // The records are what a new run reads, so its own harnesses are read first; the files made
+    // from the records (index.json, the `.md`) are put right afterwards.
+    run: (args) => { const out = init(args); healHistory(); return out; },
   },
   list: {
     usage: [''],
@@ -68,7 +73,7 @@ const COMMANDS = {
   },
   history: {
     usage: ['[--harness <key|path>] [--json] [--lang pt|en]', `--write ${RUN}`],
-    about: 'Say what was reviewed before, per harness, and which follow-ups are due (text, or JSON with --json); with --write, write the review records of a run without closing it.',
+    about: 'Say what was reviewed before, per harness, and which follow-ups are due (text, or JSON with --json), from the review records alone; a missing .md or an index that disagrees with them is made again. With --write, write the review records of a run without closing it.',
     run: (args) => history(args),
   },
   status: {
@@ -186,10 +191,25 @@ export function helpText(command) {
 const isHelpFlag = (a) => a === '--help' || a === '-h';
 
 /**
+ * What a command says when a lock it held was taken over before it let go (it was stopped for
+ * longer than a lock may be held: a suspended machine, a stalled disk). Two commands were then
+ * in the same section for a moment. No file is ever half-written, but one of the two may have
+ * written over the other.
+ */
+export const LOCK_LOST = 'a lock of the run directory was taken over while this command held it (it was stopped for longer than a lock may be held); what it wrote may have been overwritten, or may have overwritten another command: check with `run.mjs status` and repeat the command if its effect is missing';
+
+/**
  * Run one command. Returns { code, output }, or { code: 0, text } when usage was asked for
- * (`--help` or `-h` anywhere on the command line: nothing runs then). Never throws.
+ * (`--help` or `-h` anywhere on the command line: nothing runs then). Never throws. An answer
+ * gains `lockLost: true` when a lock was lost on the way (see LOCK_LOST).
  */
 export async function runCommand(argv) {
+  const result = await runOne(argv);
+  if (lostLocks() && result.output && typeof result.output === 'object') result.output = { ...result.output, lockLost: true };
+  return result;
+}
+
+async function runOne(argv) {
   const [command, ...rest] = argv;
   const scrub = (s) => scrubString(String(s), homeMatchers());
   try {
@@ -209,12 +229,14 @@ export async function runCommand(argv) {
       if (k !== '_' && !allowed.has(k)) throw new UsageError(`unknown option --${k} for ${command} (see run.mjs ${command} --help)`);
     }
     const output = await COMMANDS[command].run(args);
-    return output instanceof Plain ? { code: 0, text: output.text } : { code: 0, output };
+    // The last barrier, for every command: an answer is made of what was read back from files
+    // (records, findings, exports, their names), and none of it leaves with a credential.
+    return output instanceof Plain ? { code: 0, text: maskCredentials(output.text) } : { code: 0, output: maskDeep(output) };
   } catch (e) {
-    if (e instanceof UsageError) return { code: 2, output: { ok: false, error: e.message } };
-    if (e instanceof RunError) return { code: 1, output: { ok: false, error: e.message, ...(e.details || {}) } };
+    if (e instanceof UsageError) return { code: 2, output: maskDeep({ ok: false, error: e.message }) };
+    if (e instanceof RunError) return { code: 1, output: maskDeep({ ok: false, error: e.message, ...(e.details || {}) }) };
     // Unexpected: say what kind of failure, never a raw message that may carry a home path.
-    return { code: 1, output: { ok: false, error: scrub(`unexpected failure: ${e && e.code ? `${e.code} ` : ''}${e && e.message ? e.message : e}`) } };
+    return { code: 1, output: maskDeep({ ok: false, error: scrub(`unexpected failure: ${e && e.code ? `${e.code} ` : ''}${e && e.message ? e.message : e}`) }) };
   }
 }
 
@@ -232,6 +254,7 @@ function startGate() {
 if (isMain(import.meta.url)) {
   startGate();
   runCommand(process.argv.slice(2)).then(({ code, output, text }) => {
+    if (lostLocks()) warn(LOCK_LOST);
     if (text !== undefined) process.stdout.write(text);
     else {
       if (code !== 0) warn(output.error);

@@ -160,6 +160,11 @@ const REC = {
       ['declined', 'Declined'], ['deferred', 'Deferred'], ['open', 'Open'], ['ok', 'Nothing to change'], ['not-applicable', 'Does not apply'],
     ],
     decided: '{word} on {date}.',
+    decidedBefore: '{word} on {date}, kept from run {run}: the same proposal came back.',
+    notCompared: {
+      'weights-changed': 'Numbers in input-token equivalents are not compared: the price weights changed between the two reviews.',
+      'no-common-base': 'Waste share is not compared: the two reviews measured it on different bases.',
+    },
     fixedOn: 'Fixed on {date}.',
     changed: 'Changed',
     seenBefore: 'Same finding as {item} of run {run}.',
@@ -172,6 +177,10 @@ const REC = {
       due: 'Follow-up due since {date}.',
       notDue: { one: 'Follow-up from {date} (in 1 day).', other: 'Follow-up from {date} (in {n} days).' },
       unrecorded: 'Runs without a review record: {ids}. Write them with: run.mjs history --write --run <id>',
+      ignored: {
+        one: '1 file under history/ is not a review record this version reads and was ignored (run.mjs history --json says which).',
+        other: '{n} files under history/ are not review records this version reads and were ignored (run.mjs history --json says which).',
+      },
     },
   },
   pt: {
@@ -194,6 +203,11 @@ const REC = {
       ['declined', 'Recusados'], ['deferred', 'Adiados'], ['open', 'Em aberto'], ['ok', 'Nada a mudar'], ['not-applicable', 'Não se aplica'],
     ],
     decided: '{word} em {date}.',
+    decidedBefore: '{word} em {date}, mantido da execução {run}: a mesma proposta voltou.',
+    notCompared: {
+      'weights-changed': 'Os números em equivalentes de token de entrada não são comparados: os pesos de preço mudaram entre as duas revisões.',
+      'no-common-base': 'A parcela de desperdício não é comparada: as duas revisões a mediram em bases diferentes.',
+    },
     fixedOn: 'Corrigido em {date}.',
     changed: 'Alterado',
     seenBefore: 'Mesmo achado que {item} da execução {run}.',
@@ -206,6 +220,10 @@ const REC = {
       due: 'Acompanhamento pendente desde {date}.',
       notDue: { one: 'Acompanhamento a partir de {date} (em 1 dia).', other: 'Acompanhamento a partir de {date} (em {n} dias).' },
       unrecorded: 'Execuções sem registro de revisão: {ids}. Para gravar: run.mjs history --write --run <id>',
+      ignored: {
+        one: '1 arquivo em history/ não é um registro de revisão que esta versão lê e foi ignorado (run.mjs history --json diz qual).',
+        other: '{n} arquivos em history/ não são registros de revisão que esta versão lê e foram ignorados (run.mjs history --json diz quais).',
+      },
     },
   },
 };
@@ -247,6 +265,10 @@ function sinceLastReview(o, lang) {
       out.push(`| ${label(F.metric, m.metric)} (${label(F.unit, unit)}) | ${f.metric(m.before, unit) ?? T.notMeasured} | ${f.metric(m.expected, unit) ?? '-'} | ${f.metric(m.after, unit) ?? T.notMeasured} | ${f.change(m.changePct)} | ${label(F.verdict, m.verdict)} |`);
     }
     out.push('');
+    // A row that could not be compared says why.
+    for (const reason of [...new Set(o.metrics.map((m) => m.reason).filter(Boolean))]) {
+      if (REC[lang].notCompared[reason]) out.push(REC[lang].notCompared[reason], '');
+    }
   } else out.push(F.metricsNone, '');
 
   const sum = o.summary || {};
@@ -323,7 +345,9 @@ export function recordMarkdown(record, language) {
       out.push(`- **${i.id}** ${cell(i.title)} (${label(T.severity, i.severity)}, ${label(T.class, i.class)})`);
       if (i.decision) {
         const word = (ACTION[lang][i.decision.action] || i.decision.action).toLowerCase();
-        out.push(`  - ${T.field.decision}: ${fill(t.decided, { word, date: day(i.decision.at) })}${i.decision.note ? ` "${clip(i.decision.note)}"` : ''}`);
+        const from = i.decision.carriedFrom;
+        const said = from ? fill(t.decidedBefore, { word, date: day(i.decision.at), run: from.run }) : fill(t.decided, { word, date: day(i.decision.at) });
+        out.push(`  - ${T.field.decision}: ${said}${i.decision.note ? ` "${clip(i.decision.note)}"` : ''}`);
       }
       if (i.fixedAt) out.push(`  - ${fill(t.fixedOn, { date: day(i.fixedAt) })}`);
       if (i.verified) out.push(`  - ${T.field.verified}: ${clip(i.verified)}`);
@@ -333,7 +357,8 @@ export function recordMarkdown(record, language) {
         out.push(`  - ${T.field.saves}: ${fill(T.fu.saved, { tokens: f.tokens(i.saves.tokens) })} (${label(T.basis, i.saves.basis)})${where}`);
       }
       if (i.principle) out.push(`  - ${T.lesson.principle}: ${clip(i.principle)}`);
-      if (i.changes && i.changes.length) out.push(`  - ${t.changed}: ${[...new Set(i.changes.map((c) => c.path))].map((p) => `\`${p}\``).join(', ')}`);
+      // A record keeps the changes of every item; only a fixed one changed anything.
+      if (i.status === 'fixed' && i.changes && i.changes.length) out.push(`  - ${t.changed}: ${[...new Set(i.changes.map((c) => c.path))].map((p) => `\`${p}\``).join(', ')}`);
       if (i.previous) out.push(`  - ${fill(t.seenBefore, { item: i.previous.item, run: i.previous.run })}`);
     }
     out.push('');
@@ -368,5 +393,7 @@ export function historyText(report, language, { filtered = false } = {}) {
     }
   }
   if (report.unrecordedRuns && report.unrecordedRuns.length) out.push('', fill(h.unrecorded, { ids: report.unrecordedRuns.join(', ') }));
+  const ignored = (report.ignored || []).reduce((sum, x) => sum + (x.count || 1), 0);
+  if (ignored) out.push('', plural(h.ignored, ignored));
   return `${out.join('\n')}\n`;
 }

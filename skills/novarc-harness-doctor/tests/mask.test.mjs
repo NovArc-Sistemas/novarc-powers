@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { maskText, maskLine, isSensitiveKey } from '../scripts/lib/snapshot/mask.mjs';
 import { scanText } from '../scripts/secret-scan.mjs';
+import { hasCredential } from '../scripts/lib/run/secrets.mjs';
 
 // Every secret-looking value is assembled at runtime, so the repository scan finds none in this file.
 const join = (...parts) => parts.join('');
@@ -11,7 +12,9 @@ const PW7 = join('Zq7', '!kP2'); // 7 characters: shorter than any minimum lengt
 const LONG = join('Wm4', 'nB8xC2vL6', 'pJ9hT3rF7'); // 21 characters, no known prefix
 const ESCAPED = join('ab', '\\"', 'Xy9', '\\\\', 'end'); // as written in a file: ab\"Xy9\\end
 const TOKEN_GH = `ghp_${'y'.repeat(36)}`;
-const SECRETS = [PW7, LONG, 'Xy9', TOKEN_GH];
+const LIT = join('real', '-pass', 'word-', '9876', '54'); // 20 characters: the literal part of a value that starts like a reference
+const PIN = join('1234', '5678'); // a credential that is a number
+const SECRETS = [PW7, LONG, 'Xy9', TOKEN_GH, LIT, PIN];
 
 /** Masks `src`, checks what every masked text must satisfy, and returns the result. */
 function masked(src, lang) {
@@ -56,7 +59,7 @@ test('JSON: every string under a secret key is hidden, whatever its length, dept
     '    "type": "…5",',
     '    "value": "Wm4n…21",',
     '    "history": ["…7", { "old": "…7" }],',
-    '    "attempts": 3,',
+    '    "attempts": …1,',
     '    "enabled": true',
     '  },',
     '  "env": {',
@@ -164,7 +167,7 @@ test('TOML: multi-line strings, literal strings, arrays, inline tables and table
     ']',
     '[model_providers.acme.credentials]',
     'user = "…3"',
-    'port = 5432',
+    'port = …4',
     '[other]',
     'name = "kept"',
     '# password = "…7"',
@@ -268,6 +271,208 @@ test('the shape patterns still catch what no key announces', () => {
     'url: postgres://app:…7@db.example.invalid/app',
     'Authorization: Bearer Wm4n…21',
   ].join('\n'));
+});
+
+// ------------------------------------------------------------------------------------------
+// References. A value under a secret name stays readable only when ALL of it is a reference,
+// in a syntax that really expands. A reference with a literal before, after or inside it is a
+// literal, and so is a number.
+// ------------------------------------------------------------------------------------------
+
+test('a value that is a reference from end to end stays readable', () => {
+  const references = [
+    '${DB_PASSWORD}', '${config.token}', '${env:GITHUB_TOKEN}', '${input:apiKey}',
+    '${DB_PASSWORD:-}', "${DB_PASSWORD:-''}", '${DB_PASSWORD:-${FALLBACK_PASSWORD}}', '${DB_PASSWORD:?DB_PASSWORD is required}',
+    '$(cat ~/.config/app/token)', '$GITHUB_TOKEN', '$env:ApiKey', '$1', '$@',
+    '{{ secrets.API_KEY }}', '${{ secrets.DEPLOY_TOKEN }}', '%API_KEY%', '<your token>', '***', 'xxxx', '...',
+    '${USER_PART}${HOST_PART}', 'Bearer ${TOKEN}', 'Basic $BASIC_AUTH',
+  ];
+  for (const ref of references) {
+    const src = JSON.stringify({ password: ref, nested: { apiKey: [ref] } });
+    for (const lang of ['json', null]) assert.equal(maskText(src, lang ? { lang } : undefined), src, ref);
+    assert.equal(hasCredential(src), false, `${ref} is nothing the run has to refuse`);
+  }
+  // The same in the files a harness is made of, each read with its own structure and with none.
+  const shell = [
+    'export GITHUB_TOKEN=$GITHUB_TOKEN',
+    'TOKEN=${TOKEN:-}',
+    'API_KEY=$(cat ~/.config/app/key)',
+    'PASSWORD="$1"',
+    'DB_PASSWORD="${DB_PASSWORD:?DB_PASSWORD is required}"',
+    'curl -H "Authorization: Bearer $GITHUB_TOKEN" -H "X-Api-Key: ${API_KEY}" https://example.invalid',
+  ].join('\n');
+  const yaml = [
+    'env:',
+    '  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}',
+    '  password: $DB_PASSWORD',
+    '  api_key: !secret api_key',
+    '  token: *shared_token',
+    '  secrets: inherit',
+  ].join('\n');
+  const js = [
+    "const headers = { Authorization: `Bearer ${token}`, 'X-Api-Key': process.env.API_KEY };",
+    'const password = process.env.DB_PASSWORD;',
+    'const secret = os.environ["APP_SECRET"]',
+  ].join('\n');
+  const toml = 'api_key = "${API_KEY}"\nbearer_token_env_var = "MY_SERVICE_TOKEN"\n';
+  for (const [src, lang] of [[shell, 'shell'], [yaml, 'yaml'], [js, 'javascript'], [toml, 'toml']]) {
+    assert.equal(maskText(src, { lang }), src, lang);
+    assert.equal(maskText(src), src, `${lang}, read with no hint`);
+  }
+});
+
+test('a reference with a literal around it is masked whole', () => {
+  // [the value, what is left of it]. Values of 16 characters and more keep their first four.
+  const cases = [
+    ['${EXAMPLE}' + LIT, '${EX…30'],
+    ['$ABC ' + LIT, '$ABC…25'],
+    [LIT + '${SUFFIX}', 'real…29'],
+    ['${DB_PASSWORD:-' + LIT + '}', '${DB…36'],
+    ['${A:-${B:-' + PW7 + '}}', '${A:…19'],
+    ['${server.password:' + PW7 + '}', '${se…26'],
+    ['${not-a-reference}' + PW7, '${no…25'],
+    ['$' + 'ecret123', '…9'],
+    ['$' + 'ecret123!', '…10'],
+    ['$TOKEN/' + PW7, '…14'],
+    ['$TOKEN ' + PW7, '…14'],
+    ['$(echo x)' + PW7, '$(ec…16'],
+    ['%VAR%' + PW7, '…12'],
+    ['<token>' + PW7, '…14'],
+    ['{{ x }}' + PW7, '…14'],
+    ['${A}:' + PW7, '…12'],
+    ['Bearer $TOKEN ' + PW7, 'Bearer …14'],
+    ['abcd…40 ' + PW7, '…15'],
+  ];
+  for (const [value, left] of cases) {
+    assert.equal(masked(JSON.stringify({ password: value })), `{"password":"${left}"}`, value);
+    assert.equal(masked(JSON.stringify({ secrets: { any: [value] } }), 'json'), `{"secrets":{"any":["${left}"]}}`, value);
+  }
+  // Unquoted, where a value can be written without quotes.
+  assert.equal(masked(`password: $ABC ${LIT}\ntoken: \${TOKEN}${PW7}\napi_key: $lower_case`, 'yaml'), 'password: $ABC…25\ntoken: …15\napi_key: …11');
+  assert.equal(masked(`export DB_PASSWORD=\${PREFIX}${PW7}\nTOKEN=$token\nAPI_KEY=$(cat key)${PW7}`, 'shell'), 'export DB_PASSWORD=${PR…16\nTOKEN=…6\nAPI_KEY=$(ca…17');
+});
+
+test('a number under a secret name is a credential; true, false and null are not', () => {
+  const json = [
+    '{',
+    `  "password": ${PIN},`,
+    '  "pin": 4321,',
+    '  "apiKey": -3.5,',
+    '  "token": 0,',
+    '  "secret": true,',
+    '  "passphrase": null,',
+    '  "credentials": { "port": 5432, "enabled": false, "retries": [3, 14] },',
+    '  "tokenBudget": 2000, "max_tokens": 4096, "password_min_length": 12',
+    '}',
+  ].join('\n');
+  assert.equal(masked(json, 'json'), [
+    '{',
+    '  "password": …8,',
+    '  "pin": 4321,',
+    '  "apiKey": …4,',
+    '  "token": 0,',
+    '  "secret": true,',
+    '  "passphrase": null,',
+    '  "credentials": { "port": …4, "enabled": false, "retries": […1, …2] },',
+    '  "tokenBudget": 2000, "max_tokens": 4096, "password_min_length": 12',
+    '}',
+  ].join('\n'));
+  assert.equal(masked(JSON.stringify({ password: Number(PIN) })), '{"password":…8}');
+
+  const toml = ['max_tokens = 4096', `password = ${PIN}`, 'api_key = 0x1F', 'token = 1', 'secret = false', '[db.credentials]', 'port = 5432', 'since = 2026-01-01'].join('\n');
+  assert.equal(masked(toml, 'toml'), ['max_tokens = 4096', 'password = …8', 'api_key = …4', 'token = 1', 'secret = false', '[db.credentials]', 'port = …4', 'since = …10'].join('\n'));
+
+  const yaml = ['max_tokens: 4096', `password: ${PIN}`, 'pin_token: 007', 'token: 0', 'secret: true', 'api_key: ~', 'id-token: write'].join('\n');
+  assert.equal(masked(yaml, 'yaml'), ['max_tokens: 4096', 'password: …8', 'pin_token: …3', 'token: 0', 'secret: true', 'api_key: ~', 'id-token: write'].join('\n'));
+
+  // Where the format is not known: after a quoted name any number, in a sentence only a long one.
+  assert.equal(
+    masked(`{"password": ${PIN}} is what the file says. The password: ${PIN} again, "pin_token": 4321, PASSWORD=4321, but token: 5 minutes is a count.`),
+    '{"password": …8} is what the file says. The password: …8 again, "pin_token": …4, PASSWORD=…4, but token: 5 minutes is a count.',
+  );
+  assert.equal(masked(`module.exports = { password: 4321, secrets: [1234, 5678], retries: 3 };\nconst token = ${PIN};`, 'javascript'), 'module.exports = { password: …4, secrets: […4, …4], retries: 3 };\nconst token = …8;');
+});
+
+test('a value that goes on after its first string is masked to its end', () => {
+  const js = [
+    'module.exports = {',
+    `  password: "\${DB_PASSWORD}" + "${PW7}",`,
+    `  token: prefix + "${PW7}" + suffix,`,
+    `  apiKey: \`key-\${id}-${PW7}\`,`,
+    '  secret: "abc".trim(),',
+    '};',
+  ].join('\n');
+  assert.equal(masked(js, 'javascript'), [
+    'module.exports = {',
+    '  password: "${DB_PASSWORD}" + "…7",',
+    '  token: prefix + "…7" + suffix,',
+    '  apiKey: `key-…17`,',
+    '  secret: "…3".trim(),',
+    '};',
+  ].join('\n'));
+
+  const shell = [
+    `PASSWORD="$PREFIX"${PW7}`,
+    `TOKEN=$TOKEN_PREFIX"${PW7}"`,
+    `API_KEY="\${A}"'${PW7}'`,
+    'DB_PASSWORD="abc"def',
+    `curl --password="$BASE"${PW7} https://example.invalid`,
+  ].join('\n');
+  assert.equal(masked(shell, 'shell'), [
+    'PASSWORD="$PREFIX"…7',
+    'TOKEN=$TOKEN_PREFIX"…7"',
+    'API_KEY="${A}"\'…7\'',
+    'DB_PASSWORD="…3"…3',
+    'curl --password="$BASE"…7 https://example.invalid',
+  ].join('\n'));
+
+  const python = `password = "abc" "def"\ntoken = os.environ["APP_TOKEN"] + "${PW7}"`;
+  assert.equal(masked(python, 'python'), 'password = "…3" "…3"\ntoken = os.environ["APP_TOKEN"] + "…7"');
+
+  // A command kept inside a JSON string: the quotes of the value are the escaped ones.
+  const command = JSON.stringify({ command: `curl --password="$BASE"${PW7} -H "Authorization: Bearer $TOKEN" https://example.invalid` });
+  assert.equal(masked(command, 'json'), '{"command":"curl --password=\\"$BASE\\"…7 -H \\"Authorization: Bearer $TOKEN\\" https://example.invalid"}');
+  // A quote doubled inside a string does not let the rest of it through.
+  assert.equal(masked(`password: 'it''s ${PW7}'`, 'yaml'), "password: '…2''…9'");
+});
+
+test('YAML: a value behind an anchor or a tag is still the value', () => {
+  const src = ['defaults:', `  password: &pw ${PW7}`, `  token: &tok "${PW7}"`, `  secret: !!str ${PW7}`, `  credentials: &c { user: "bob", pin: ${PIN} }`, '  api_key: !secret api_key', '  other_password: *pw'].join('\n');
+  assert.equal(masked(src, 'yaml'), ['defaults:', '  password: &pw …7', '  token: &tok "…7"', '  secret: !!str …7', '  credentials: &c { user: "…3", pin: …8 }', '  api_key: !secret api_key', '  other_password: *pw'].join('\n'));
+});
+
+test('what the masker wrote is left alone, in every format and in none', () => {
+  const src = '{"password": "…7", "token": "ghp_…40", "apiKey": "Bearer abcd…22", "pin_token": …4, "secret": "ghp_…", "credentials": { "port": …4, "list": ["…3", …2] }}';
+  for (const lang of ['json', 'yaml', 'javascript', 'markdown', null]) assert.equal(maskText(src, lang ? { lang } : undefined), src, String(lang));
+  // A line the masker wrote, read again as the file it came from and as a text of no known format.
+  const lines = [
+    ['password = …8', 'toml'], ['PASSWORD="$PREFIX"…7', 'shell'], ["API_KEY=\"${A}\"'…7'", 'shell'], ['export DB_PASSWORD=${PR…16', 'shell'],
+    ['password: &pw …7', 'yaml'], ['token: prefix + "…7" + suffix', 'javascript'], ['apiKey: `key-…17`,', 'javascript'],
+  ];
+  for (const [line, lang] of lines) for (const hint of [lang, null]) assert.equal(maskText(line, hint ? { lang: hint } : undefined), line, `${line} (${hint})`);
+});
+
+// lib/run/secrets.mjs refuses a text when masking it changes it. The two cannot drift apart: what
+// leaks past the masker leaks past every barrier of a run, into the state, the board and the
+// review record.
+test('the barrier of a run detects every value the masker hides', () => {
+  const leaking = [
+    JSON.stringify({ password: '${EXAMPLE}' + LIT }),
+    JSON.stringify({ password: '$ABC ' + LIT }),
+    JSON.stringify({ password: Number(PIN) }),
+    JSON.stringify({ password: '${not-actually-a-reference}' + LIT }),
+    JSON.stringify({ password: '$' + 'ecret123!' }),
+    `The file has password: "\${DB_PASSWORD}${PW7}" in it.`,
+    `export DB_PASSWORD="$PREFIX"${PW7}`,
+    `password: "\${A}" + "${PW7}"`,
+  ];
+  for (const text of leaking) {
+    const out = maskText(text);
+    assert.notEqual(out, text, 'the masker changes it');
+    for (const s of SECRETS) assert.ok(!out.includes(s), 'and nothing of the literal is left');
+    assert.equal(hasCredential(text), true, 'the run refuses it');
+    assert.equal(hasCredential(out), false, 'and accepts what the masker wrote instead');
+  }
 });
 
 test('isSensitiveKey: names that hold a secret, and names that only describe one', () => {

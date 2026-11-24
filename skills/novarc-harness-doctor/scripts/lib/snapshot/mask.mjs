@@ -101,17 +101,137 @@ export function isSensitiveKey(name) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// What a masked value looks like
+// References: a value that names a secret instead of being one
 // ---------------------------------------------------------------------------------------------
 
-/**
- * A value that names a secret instead of being one: `${VAR}`, `$VAR`, `$(command)`, `%VAR%`,
- * `<placeholder>`, and the ways a script reads its environment (`process.env.X`, `os.environ[...]`).
- */
-function isReference(v) {
-  return /^\$\{|^\$\(|^\$(?:env:)?[A-Za-z_][A-Za-z0-9_]*(?:$|[\\/:.[\]\s])|^\$[0-9@*#?!$-]$|^%[A-Za-z_][A-Za-z0-9_]*%$|^<[^<>]*>$|^\{\{|^\*+$|^x+$|^\.{2,}$/i.test(v)
-    || /^(?:process\.env\b|import\.meta\.env\b|os\.environ\b|os\.getenv\(|getenv\(|System\.getenv\(|ENV\[)/.test(v);
+// A value is left readable only when ALL of it is a reference, in a syntax that really expands.
+// `${VAR}` followed by anything, `$VAR` and then more text, a default that is a literal: each of
+// those carries a literal part, and a literal part under a secret name is masked with the rest.
+// The rule does not depend on the language of the file: what one pass leaves readable, every
+// other pass must leave readable too (see the note on fixed points at the top).
+const IDENT = '[A-Za-z_][A-Za-z0-9_]*';
+// `$NAME` only when it is written the way environment variables are (`$GITHUB_TOKEN`, `$env:ApiKey`):
+// a password that happens to start with `$` (`$ecret123`) must not pass for a variable.
+const VAR_ENV = /^\$(?:env:[A-Za-z_][A-Za-z0-9_]*|[A-Z_][A-Z0-9_]*)(?![A-Za-z0-9_])/;
+// `$1`, `$@`, `$*`: the arguments of a script.
+const POSITIONAL = /^\$[0-9@*](?![A-Za-z0-9_])/;
+// `{{ secrets.X }}`, `${{ secrets.X }}`: a template expression, whole.
+const DOUBLE_BRACE = /^\$?\{\{[^{}]*\}\}/;
+// The name inside `${...}`: `VAR`, `config.token`, `env:VAR`, `#VAR`. A colon belongs to the name
+// only after one of these words; anywhere else it starts a default (`${prop:default}`).
+const BRACED_NAME = new RegExp(`^[#!]?(?:(?:env|localEnv|containerEnv|input|config):)?${IDENT}(?:\\.${IDENT})*`);
+// A placeholder of a JavaScript template literal: an expression with no string in it.
+const JS_PLACEHOLDER = /^\$\{[^{}"'`]*\}/;
+// Whole values that stand for "put it here": `%VAR%`, `<your token>`, `***`, `xxxx`, `...`.
+const PLACEHOLDER = /^(?:%[A-Za-z_][A-Za-z0-9_]*%|<\p{L}[\p{L}\p{N} _.:-]{0,60}>|\*+|x+|\.{2,})$/iu;
+// Code that reads the environment, as it stands unquoted in a script. The shape patterns capture
+// a value up to the first quote, so the form cut at its bracket (`os.environ[`) is one too.
+const NAME_ARG = `["']${IDENT}["']`;
+const CODE_READER = new RegExp(`^(?:${[
+  `process\\.env(?:\\.${IDENT}|\\[(?:${NAME_ARG}\\])?)`,
+  `import\\.meta\\.env\\.${IDENT}`,
+  `Bun\\.env\\.${IDENT}`,
+  `Deno\\.env\\.get\\((?:${NAME_ARG}\\))?`,
+  `os\\.environ(?:\\[(?:${NAME_ARG}\\])?|\\.get\\((?:${NAME_ARG}\\))?)`,
+  `os\\.getenv\\((?:${NAME_ARG}\\))?`,
+  `getenv\\((?:${NAME_ARG}\\))?`,
+  `System\\.getenv\\((?:${NAME_ARG}\\))?`,
+  `ENV(?:\\[(?:${NAME_ARG}\\])?|\\.fetch\\((?:${NAME_ARG}\\))?)`,
+].join('|')})$`);
+const REFERENCE_MAX = 512;
+
+/** Index after the `${...}` that starts at `i`, when all of it is a reference; else -1. */
+function bracedEnd(v, i, ctx) {
+  let j = i + 2;
+  const name = BRACED_NAME.exec(v.slice(j, j + 200));
+  if (!name) return -1;
+  j += name[0].length;
+  if (v[j] === '}') return j + 1;
+  const op = /^(?::?[-=+?]|:)/.exec(v.slice(j, j + 2));
+  if (!op) return -1;
+  j += op[0].length;
+  if (op[0].endsWith('?')) {
+    // `${VAR:?message}`: the message is printed when VAR is missing; it never becomes the value.
+    const end = v.indexOf('}', j);
+    return end === -1 || /[$`\\]/.test(v.slice(j, end)) ? -1 : end + 1;
+  }
+  // What follows `:-`, `-`, `:=`, `=`, `:+`, `+` or a bare `:` can become the value: it has to be
+  // empty (`""` and `''` included) or made of references itself.
+  if ((v[j] === '"' || v[j] === "'") && v[j + 1] === v[j]) j += 2;
+  else j = referencesEnd(v, j, ctx);
+  return v[j] === '}' ? j + 1 : -1;
 }
+
+/** Index after the one reference that starts at `i`, or -1 when there is none there. */
+function referenceEnd(v, i, ctx) {
+  if (v[i] !== '$' && v[i] !== '{') return -1;
+  const rest = v.slice(i, i + REFERENCE_MAX);
+  let m = ctx.template ? null : DOUBLE_BRACE.exec(rest);
+  if (m) return i + m[0].length;
+  if (v[i] !== '$') return -1;
+  if (v[i + 1] === '{') {
+    if (!ctx.template) return bracedEnd(v, i, ctx);
+    m = JS_PLACEHOLDER.exec(rest);
+    return m ? i + m[0].length : -1;
+  }
+  if (ctx.template) return -1; // in a template literal only `${...}` expands
+  if (v[i + 1] === '(') {
+    // `$(command ...)`, up to the parenthesis that closes it.
+    let depth = 0;
+    for (let j = i + 1; j < v.length; j++) {
+      if (v[j] === '(') depth++;
+      else if (v[j] === ')' && --depth === 0) return j + 1;
+    }
+    return -1;
+  }
+  m = VAR_ENV.exec(rest) || POSITIONAL.exec(rest);
+  return m ? i + m[0].length : -1;
+}
+
+/** Index after the run of references that starts at `i` (`i` itself when it starts with none). */
+function referencesEnd(v, i, ctx) {
+  for (;;) {
+    const next = referenceEnd(v, i, ctx);
+    if (next === -1) return i;
+    i = next;
+  }
+}
+
+/**
+ * True when `v`, all of it, names a secret instead of being one:
+ *   `${VAR}`, `${config.token}`, `${env:VAR}`; `${VAR:-default}` and its kin only when the default
+ *   is empty or a reference itself; `${VAR:?message}`
+ *   `$(command ...)`, whole
+ *   `$VAR` in upper case, `$env:Name`, and the arguments `$1`, `$@`, `$*`
+ *   `{{ expression }}` and `${{ expression }}`
+ *   `%VAR%`, `<placeholder>`, `***`, `xxx`, `...`
+ *   unquoted code that reads the environment: `process.env.X`, `os.environ["X"]`, `ENV["X"]`...
+ *   several of the `$` forms in a row with nothing between them (`${A}${B}`)
+ * `template` says the value is a JavaScript template literal: there only `${expression}` expands,
+ * and the expression may be anything that holds no string.
+ */
+function isReference(v, template = false) {
+  if (!v || v.length > REFERENCE_MAX) return false;
+  if (PLACEHOLDER.test(v) || CODE_READER.test(v)) return true;
+  return referencesEnd(v, 0, { template }) === v.length;
+}
+
+/**
+ * The unquoted value that starts at `i`: it runs to the next space, quote, comma or semicolon,
+ * except that a `$(command ...)` or a `{{ expression }}` at its start counts whole, spaces included.
+ * Returns where it ends and whether all of it is a reference (a full stop or a closing bracket
+ * right after one belongs to the sentence around it).
+ */
+function bareValue(text, i) {
+  const line = text.slice(i, Math.min(lineEnd(text, i), i + REFERENCE_MAX));
+  const head = referencesEnd(line, 0, { template: false });
+  const run = /^[^\s"'`,;\\]*/.exec(text.slice(i + head, i + head + 4096))[0];
+  return { end: i + head + run.length, reference: head > 0 && run.replace(/[.)\]]+$/, '') === '' };
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a masked value looks like
+// ---------------------------------------------------------------------------------------------
 
 // The word in front of a credential in a header value stays readable.
 const SCHEME_RE = /^(?:Bearer|Basic|Token|Digest|Negotiate|ApiKey)\s+/i;
@@ -120,22 +240,35 @@ const isMasked = (v) => /^.{0,4}…\d*$/.test(v.replace(SCHEME_RE, ''));
 const hidden = (s) => `…${s.length}`;
 /** `mask()` shows four characters: fine for a long token, too much of a short password. */
 const maskValue = (v) => (v.length >= 16 ? mask(v) : hidden(v));
-// An unquoted value that switches something on or off, or names a mode, is not a secret.
-const PLAIN_WORD = /^(?:true|false|yes|no|on|off|null|none|nil|undefined|~|0|1|inherit|read|write|required|optional|enabled|disabled|always|never|auto|default)$/i;
+// An unquoted value that only switches something on or off is not a secret. A number is: a PIN
+// or a numeric password is a credential like any other (`0` and `1` are read as off and on).
+const SWITCH_WORD = /^(?:true|false|yes|no|on|off|null|none|nil|undefined|~|0|1)$/i;
+// The two workflow keywords that sit under a key named like a secret.
+const KEYWORD = { secrets: /^inherit$/i, 'id-token': /^(?:read|write|none)$/i };
+/** True when the unquoted value `v` of the key `name` says nothing secret. */
+function plainScalar(name, v) {
+  const key = String(name).toLowerCase();
+  return SWITCH_WORD.test(v) || (Object.hasOwn(KEYWORD, key) && KEYWORD[key].test(v));
+}
+// A number as it is written in data and code: `12345678`, `-3.5`, `1_000_000`.
+const NUMBER_RE = /^[-+]?\d[\d_]*(?:\.\d+)?(?=$|[\s,;)\]}"'\\]|\.(?:\s|$))/;
 
 /** What replaces the value of a secret key, or null when there is nothing to hide in it. */
-function secretText(raw) {
+function secretText(raw, template) {
   const head = (SCHEME_RE.exec(raw) || [''])[0];
   const v = raw.slice(head.length);
-  if (!v.trim() || isMasked(v) || isReference(v)) return null;
+  if (!v.trim() || isMasked(v) || isReference(v, template)) return null;
   // Four characters that end inside an escape sequence would leave half of it behind.
   return head + (v.slice(0, 4).includes('\\') ? hidden(v) : maskValue(v));
 }
 
-/** Mask `text[s, e)`, the value of a secret key on one line. */
-function pushValue(st, text, s, e) {
+/**
+ * Mask `text[s, e)`, the value of a secret key on one line. `quote` is the quote it is written
+ * in (null for an unquoted value): a backtick makes it a template literal.
+ */
+function pushValue(st, text, s, e, quote = null) {
   if (e <= s) return;
-  const r = secretText(text.slice(s, e));
+  const r = secretText(text.slice(s, e), quote === '`');
   if (r !== null) st.spans.push([s, e, r]);
 }
 
@@ -231,8 +364,9 @@ function tripleEnd(text, from, delim) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * JSON, read leniently (comments, trailing commas, a file cut at the size cap): every string
- * value under a secret key, at any depth below it. Keys are never masked.
+ * JSON, read leniently (comments, trailing commas, a file cut at the size cap): every value
+ * under a secret key, at any depth below it. A string of any shape and a number are masked;
+ * `true`, `false` and `null` stay. Keys are never masked.
  */
 function jsonSpans(text, st) {
   const frames = [];
@@ -244,8 +378,13 @@ function jsonSpans(text, st) {
     if (c === '"') {
       const [end, after, closed] = stringEnd(text, i, 0);
       if (top && top.obj && closed && /^\s*:/.test(text.slice(after, after + 64))) top.secret = isSensitiveKey(text.slice(i + 1, end));
-      else if (top && (top.all || top.secret)) pushValue(st, text, i + 1, end);
+      else if (top && (top.all || top.secret)) pushValue(st, text, i + 1, end, '"');
       i = Math.max(after, i + 1);
+    } else if (top && (top.all || top.secret) && !' \t\r\n,:{}[]/'.includes(c)) {
+      // A value that is not a string: a number, or a word. One followed by `:` is a key.
+      const word = /^[^\s,{}[\]":/]+/.exec(text.slice(i, i + 256))[0];
+      if (!plainScalar('', word) && !/^\s*:/.test(text.slice(i + word.length, i + word.length + 64))) pushValue(st, text, i, i + word.length);
+      i += word.length;
     } else if (c === '{' || c === '[') {
       frames.push({ obj: c === '{', secret: false, all: !!top && (top.all || top.secret) });
       i++;
@@ -261,9 +400,10 @@ function jsonSpans(text, st) {
 }
 
 /**
- * TOML: every string under a secret key, in any of the four string forms (basic, literal and
- * their multi-line `"""` / `'''` variants), inside arrays and inline tables, and every string of
- * a table whose header has a secret segment (`[servers.x.credentials]`).
+ * TOML: every value under a secret key: a string in any of the four forms (basic, literal and
+ * their multi-line `"""` / `'''` variants), a number or a date, inside arrays and inline tables
+ * too, and every value of a table whose header has a secret segment (`[servers.x.credentials]`).
+ * `true` and `false` stay.
  */
 function tomlSpans(text, st) {
   const n = text.length;
@@ -312,7 +452,7 @@ function tomlSpans(text, st) {
     const c = text[j];
     if (c === '"' || c === "'") {
       const [end, after] = stringEnd(text, j, 0, c === '"');
-      if (secret) pushValue(st, text, j + 1, end);
+      if (secret) pushValue(st, text, j + 1, end, c);
       return Math.max(after, j + 1);
     }
     if (c === '[' || c === '{') {
@@ -332,7 +472,10 @@ function tomlSpans(text, st) {
         j = next > j ? next : j + 1;
       }
     }
+    const from = j;
     while (j < n && !',]}#\n'.includes(text[j])) j++; // a number, a boolean, a date
+    const word = text.slice(from, j).trimEnd();
+    if (secret && word && !plainScalar('', word)) pushValue(st, text, from, from + word.length);
     return j;
   };
 
@@ -354,10 +497,11 @@ function tomlSpans(text, st) {
 }
 
 /**
- * YAML, the two forms the keyless net cannot see: an unquoted scalar (`password: hunter2`) and a
- * block scalar (`key: |` followed by indented lines). Quoted values and `{ }` / `[ ]` values are
- * the next net's. A mapping nested under a secret key is not followed: in a workflow the key of
- * such a mapping is as often the name of a job.
+ * YAML, the forms the keyless net cannot see: an unquoted scalar (`password: hunter2`, a number
+ * included), a block scalar (`key: |` followed by indented lines) and a value behind an anchor
+ * or a tag (`password: &pw "..."`). Other quoted values and `{ }` / `[ ]` values are the next
+ * net's. A mapping nested under a secret key is not followed: in a workflow the key of such a
+ * mapping is as often the name of a job.
  */
 function yamlSpans(text, st) {
   const n = text.length;
@@ -381,12 +525,22 @@ function yamlSpans(text, st) {
     }
     const m = /^(\s*(?:-\s+)*)(["']?)([A-Za-z_$][A-Za-z0-9_.$-]*)\2\s*:(?:\s+(.*))?$/.exec(line);
     if (!m || !isSensitiveKey(m[3])) continue;
-    const v = m[4] === undefined ? '' : m[4];
+    let v = m[4] === undefined ? '' : m[4];
+    // An anchor names the value and a tag types it: the value itself comes after them. Only
+    // `!secret name` is a reference (the value is kept in another file); `*alias` is one as well.
+    let behind = false;
+    for (let lead; (lead = /^(?:&\S+|!(?!secret\s)\S*)\s+/.exec(v)) !== null;) { v = v.slice(lead[0].length); behind = true; }
+    const at = end - v.length;
     if (/^[|>][0-9+-]*\s*(?:#.*)?$/.test(v)) { block = m[1].length; continue; }
-    if (!v || /^["'`{[&*!|>#]/.test(v)) continue;
+    if (!v || /^(?:[*#`]|!secret\s)/.test(v)) continue;
+    if (v[0] === '"' || v[0] === "'") {
+      if (behind) { const [stop] = stringEnd(text, at, 0, v[0] === '"'); pushValue(st, text, at + 1, stop, v[0]); }
+      continue;
+    }
+    if (v[0] === '{' || v[0] === '[') { if (behind) containerSpans(text, at, st); continue; }
     const bare = v.replace(/\s+#.*$/, '').trimEnd();
-    if (!bare || PLAIN_WORD.test(bare)) continue;
-    pushValue(st, text, end - v.length, end - v.length + bare.length);
+    if (!bare || plainScalar(m[3], bare)) continue;
+    pushValue(st, text, at, at + bare.length);
   }
 }
 
@@ -409,16 +563,18 @@ const ENV_LIKE = /^\$?[A-Z][A-Z0-9_]*$/;
 // and a text full of such brackets is not read again from each of them.
 const CONTAINER_MAX = 32 * 1024;
 const UNCLOSED_MAX = 16;
-/** A template literal that is put together at run time (`Bearer ${token}`) holds no secret of its own. */
-const computedTemplate = (text, quote, s, e) => quote === '`' && text.slice(s, e).includes('${');
+// Where `key: 1234` is data or code and not a sentence: a number there is a value like any other.
+const DATA_LANGS = new Set(['json', 'toml', 'yaml', 'javascript', 'python', 'powershell', 'shell']);
+const isQuote = (c, st) => c === '"' || c === "'" || (c === '`' && st.lang === 'javascript');
 
 /**
- * Mask every string value between the bracket at `open` and the one that closes it, strings of
- * nested brackets included. A string followed by `:` or `=` is a key and stays. The bracket may
- * close on a later line only when it ends its own line, the way data is laid out: `"secrets": {`
- * inside a string of some other language (`'  "secrets": {',`) is followed by that language's
- * quotes, which must not be paired up as values. Returns the index after the closing bracket, or
- * the one after the opening bracket when nothing closes it.
+ * Mask every value between the bracket at `open` and the one that closes it, values of nested
+ * brackets included: strings, and numbers where a value stands (after `[`, `,`, `:` or `=`). A
+ * string followed by `:` or `=` is a key and stays. The bracket may close on a later line only when
+ * it ends its own line, the way data is laid out: `"secrets": {` inside a string of some other
+ * language (`'  "secrets": {',`) is followed by that language's quotes, which must not be paired up
+ * as values. Returns the index after the closing bracket, or the one after the opening bracket
+ * when nothing closes it.
  */
 function containerSpans(text, open, st) {
   const found = [];
@@ -428,11 +584,14 @@ function containerSpans(text, open, st) {
   const js = st.lang === 'javascript';
   let depth = 0;
   let closed = false;
+  let slot = false; // true right after `[`, `{`, `,`, `:` or `=`: where a value can start
   let i = open;
   while (i < stop) {
     const c = text[i];
-    if (c === '{' || c === '[') { depth++; i++; continue; }
-    if (c === '}' || c === ']') { depth--; i++; if (depth <= 0) { closed = true; break; } continue; }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\n') { i++; continue; }
+    if (c === '{' || c === '[') { depth++; i++; slot = true; continue; }
+    if (c === '}' || c === ']') { depth--; i++; slot = false; if (depth <= 0) { closed = true; break; } continue; }
+    if (c === ',' || c === ':' || c === '=') { slot = true; i++; continue; }
     if (c === '#') {
       if (!js && st.lang !== 'json' && (i === 0 || /\s/.test(text[i - 1]))) i = lineEnd(text, i); else i++;
       continue;
@@ -442,20 +601,32 @@ function containerSpans(text, open, st) {
       else if (text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e === -1 ? stop : e + 2; } else i++;
       continue;
     }
-    if (c !== '"' && c !== "'" && c !== '\\' && c !== '`') { i++; continue; }
+    const wasSlot = slot;
+    slot = false;
+    if (c !== '"' && c !== "'" && c !== '\\' && c !== '`') {
+      // A number where a value stands, with the end of that value right after it.
+      const num = wasSlot ? NUMBER_RE.exec(text.slice(i, i + 64)) : null;
+      if (num && /^[ \t]*(?:[,\]}\r\n]|#|\/\/|$)/.test(text.slice(i + num[0].length, i + num[0].length + 16)) && !SWITCH_WORD.test(num[0])) {
+        found.push([false, i, i + num[0].length, null]);
+        i += num[0].length;
+        continue;
+      }
+      while (i < stop && !' \t\r\n{}[],:=#/"\'\\`'.includes(text[i])) i++; // a bare word
+      continue;
+    }
     if (c !== '\\' && c !== '`' && text[i + 1] === c && text[i + 2] === c) {
       const e = tripleEnd(text, i + 3, c + c + c);
-      found.push([true, i + 3, e === -1 ? text.length : e]);
+      found.push([true, i + 3, e === -1 ? text.length : e, c]);
       i = e === -1 ? text.length : e + 3;
       continue;
     }
     let k = 0;
     while (text[i + k] === '\\') k++;
     const q = text[i + k];
-    if (q === '"' || q === "'" || (q === '`' && js)) {
+    if (isQuote(q, st)) {
       const [end, after, ok] = stringEnd(text, i + k, k, !(st.lang === 'toml' && q === "'"));
       const isKey = ok && /^[ \t]*(?:=>|:|=)/.test(text.slice(after, after + 16));
-      if (!isKey && !computedTemplate(text, q, i + k + 1, end)) found.push([false, i + k + 1, end]);
+      if (!isKey) found.push([false, i + k + 1, end, q]);
       i = Math.max(after, i + k + 1);
       continue;
     }
@@ -466,15 +637,71 @@ function containerSpans(text, open, st) {
     if (mayRun) st.unclosed++;
     return open + 1;
   }
-  for (const [lines, s, e] of found) {
+  for (const [lines, s, e, quote] of found) {
     if (lines) pushLines(st, text, s, e);
-    else pushValue(st, text, s, e);
+    else pushValue(st, text, s, e, quote);
   }
   return i;
 }
 
 // `X-Api-Key`, `Private-Token`, `Authorization`: the way a header is named.
 const HEADER_LIKE = /^(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+|authorization)$/i;
+// An operand of a concatenation that is a name, a property or a call: `suffix`, `cfg.key`, `env("X")`.
+const CODE_OPERAND = /^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[[^\]\r\n]{0,80}\]|\([^()\r\n]{0,200}\))*/;
+// What is stuck to a closing quote and is still part of the same shell word: everything up to the
+// next space, quote, bracket or shell operator. Not a run that starts with a dot (`"x".trim()`, the
+// end of a sentence) or with an operator of a programming language (`"a"+b`, `"a"==b`, `"a"?b:c`).
+const STUCK_RUN = /^(?![.+=!?:*])[^\s"'`\\;|&()<>,[\]{}]+/;
+
+/**
+ * The rest of a value that goes on after its first part, from `j`. A value is more than its
+ * first string when another string or a bare run is stuck to it (`"$A"literal`, `"$A"'literal'`: one
+ * word to a shell) or when `+` joins it to more (`"${A}" + "literal"`). Every string of the chain
+ * is judged like the first one: a reference stays, a literal is masked. A name in a
+ * concatenation (`+ suffix`) is no literal and stays. `depth` is the number of backslashes in
+ * front of the first part's quotes (null when it had none): a string that continues it is written
+ * at the same depth, and a quote at another depth closes something around it instead.
+ * Returns the index after the chain.
+ */
+function continuationSpans(text, j, st, { depth, stuck }) {
+  const string = (at, k) => {
+    const q = text[at + k];
+    const [end, after, closed] = stringEnd(text, at + k, k, !(st.lang === 'toml' && q === "'"));
+    return { s: at + k + 1, end, after, closed, q };
+  };
+  for (;;) {
+    let at = j;
+    if (st.lang === 'python') while (text[at] === ' ' || text[at] === '\t') at++; // Python joins two strings that only a space separates
+    let k = 0;
+    while (text[at + k] === '\\') k++;
+    if (stuck && isQuote(text[at + k], st) && (depth === null || k === depth)) {
+      const part = string(at, k);
+      const body = text.slice(part.s, part.end);
+      // After a bare first part the quote may be the one that closes a string around the whole
+      // assignment: what it "opens" then starts with a separator or runs into the next word.
+      const around = depth === null && (!part.closed || !body || /^[\s,:;)\]}]/.test(body) || /[A-Za-z0-9_]/.test(text[part.after] || ''));
+      if (part.closed && !around) { pushValue(st, text, part.s, part.end, part.q); j = part.after; continue; }
+    }
+    if (stuck) {
+      const run = STUCK_RUN.exec(text.slice(j, j + 4096));
+      if (run && /[A-Za-z0-9$]/.test(run[0])) { pushValue(st, text, j, j + run[0].length); j += run[0].length; continue; }
+    }
+    const plus = /^[ \t]*(?:\r?\n[ \t]*)?\+(?![+=])[ \t]*(?:\r?\n[ \t]*)?/.exec(text.slice(j, j + 200));
+    if (!plus) return j;
+    const o = j + plus[0].length;
+    let ko = 0;
+    while (text[o + ko] === '\\') ko++;
+    if (isQuote(text[o + ko], st)) {
+      const part = string(o, ko);
+      pushValue(st, text, part.s, part.end, part.q);
+      j = Math.max(part.after, part.s);
+      continue;
+    }
+    const name = CODE_OPERAND.exec(text.slice(o, o + 400));
+    if (!name) return j;
+    j = o + name[0].length;
+  }
+}
 
 /**
  * The value that follows a secret name at `p`. `opener` is the quote right in front of a bare
@@ -493,33 +720,57 @@ function valueSpans(text, p, st, { name, quotedKey, tight, sep, opener }) {
   let k = 0;
   while (text[i + k] === '\\') k++;
   const q = text[i + k];
-  if (q === '"' || q === "'" || (q === '`' && st.lang === 'javascript')) {
+  // `DB_PASSWORD=value`, `--token=value`: an assignment, wherever it is written.
+  const envLike = !quotedKey && tight && sep === '=' && (ENV_LIKE.test(name) || name.startsWith('-'));
+  if (isQuote(q, st)) {
     const [end, after, closed] = stringEnd(text, i + k, k, !(st.lang === 'toml' && q === "'"));
-    // After a bare name the quote may be the one that closes the string the name is written in
-    // (`"header": "Authorization: ", "next": ...`): what follows is then not a value.
-    if (!quotedKey && (!closed || /[A-Za-z0-9_]/.test(text[after] || ''))) return p;
-    if (!computedTemplate(text, q, i + k + 1, end)) pushValue(st, text, i + k + 1, end);
-    return Math.max(after, i + k + 1);
+    // After a bare name in running text the quote may be the one that closes the string the name
+    // is written in (`"header": "Authorization: ", "next": ...`): what follows is then not a value.
+    if (!quotedKey && !envLike && (!closed || /[A-Za-z0-9_]/.test(text[after] || ''))) return p;
+    pushValue(st, text, i + k + 1, end, q);
+    return closed ? continuationSpans(text, after, st, { depth: k, stuck: true }) : Math.max(after, i + k + 1);
   }
   if (k === 0 && (q === '{' || q === '[')) return containerSpans(text, i, st);
+  // A number: after a quoted name or where the text is data or code it is the value; in running
+  // text only a long one is (`password: 12345678`), since "token: 5" is as often a count.
+  const num = k === 0 ? NUMBER_RE.exec(text.slice(i, i + 64)) : null;
+  if (num) {
+    const digits = num[0].replace(/\D/g, '').length;
+    if (SWITCH_WORD.test(num[0]) || !(quotedKey || envLike || digits >= 6 || DATA_LANGS.has(st.lang))) return p;
+    pushValue(st, text, i, i + num[0].length);
+    return i + num[0].length;
+  }
   // Unquoted, only where the value cannot be running text: `DB_PASSWORD=value`, `--token=value`.
-  if (!quotedKey && tight && sep === '=' && (ENV_LIKE.test(name) || name.startsWith('-'))) {
-    const v = /^[^\s"'`,;\\]+/.exec(text.slice(i, i + 4096));
-    if (!v) return p;
-    if (!PLAIN_WORD.test(v[0])) pushValue(st, text, i, i + v[0].length);
-    return i + v[0].length;
+  if (envLike) {
+    const { end, reference } = bareValue(text, i);
+    if (end > i && !reference && !plainScalar(name, text.slice(i, end))) pushValue(st, text, i, end);
+    return continuationSpans(text, end, st, { depth: null, stuck: true });
   }
   // ... and a header written inside a string: `-H "X-Api-Key: value"`, up to the closing quote.
   if (!quotedKey && opener && sep === ':' && HEADER_LIKE.test(name)) {
     const close = text.indexOf(opener, i);
     if (close === -1 || close > lineEnd(text, i)) return p;
     const v = text.slice(i, close).replace(/\\+$/, '');
-    if (!/^\S+$/.test(v.replace(SCHEME_RE, '')) || PLAIN_WORD.test(v)) return p; // one word: a sentence is not a credential
-    pushValue(st, text, i, i + v.length);
+    if (!/^\S+$/.test(v.replace(SCHEME_RE, '')) || plainScalar(name, v)) return p; // one word: a sentence is not a credential
+    pushValue(st, text, i, i + v.length, opener);
     return i + v.length;
+  }
+  // A name or a call first (`password = prefix + "literal"`): the strings joined to it are the value.
+  if (k === 0) {
+    const first = CODE_OPERAND.exec(text.slice(i, i + 400));
+    if (first) {
+      const next = continuationSpans(text, i + first[0].length, st, { depth: null, stuck: false });
+      if (next > i + first[0].length) return next;
+    }
   }
   return p;
 }
+
+// `${NAME:-word}`, `${NAME-word}`, `${NAME:=word}`, `${prop:word}`: an expansion with a word the
+// name falls back to. (`${NAME:?message}` has none, and `${NAME:+word}` stands in for the name.)
+const BRACED_DEFAULT = /\$\{([A-Za-z_][A-Za-z0-9_.]*)(?::?[-=]|:(?![?+]))/g;
+/** True when the name that starts at `at` is the one of a `${NAME...}` expansion. */
+const expanded = (text, at) => text[at - 1] === '{' && text[at - 2] === '$';
 
 const isNameChar = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 36 || c === 45; // [A-Za-z0-9_.$-]
 const NAME_MAX = 120;
@@ -568,6 +819,19 @@ function nameBefore(text, c, floor) {
 function maskByKey(text, lang) {
   const st = { spans: [], lang, unclosed: 0 };
   const n = text.length;
+  // `${TOKEN:-fallback}`: the name is being expanded, not assigned, and what a secret falls back
+  // to is a secret as well, unless it is empty or a reference itself.
+  for (const m of text.matchAll(BRACED_DEFAULT)) {
+    if (!isSensitiveKey(m[1])) continue;
+    const from = m.index + m[0].length;
+    let depth = 1;
+    let j = from;
+    for (; j < n && j - from <= REFERENCE_MAX && text[j] !== '\n'; j++) {
+      if (text[j] === '$' && text[j + 1] === '{') { depth++; j++; } else if (text[j] === '}' && --depth === 0) break;
+    }
+    const word = text.slice(from, j);
+    if (depth === 0 && word !== '""' && word !== "''" && referencesEnd(word, 0, { template: false }) !== word.length) pushValue(st, text, from, j);
+  }
   let i = 0; // nothing before `i` is read again
   for (;;) {
     let c = i;
@@ -585,7 +849,7 @@ function maskByKey(text, lang) {
     }
     const after = c + sep.length;
     const key = nameBefore(text, c, i);
-    if (!key || !isSensitiveKey(key.name)) { i = after; continue; }
+    if (!key || !isSensitiveKey(key.name) || expanded(text, key.start)) { i = after; continue; }
     let p = after;
     while (text[p] === ' ' || text[p] === '\t') p++;
     const before = text[key.start - 1];
@@ -621,11 +885,20 @@ function shapeLineOnce(line) {
       const a = m.index;
       const b = m.index + m[0].length;
       if (taken.some(([x, y]) => a < y && b > x)) continue;
-      // `secret-scan`, `password_min_length`: a name that describes a secret holds none.
-      if (p.extra && m.groups && m.groups.k !== undefined && !isSensitiveKey(m.groups.k)) continue;
+      // `secret-scan`, `password_min_length`: a name that describes a secret holds none. And the
+      // name of a `${NAME:-word}` expansion is not being assigned to: the pass by key reads those.
+      if (p.extra && m.groups && m.groups.k !== undefined && (!isSensitiveKey(m.groups.k) || expanded(line, m.indices.groups.k[0]))) continue;
       const g = m.indices && m.indices.groups && m.indices.groups.v ? m.indices.groups.v : m.indices[0];
       const value = line.slice(g[0], g[1]);
-      if (isMasked(value) || (p.extra && isReference(value))) continue;
+      if (isMasked(value)) continue;
+      if (p.extra) {
+        // A reference is no secret. The patterns capture a value up to the first space or quote,
+        // so `$(command with arguments)` and `${VAR:?a message}` arrive cut short: the run of
+        // references is read from the line itself, and it has to cover all that was captured.
+        const lead = (SCHEME_RE.exec(value) || [''])[0].length;
+        const rest = line.slice(g[0] + lead, g[0] + lead + REFERENCE_MAX);
+        if (isReference(value.slice(lead)) || referencesEnd(rest, 0, { template: false }) >= value.length - lead) continue;
+      }
       taken.push([a, b]);
       spans.push([g[0], g[1], maskValue(value)]);
     }
@@ -713,7 +986,7 @@ export function maskText(text, { lang = null } = {}) {
   let cur = String(text);
   const structure = Object.hasOwn(STRUCTURE, lang || '') ? lang : ((lang === null || lang === 'text') && looksLikeJson(cur) ? 'json' : null);
   if (structure) {
-    const st = { spans: [], lang: structure };
+    const st = { spans: [], lang: structure, unclosed: 0 };
     STRUCTURE[structure](cur, st);
     cur = applySpans(cur, st.spans);
   }

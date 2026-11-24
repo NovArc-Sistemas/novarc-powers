@@ -21,6 +21,12 @@ function tag(text, tone) { return el('span', { cls: 'tag' + (tone ? ' ' + tone :
 function statusTags(item) {
   var e = eff(item);
   var out = [el('span', { cls: 'tag st ' + statusTone(e.status), text: lbl(T.status, e.status) })];
+  // What an earlier review left on this finding, beside the status it has now: a decline kept
+  // because the same proposal came back, or an open finding that was declined before and comes
+  // back with another proposal.
+  var carried = carriedDecline(item, e.status);
+  if (carried) out.push(el('span', { cls: 'tag dashed', title: carriedLine(carried, T, FMT), text: T.hist.keptChip }));
+  else if (e.status === 'open' && declinedBefore(item)) out.push(tag(T.hist.declinedBefore, 'dashed'));
   if (e.asked && e.status === 'open') out.push(tag(T.statusAsked, 'info'));
   return out;
 }
@@ -135,10 +141,19 @@ function savesText(saves) {
     + (saves.metric ? ' · ' + tx(T.fu.checkedIn, { metric: lowerFirst(metricLabel(saves.metric)) }) : '');
 }
 
-/** One line on what happened to this finding in earlier reviews; null when the records say nothing. */
+/**
+ * What happened to this finding in earlier reviews: one line, or nothing when the records say
+ * nothing. A decline that was kept because the same proposal came back says so first, in its own
+ * line, with the note of that decision; the history line then leaves that decision out.
+ */
 function historyNote(item) {
   var hist = itemHistory(item);
-  return hist ? el('p', { cls: 'chist', text: historyLine(hist, T, FMT) }) : null;
+  var carried = carriedDecline(item, eff(item).status);
+  var rest = hist ? historyLine(hist, T, FMT, !!carried) : '';
+  return [
+    carried ? el('p', { cls: 'chist kept', text: carriedLine(carried, T, FMT) }) : null,
+    rest ? el('p', { cls: 'chist', text: rest }) : null,
+  ];
 }
 
 /**
