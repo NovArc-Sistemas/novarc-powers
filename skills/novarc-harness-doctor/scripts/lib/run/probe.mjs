@@ -108,7 +108,13 @@ async function probeHarness(ctx, h, opts, shared) {
     ? ['--scope', 'project', '--cwd', h.pathAbs]
     : ['--scope', 'user', '--cwd', h.pathAbs, '--provider', h.provider || 'other', '--config-dir', h.pathAbs];
   const discoverOk = await one('discover', where);
-  await one('checks', where);
+  // The rule engine finds candidate findings for the reviewers, and nothing else reads it (not the
+  // board, not the estimates): a measure-only run has no reviewer, so it is not run.
+  if (ctx.run.mode === 'measure') {
+    fs.rmSync(fileOf('checks'), { force: true });
+    fs.rmSync(path.join(dir, 'checks.error.json'), { force: true });
+    result.checks = { ok: false, skipped: 'measure-mode' };
+  } else await one('checks', where);
   let impactOk = false;
   const skip = shared.impactSkip.get(h.id);
   if (h.kind === 'project') impactOk = await one('impact', ['--cwd', h.pathAbs, '--days', days]);

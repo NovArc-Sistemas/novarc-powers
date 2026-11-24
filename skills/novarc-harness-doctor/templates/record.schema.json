@@ -12,6 +12,17 @@
     "harnessKey": { "type": "string", "maxLength": 120, "pattern": "^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$", "description": "The folder this record lives in: the slug of the harness name, a dash, and 8 hex characters of a SHA-256 over its kind, provider and real absolute path." },
     "runId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,40}$", "description": "The run that made this review. The file is named after it." },
     "language": { "enum": ["pt", "en"], "description": "The language of the run: what the `.md` beside the record is written in, and made again in when it is missing." },
+    "mode": { "enum": ["guided", "doctor", "measure"], "description": "The mode of the run. measure: no review rounds and no items, only the measurements, so the record is a baseline a later review compares with. A record without it was written by a guided or doctor run." },
+    "experiment": {
+      "type": "object",
+      "description": "Set when the user marked this review as the start of an experiment (run.mjs close --experiment): what they are testing, and until when. `followUpAfter` is then `until`. An experiment ended early is not written here: history/<harnessKey>/ended/<runId>.json says so.",
+      "required": ["until"],
+      "additionalProperties": false,
+      "properties": {
+        "note": { "type": "string", "maxLength": 300 },
+        "until": { "type": "string", "format": "date-time" }
+      }
+    },
     "kind": { "enum": ["user", "project"] },
     "provider": { "type": ["string", "null"], "maxLength": 64 },
     "name": { "type": "string", "maxLength": 300 },
@@ -19,7 +30,7 @@
     "startedAt": { "type": "string", "format": "date-time", "description": "When the run started." },
     "reviewedAt": { "type": "string", "format": "date-time", "description": "When the review ended: the moment the run was closed, or the record was written for a run that is still open. Writing the record of a closed run again keeps it." },
     "changesAppliedAt": { "type": ["string", "null"], "format": "date-time", "description": "When the last change of this harness was applied; null when nothing was." },
-    "followUpAfter": { "type": "string", "format": "date-time", "description": "reviewedAt plus followUpAfterDays (references/catalog/follow-up.json)." },
+    "followUpAfter": { "type": "string", "format": "date-time", "description": "reviewedAt plus followUpAfterDays (references/catalog/follow-up.json), or plus the days `close --follow-up-days` gave; equal to `experiment.until` when the review started an experiment." },
     "followUpOf": {
       "type": "object",
       "description": "The record this review was compared with, when the harness had one.",

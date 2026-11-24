@@ -15,25 +15,60 @@ export const EXPLORE_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'NotebookRea
 // could not run the program, or a spawn/exec failure. `cat missing.txt` failing is not a missing command.
 export const NOT_FOUND_RE = /command not found|is not recognized as (?:an internal or external command|the name of a cmdlet)|: not found\b|(?:^|\n)(?:\S*\/)?(?:bash|sh|zsh|dash|env)(?:: line \d+)?: [^\n:]+: No such file or directory|No such file or directory.*(?:exec|spawn)|ENOENT.*spawn|CommandNotFoundException/i;
 
-// Correction markers, kept per language. A short real user message is a correction when it opens
-// with a refusal word, or contains a "that is not it / again / undo" phrase anywhere.
+// ---------------------------------------------------------------- corrections
 //
-// English "no" is spelled like the Portuguese contraction "no" (em + o: "no arquivo", "no
-// projeto"), which opens ordinary instructions. So a bare "no" counts only as a reply of its own
-// or when punctuation, a dash or a line break follows it ("No.", "no, use the other one"). "no"
-// followed by a word never counts, in either language. Portuguese "não" / "nao" has no such twin
-// and keeps the plain rule.
-const NO_REPLY = /^\s*no(?=[ \t]*(?:[,.!?:;…]|[-–—](?:\s|$)|\r?\n|$))/i;
-const START_WORDS = {
-  en: ['stop', 'wrong', 'undo'],
-  pt: ['não', 'nao', 'pare', 'errado', 'errada', 'desfaz', 'desfaça', 'desfaca'],
-};
-const CORRECTION_START = new RegExp(`^\\s*(?:${[...START_WORDS.en, ...START_WORDS.pt].join('|')})(?=[\\s,.!?:;]|$)`, 'i');
-const CORRECTION_ANY = {
-  en: /\b(?:wrong|again|that'?s not|that is not|not what|undo)\b/i,
-  pt: /errad[oa]|de novo|desfa[zç]|isso não|isso nao|não é isso|nao e isso/i,
-};
+// A correction is a real user message that tells the agent its work was wrong. It counts only when
+// all of these hold, and when unsure it does not count:
+//   (a) work: the assistant issued at least one tool call in the same thread since the previous
+//       real user message;
+//   (b) not a question: it does not end with "?" and does not open with a question form ("por
+//       que", "dá pra", "não dá pra", "can you", "why", ...);
+//   (c) not a short answer: when the assistant's last text before it asked something (its last
+//       paragraph has a "?") or offered options (a numbered or lettered list with a word about
+//       choosing), a reply of SHORT_ANSWER_WORDS words or fewer is an answer, not a correction;
+//   (d) a marker about the work, pt or en: "não era isso", "está errado", "desfaz", "volta como
+//       estava", "você apagou/quebrou/mudou", "eu disse/pedi", "não mexe/não faça", "that's wrong",
+//       "revert", "undo", "I said/asked", "don't touch", "you broke"... A bare leading "não" or
+//       "no" is not a marker: it opens answers ("não precisa agora") as often as corrections.
+//   It is also shorter than CORRECTION_MAX_CHARS characters.
 export const CORRECTION_MAX_CHARS = 280;
+export const SHORT_ANSWER_WORDS = 12;
+// Accented letters are not word characters for `\b`, so a word end is spelled out.
+const END = '(?=[\\s,.!?:;…)"\'”]|$)';
+const rx = (src) => new RegExp(src, 'i');
+const QUESTION_START = [
+  rx(`^\\s*(?:why|how|what|which|when|where|who|whose|can|could|would|should|shall|is|are|was|were|does|did|will|have|has|isn'?t|aren'?t|wasn'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|shouldn'?t|couldn'?t|can'?t|any idea|do(?!\\s+not\\b))${END}`),
+  rx(`^\\s*(?:por ?qu[eê]|pq|como|qual|quais|quando|onde|aonde|quem|quanto|quantos|quantas|o que|que tal|ser[áa](?: que)?|d[áa] (?:pra|para)|tem como|teria como|pode|podemos|poderia|consegue|conseguimos|voc[êe] (?:pode|poderia|consegue|acha|sabe)|n[ãa]o (?:d[áa]|daria|seria|tem como|era melhor|ficaria|poderia|pode|consegue|deveria|devia)|e se)${END}`),
+];
+const CORRECTION_MARKERS = {
+  pt: [
+    rx(`(?:^|[\\s,.;:])n[ãa]o (?:era|é|e|foi) (?:isso|assim|bem isso|o que eu|isso que eu|esse|essa|esse aqui|essa aqui)${END}`),
+    rx(`(?:^|[\\s,.;:])(?:est[áa]|t[áa]|ficou|ficaram|est[ãa]o)(?: tudo| todo| toda)? errad[oa]s?${END}`),
+    rx(`^\\s*(?:isso est[áa] |isso t[áa] |tudo )?errad[oa]s?${END}`),
+    rx(`(?:^|[\\s,.;:])(?:desfa(?:z|[çc]a|zer|[çc]am)|revert(?:e|a|er)|reverte isso)${END}`),
+    rx(`(?:^|[\\s,.;:])volt(?:a|e|ar) (?:como (?:estava|era)|ao que (?:estava|era)|pro que (?:estava|era)|atr[áa]s|isso|a vers[ãa]o anterior|o que (?:voc[êe] )?(?:fez|mudou|apagou))${END}`),
+    rx(`(?:^|[\\s,.;:])voc[êe] (?:mudou|apagou|quebrou|removeu|deletou|tirou|alterou|estragou|sobrescreveu|reverteu|esqueceu|ignorou|errou)${END}`),
+    rx(`(?:^|[\\s,.;:])eu (?:disse|pedi|falei|mandei|tinha (?:dito|pedido|falado))${END}`),
+    rx(`(?:^|[\\s,.;:])n[ãa]o (?:fa[çc]a|faz isso|fazer isso|mexe|mexa|mude|altere|apague|apaga|toque|remova|delete|precisava|pedi|mandei)${END}`),
+    rx(`(?:^|[\\s,.;:])par[ae] de [a-zà-ú]+(?:ar|er|ir)${END}`),
+    rx(`^\\s*pare${END}`),
+    rx(`^\\s*isso n[ãa]o(?=\\s*(?:[,.!:;…]|$))`),
+  ],
+  en: [
+    rx(`\\bthat(?:'s| is| was) (?:not (?:it|what|right|correct)|wrong)${END}`),
+    rx(`\\bnot what I (?:asked|wanted|meant|said)${END}`),
+    rx(`\\b(?:this|it)(?:'s| is| was) wrong${END}`),
+    rx(`\\bwrong (?:file|place|one|approach|thing|branch|function|directory|folder|path|command|name|way)${END}`),
+    rx(`^\\s*wrong${END}`),
+    rx(`\\b(?:revert|undo)${END}`),
+    rx(`\\b(?:roll (?:it |that |this )?back|put (?:it|that|this) back)${END}`),
+    rx(`\\bI (?:said|asked|told you|meant|did not ask|didn'?t ask)${END}`),
+    rx(`\\b(?:don'?t|do not|never) (?:touch|change|do that|modify|delete|remove|edit|rename|move)${END}`),
+    rx(`\\bstop (?:doing|changing|editing|touching|deleting)${END}`),
+    rx(`^\\s*stop(?=\\s*(?:[,.!:;…]|$))`),
+    rx(`\\byou (?:broke|deleted|removed|changed|reverted|overwrote|messed up|forgot|ignored|undid)${END}`),
+  ],
+};
 export const SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.:\-/]{0,99}$/;
 
 export function safeName(s) {
@@ -58,20 +93,208 @@ export function isHumanText(t) {
   return true;
 }
 
-export function isCorrection(t) {
+/** A user message that asks something: it ends with "?" or opens with a question form. */
+export function isQuestion(t) {
+  const s = String(t).trim().replace(/[\s)"'”»*_]+$/, '');
+  return s.endsWith('?') || QUESTION_START.some((r) => r.test(s));
+}
+
+const OPTION_ITEM = /^\s*(?:\d{1,2}[.)]|\(?[a-dA-D]\)|[a-dA-D]\.)\s+\S/gm;
+const CHOICE_WORD = /\b(?:options?|choose|pick|prefer|which one)\b|op[çc](?:[ãa]o|[õo]es)|escolh|prefere|qual (?:delas|deles|voc[êe])/i;
+/**
+ * Whether an assistant text asks the user something: its last paragraph has a "?", or it lists
+ * two or more numbered / lettered options and says something about choosing. Only this flag is
+ * kept; the text itself is never stored.
+ */
+export function asksUser(text) {
+  if (typeof text !== 'string') return false;
+  const s = text.trim();
+  if (!s) return false;
+  const last = s.split(/\n\s*\n/).pop();
+  if (last.includes('?')) return true;
+  const items = s.match(OPTION_ITEM);
+  return !!items && items.length >= 2 && CHOICE_WORD.test(s);
+}
+
+/**
+ * Whether a real user message corrects the work (see the rule above). `work`: the assistant made
+ * a tool call in this thread since the previous user message; `asked`: the assistant's last text
+ * before it asked something. The defaults (work, no question asked) are for testing the markers.
+ */
+export function isCorrection(t, { work = true, asked = false } = {}) {
   const s = String(t).trim();
-  if (s.length >= CORRECTION_MAX_CHARS) return false;
-  return NO_REPLY.test(s) || CORRECTION_START.test(s) || CORRECTION_ANY.en.test(s) || CORRECTION_ANY.pt.test(s);
+  if (!s || s.length >= CORRECTION_MAX_CHARS || !work) return false;
+  if (isQuestion(s)) return false;
+  if (asked && s.split(/\s+/).length <= SHORT_ANSWER_WORDS) return false;
+  return CORRECTION_MARKERS.pt.some((r) => r.test(s)) || CORRECTION_MARKERS.en.some((r) => r.test(s));
 }
 
-export function hookBlockText(text) {
-  return /hook/i.test(text) && /\b(?:block(?:ed|ing)?|denied|deny|prevented|rejected)\b/i.test(text);
+// ---------------------------------------------------------------- hook outcomes
+//
+// What a hook did is read only from structured transcript fields, never from the text of a tool
+// result (a result that merely mentions "hook" and "blocked" says nothing about a hook):
+//   - a tool_result line whose `permissionDecision` is a rejection made by a hook (`source` or
+//     `reasonType` "hook", or a `reasonCode` "hook:<Event>"): a hook denied that tool call before
+//     it ran. A permission decision only exists before a call runs, so it is a denial whatever
+//     event it names (PreToolUse when it says none);
+//   - a `hook_blocking_error` attachment, classified by its `hookEvent` (or the event part of its
+//     `hookName`, "PreToolUse:Bash"): PreToolUse / PermissionRequest denied the call its
+//     `toolUseID` names; Stop / SubagentStop blocked the end of a response, which makes the agent
+//     keep working (the hook doing its job); UserPromptSubmit blocked a prompt; any other event is
+//     neutral, and no event at all is unknown;
+//   - a `hook_stopped_continuation` attachment, or a `stop_hook_summary` system line with
+//     `preventedContinuation`, is a hook that stopped the agent.
+export const HOOK_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'Stop', 'SubagentStop', 'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'Notification', 'PreCompact', 'SubagentStart']);
+const DENYING_EVENTS = new Set(['PreToolUse', 'PermissionRequest']);
+const CONTINUING_EVENTS = new Set(['Stop', 'SubagentStop']);
+
+function hookEventOf(a) {
+  if (typeof a.hookEvent === 'string' && HOOK_EVENTS.has(a.hookEvent)) return a.hookEvent;
+  const n = typeof a.hookName === 'string' ? a.hookName.split(':')[0] : '';
+  return HOOK_EVENTS.has(n) ? n : null;
 }
 
-export function hookBlockAttachment(type) {
-  const t = String(type || '').toLowerCase();
-  if (!t.includes('hook') || /non[_-]?blocking/.test(t)) return false;
-  return /blocking|denied|deny|block(?:ed)?(?:_|$)/.test(t);
+/**
+ * The event of a hook that denied the tool call answered on this Claude `user` line, from the
+ * line's `permissionDecision`; null when no hook denied it. A denial that names no event is
+ * reported as PreToolUse, the event that decides permissions before a call runs.
+ */
+export function hookDenialOf(o) {
+  const d = o && o.permissionDecision && typeof o.permissionDecision === 'object' ? o.permissionDecision : null;
+  if (!d || d.decision !== 'reject') return null;
+  const code = typeof d.reasonCode === 'string' ? d.reasonCode : '';
+  if (d.source !== 'hook' && d.reasonType !== 'hook' && !code.startsWith('hook:')) return null;
+  const ev = code.startsWith('hook:') ? code.slice(5) : '';
+  return DENYING_EVENTS.has(ev) ? ev : 'PreToolUse';
+}
+
+/**
+ * What a hook record on a Claude line did: `{ outcome, event, toolUseId }` with outcome `denial`
+ * (a tool call refused before it ran), `continue` (a Stop / SubagentStop hook made the agent keep
+ * working), `prompt-block` (a UserPromptSubmit hook blocked a prompt), `stopped` (a hook stopped
+ * the agent), `other` (a blocking outcome of another event) or `unknown` (a blocking outcome with
+ * no event); null when the line records no blocking hook outcome.
+ */
+export function hookOutcomeOf(o) {
+  if (!o || typeof o !== 'object') return null;
+  if (o.type === 'system' && o.subtype === 'stop_hook_summary') return o.preventedContinuation === true ? { outcome: 'stopped', event: 'Stop', toolUseId: null } : null;
+  if (o.type !== 'attachment' || !o.attachment || typeof o.attachment !== 'object') return null;
+  const a = o.attachment;
+  const type = String(a.type || '');
+  const event = hookEventOf(a);
+  const toolUseId = typeof a.toolUseID === 'string' ? a.toolUseID : typeof o.toolUseID === 'string' ? o.toolUseID : null;
+  if (type === 'hook_stopped_continuation') return { outcome: 'stopped', event, toolUseId };
+  if (type !== 'hook_blocking_error') return null;
+  if (!event) return { outcome: 'unknown', event: null, toolUseId };
+  if (DENYING_EVENTS.has(event)) return { outcome: 'denial', event, toolUseId };
+  if (CONTINUING_EVENTS.has(event)) return { outcome: 'continue', event, toolUseId };
+  if (event === 'UserPromptSubmit') return { outcome: 'prompt-block', event, toolUseId };
+  return { outcome: 'other', event, toolUseId };
+}
+
+// ---------------------------------------------------------------- command attempts
+
+/** The whole command line with whitespace collapsed: two attempts are the same command only when these are equal. */
+export function normalizeCommand(cmd) {
+  if (typeof cmd !== 'string') return null;
+  const s = cmd.trim().replace(/\s+/g, ' ');
+  return s || null;
+}
+
+const QUOTED = /'[^']*'|"(?:[^"\\]|\\.)*"/g;
+function programsOf(segment) {
+  let toks = segment.trim().split(/\s+/).filter(Boolean);
+  while (toks.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0]) || PREFIX_WORDS.has(toks[0].toLowerCase()))) toks = toks.slice(1);
+  if (!toks.length) return [];
+  const exe = (toks[0].replace(/^["'(]+|["')]+$/g, '').split(/[\\/]/).pop() || '').replace(/\.(exe|cmd|bat|ps1|sh)$/i, '').toLowerCase();
+  return [exe, (toks[1] || '').toLowerCase()];
+}
+
+/**
+ * The program whose exit status a command line reports: the last segment of its last line. A known
+ * limit: `rg x && echo found` exiting 1 is judged on `echo`, so it still counts as a failure.
+ */
+function statusProgram(cmd) {
+  const lines = cmd.replace(QUOTED, 'Q').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return [];
+  const segs = lines[lines.length - 1].split(/&&|\|\||;|\||&/).map((s) => s.trim()).filter(Boolean);
+  return segs.length ? programsOf(segs[segs.length - 1]) : [];
+}
+
+// Programs whose exit status 1 means "no match", "files differ" or "false", not a failure.
+const NO_MATCH_EXES = new Set(['rg', 'grep', 'egrep', 'fgrep', 'zgrep', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'diff', 'cmp', 'test', '[', '[[']);
+const NO_MATCH_GIT = new Set(['grep', 'diff']);
+
+/** Whether exit status `code` of `cmd` is a search finding nothing (or a test being false) rather than a failure. */
+export function noMatchExit(cmd, code) {
+  if (code !== 1 || typeof cmd !== 'string') return false;
+  const [exe, second] = statusProgram(cmd);
+  if (!exe) return false;
+  return NO_MATCH_EXES.has(exe) || (exe === 'git' && NO_MATCH_GIT.has(second));
+}
+
+/**
+ * Retry runs in ONE thread's calls, in call order. Each item of `seq` is `{ shell, cmd, failed,
+ * edit }`: `cmd` the normalised command line of a shell call, `failed` whether it failed (a
+ * no-match exit is not a failure), `edit` whether it changed files (an edit tool call, or a shell
+ * command that writes files). A retry is the SAME command failing and then run again at least
+ * `minReruns` more times, each of them failing except possibly the last, before a success or the
+ * end of the thread. An edit between two attempts ends the chain of every other command (that is
+ * the fix-and-rerun cycle, not a repetition); other calls in between do not. Returns
+ * `[{ cmd, first, last }]`, indexes into `seq` of the first failure and of the last attempt.
+ */
+export const RETRY_MIN_RERUNS = 3;
+export function retryRuns(seq, minReruns = RETRY_MIN_RERUNS) {
+  const out = [];
+  const open = new Map(); // command -> indexes of its attempts since the last edit
+  const close = (cmd) => {
+    const list = open.get(cmd);
+    open.delete(cmd);
+    for (let i = 0; i < list.length;) {
+      if (!seq[list[i]].failed) { i++; continue; }
+      let j = i + 1;
+      while (j < list.length && seq[list[j]].failed) j++;
+      const end = j < list.length ? j : list.length - 1;
+      if (end - i >= minReruns) out.push({ cmd, first: list[i], last: list[end] });
+      i = j + 1;
+    }
+  };
+  seq.forEach((c, idx) => {
+    if (c.edit) for (const k of [...open.keys()]) if (!(c.shell && k === c.cmd)) close(k);
+    if (!c.shell || !c.cmd) return;
+    if (!open.has(c.cmd)) open.set(c.cmd, []);
+    open.get(c.cmd).push(idx);
+  });
+  for (const k of [...open.keys()]) close(k);
+  return out.sort((a, b) => a.first - b.first);
+}
+
+/** The exit status a Claude shell tool_result reports on its first line ("Exit code 1"), or null. */
+export function claudeExitCode(text) {
+  const m = /^(?:Error: )?Exit code (-?\d+)/.exec(typeof text === 'string' ? text : '');
+  return m ? Number(m[1]) : null;
+}
+
+// A redirection into a file (not into /dev/null, NUL, $null or another stream), or a program that
+// writes or moves files. Quoted text is dropped first, so `rg "a > b"` is not a write.
+const WRITE_REDIRECT = /(?:^|[^0-9&>-])>>?\s*(?!&|\/dev\/null\b|nul\b|\$null\b)[^\s&|;)]/i;
+const WRITE_EXES = new Set(['tee', 'mv', 'cp', 'rm', 'mkdir', 'touch', 'patch', 'apply_patch', 'set-content', 'add-content', 'out-file', 'new-item', 'remove-item', 'copy-item', 'move-item', 'rename-item', 'ni', 'del', 'move', 'copy', 'ren']);
+const WRITE_GIT = new Set(['apply', 'checkout', 'restore', 'stash', 'reset', 'mv', 'rm', 'am', 'cherry-pick', 'revert', 'merge', 'rebase', 'pull', 'switch']);
+
+/** Whether a shell command recognisably writes files (an edit made from the shell). */
+export function writesFiles(cmd) {
+  if (typeof cmd !== 'string') return false;
+  const bare = cmd.replace(QUOTED, 'Q');
+  if (WRITE_REDIRECT.test(bare)) return true;
+  if (/\b(?:sed|perl)\s+(?:-[A-Za-z]+\s+)*(?:-[A-Za-z]*i|--in-place)/.test(bare)) return true; // in-place edit
+  for (const line of bare.split(/\r?\n/)) {
+    for (const seg of line.split(/&&|\|\||;|\||&/)) {
+      const [exe, second] = programsOf(seg);
+      if (!exe) continue;
+      if (WRITE_EXES.has(exe) || (exe === 'git' && WRITE_GIT.has(second))) return true;
+    }
+  }
+  return false;
 }
 
 /** Skill folder names referenced by paths like `.../skills/<name>/SKILL.md` (either slash) inside a string. */
@@ -188,7 +411,7 @@ export function codexShellOutput(output) {
       const j = JSON.parse(raw);
       if (j && typeof j === 'object' && !Array.isArray(j) && (typeof j.output === 'string' || (j.metadata && typeof j.metadata === 'object'))) {
         const code = j.metadata && typeof j.metadata === 'object' && typeof j.metadata.exit_code === 'number' ? j.metadata.exit_code : null;
-        return { failed: code !== null ? code !== 0 : refused, text: typeof j.output === 'string' ? j.output : '' };
+        return { failed: code !== null ? code !== 0 : refused, code, text: typeof j.output === 'string' ? j.output : '' };
       }
     } catch { /* plain text that happens to open with a brace */ }
   }
@@ -204,7 +427,7 @@ export function codexShellOutput(output) {
     if (end === -1) break;
     pos = end + 1;
   }
-  return { failed: code !== null ? code !== 0 : refused, text: raw.slice(from) };
+  return { failed: code !== null ? code !== 0 : refused, code, text: raw.slice(from) };
 }
 
 /** The shell command a `response_item` call carries, or null when it has none that can be read. */
@@ -220,10 +443,11 @@ function codexCallCommand(p) {
  * Reads the tool calls of ONE Codex rollout, one per call id, whichever shapes recorded them.
  * Feed every parsed line to `read`; `calls` then holds each call once, in the order it was first
  * seen:
- *   { id, ts, name, shell, command, mcp: { server, tool } | null, done, failed, text, outChars }
+ *   { id, ts, name, shell, command, mcp: { server, tool } | null, done, failed, code, text, outChars }
  * `ts` is the time of the first record that mentions the call, `name` the tool name a
  * `response_item` gave it (null when only its completion was recorded), `done` whether an outcome
- * was read (shell calls only). `command` and `text` are never to be printed.
+ * was read (shell calls only), `code` the exit status when the rollout recorded one (else null).
+ * `command` and `text` are never to be printed.
  * `unrecognized` counts, per record kind (`item:<type>`, `event:<type>`, `<kind>:no-server`), the
  * records that look like a tool call in a shape this reader does not know: with any of those,
  * "this tool was never called" is not established.
@@ -237,15 +461,15 @@ export function codexCallReader() {
     const key = typeof id === 'string' && id ? id : null;
     let call = key !== null ? byId.get(key) : undefined;
     if (call) return { call, created: false };
-    call = { id: key, ts, name: null, shell: false, command: null, mcp: null, done: false, sure: false, failed: false, text: '', outChars: 0 };
+    call = { id: key, ts, name: null, shell: false, command: null, mcp: null, done: false, sure: false, failed: false, code: null, text: '', outChars: 0 };
     calls.push(call);
     if (key !== null) byId.set(key, call);
     return { call, created: true };
   };
   // The outcome a completion event reports is kept over the one read from an output item.
-  const settle = (call, failed, text, outChars, sure) => {
+  const settle = (call, failed, code, text, outChars, sure) => {
     const first = !call.done;
-    if (first || (sure && !call.sure)) { call.failed = failed; call.text = text; call.outChars = outChars; call.sure = sure; }
+    if (first || (sure && !call.sure)) { call.failed = failed; call.code = code; call.text = text; call.outChars = outChars; call.sure = sure; }
     call.done = true;
     return first;
   };
@@ -255,7 +479,8 @@ export function codexCallReader() {
     if (call.command === null) call.command = codexCommandString(cmd);
     const failed = (typeof o.exit_code === 'number' && o.exit_code !== 0) || o.status === 'failed';
     const out = typeof o.aggregated_output === 'string' ? o.aggregated_output : typeof o.stdout === 'string' ? o.stdout : '';
-    const completed = settle(call, failed, `${typeof o.stderr === 'string' ? o.stderr : ''}\n${out}`, out.length, true);
+    const code = typeof o.exit_code === 'number' ? o.exit_code : null;
+    const completed = settle(call, failed, code, `${typeof o.stderr === 'string' ? o.stderr : ''}\n${out}`, out.length, true);
     return { call, created, completed };
   };
   const mcpCall = (id, ts, inv, kind) => {
@@ -282,7 +507,7 @@ export function codexCallReader() {
           const call = typeof p.call_id === 'string' ? byId.get(p.call_id) : undefined;
           if (!call || !call.shell) return null; // only a command's outcome is counted
           const out = codexShellOutput(p.output);
-          return { call, created: false, completed: settle(call, out.failed, out.text, out.text.length, false) };
+          return { call, created: false, completed: settle(call, out.failed, out.code, out.text, out.text.length, false) };
         }
         if (!p.type.endsWith('_call')) return null;
         const { call, created } = open(p.call_id, ts);

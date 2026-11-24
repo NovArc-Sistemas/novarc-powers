@@ -94,7 +94,7 @@ Uma skill por plugin: instale só as que quiser.
 ### Uma versão fixa, direto do GitHub
 
 ```bash
-npx -y github:NovArc-Sistemas/novarc-powers#v0.2.1 fetch <skill>
+npx -y github:NovArc-Sistemas/novarc-powers#v0.2.2 fetch <skill>
 ```
 
 ## O que tem dentro

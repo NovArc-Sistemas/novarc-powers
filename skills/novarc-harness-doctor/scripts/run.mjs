@@ -10,15 +10,16 @@
 // (stdout then holds { "ok": false, "error": ... }). Without --run the latest run is used.
 // Nothing is ever written outside the run directory, except by `undo`, which restores the files
 // the run itself changed, and by what leaves a review record under history/ next to runs/: `close`
-// and `history --write`, then whatever changes a status for a run that already has one. `history`,
-// `init` and `close` also put that folder back in line with its records (a missing `.md`, an index
-// that says something else).
+// and `history --write`, then whatever changes a status for a run that already has one, and
+// `experiment end`, which writes a marker beside the records (history/<key>/ended/<runId>.json)
+// and never a record. `history`, `init` and `close` also put that folder back in line with its
+// records (a missing `.md`, an index that says something else).
 // NOVARC_POWERS_HOME replaces the home directory and NOVARC_HD_NOW the clock (tests).
 import { parseArgs, isMain, printJson, warn, normalizeInputPath } from './lib/common.mjs';
 import { RunError, UsageError, Plain, sleepSync, lostLocks } from './lib/run/store.mjs';
 import { resolveRunId, loadRun } from './lib/run/model.mjs';
 import { init, listRuns } from './lib/run/init.mjs';
-import { closeRun, history, healHistory } from './lib/run/history.mjs';
+import { closeRun, history, healHistory, endExperiment } from './lib/run/history.mjs';
 import { probe } from './lib/run/probe.mjs';
 import { claim, release, complete, requireSession } from './lib/run/claims.mjs';
 import { build } from './lib/run/build.mjs';
@@ -58,10 +59,10 @@ const RUN = '[--run <id>]';
 const COMMANDS = {
   init: {
     usage: [
-      '--select <selection.json> [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <a>]',
-      '--follow-up <runId|latest> [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <a>]',
+      '--select <selection.json> [--mode guided|doctor|measure] [--days 30] [--lang pt|en] [--title <t>] [--agent <a>]',
+      '--follow-up <runId|latest> [--mode guided|doctor|measure] [--days 30] [--lang pt|en] [--title <t>] [--agent <a>]',
     ],
-    about: 'Start a run from a selection of accounts and projects, or over the harnesses of an earlier run (the ones that still exist). A harness that has a review record is measured since that review.',
+    about: 'Start a run from a selection of accounts and projects, or over the harnesses of an earlier run (the ones that still exist). A harness that has a review record is measured since that review, and one with an open experiment says so. --mode measure: no review units, only the measurements (a baseline for a later review).',
     // The records are what a new run reads, so its own harnesses are read first; the files made
     // from the records (index.json, the `.md`) are put right afterwards.
     run: (args) => { const out = init(args); healHistory(); return out; },
@@ -75,6 +76,13 @@ const COMMANDS = {
     usage: ['[--harness <key|path>] [--json] [--lang pt|en]', `--write ${RUN}`],
     about: 'Say what was reviewed before, per harness, and which follow-ups are due (text, or JSON with --json), from the review records alone; a missing .md or an index that disagrees with them is made again. With --write, write the review records of a run without closing it.',
     run: (args) => history(args),
+  },
+  experiment: {
+    usage: ['end --harness <key|path>'],
+    // `end` is the one word this command takes before its options.
+    positional: ['end'],
+    about: 'End the experiment open on a harness before its date. The review record is not changed: a marker beside it says the experiment ended.',
+    run: (args) => endExperiment(args),
   },
   status: {
     usage: [RUN],
@@ -115,10 +123,10 @@ const COMMANDS = {
   },
   decide: {
     usage: [
-      `${RUN} --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--rev <rev>]`,
+      `${RUN} --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--rev <rev>] [--override-experiment]`,
       `${RUN} --target <itemId|accounts.primary> --answered`,
     ],
-    about: 'Record a decision made in chat (bound to --rev, else to the item as it is now), or clear a question that was answered.',
+    about: 'Record a decision made in chat (bound to --rev, else to the item as it is now), or clear a question that was answered. Approving an item held for an open experiment needs --override-experiment.',
     run: (args) => decide(ctxOf(args), args),
   },
   decisions: {
@@ -147,9 +155,9 @@ const COMMANDS = {
     run: (args) => next(ctxOf(args)),
   },
   close: {
-    usage: [RUN],
-    about: 'Write the review record of every harness, then mark the run closed.',
-    run: (args) => closeRun(ctxOf(args)),
+    usage: [`${RUN} [--experiment <what you are testing> [--follow-up-days <n>]]`],
+    about: 'Write the review record of every harness, then mark the run closed. With --experiment, the records start an experiment: until the follow-up date (--follow-up-days, default from the catalog), later reviews hold back changes to what loads at the start of every session.',
+    run: (args) => closeRun(ctxOf(args), args),
   },
 };
 
@@ -223,7 +231,10 @@ async function runOne(argv) {
     }
     if (rest.some(isHelpFlag)) return { code: 0, text: helpText(command) };
     const args = parseArgs(rest);
-    if (args._.length) throw new UsageError(`unexpected argument "${args._[0]}": every option is a --flag`);
+    const positional = COMMANDS[command].positional;
+    if (positional) {
+      if (args._.length !== 1 || !positional.includes(args._[0])) throw new UsageError(`usage: ${usageLines(command).join(' | ')}`);
+    } else if (args._.length) throw new UsageError(`unexpected argument "${args._[0]}": every option is a --flag`);
     const allowed = optionsOf(command);
     for (const k of Object.keys(args)) {
       if (k !== '_' && !allowed.has(k)) throw new UsageError(`unknown option --${k} for ${command} (see run.mjs ${command} --help)`);

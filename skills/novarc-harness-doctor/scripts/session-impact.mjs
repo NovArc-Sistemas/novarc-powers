@@ -5,7 +5,25 @@
 // Measures what a harness costs over a window, from local agent session transcripts: tokens per
 // kind (input, cache write, cache read, output), the context every session starts with and peaks
 // at, and the tokens spent in waste episodes (retry loops, identical-call loops, missing commands,
-// hook blocks, corrected work, sessions ending on an error, exploration before the first edit).
+// tool calls a hook denied, corrected work, sessions ending on an error, exploration before the
+// first edit). Each kind's exact rule is its METHODS string below, printed with the number:
+//   - retry: the SAME command line (whitespace collapsed, not just its head) failing and run again
+//     3 or more times. A search that finds nothing is not a failure (`rg`, `grep`, `ag`, `ack`,
+//     `findstr`, `Select-String`, `git grep`, `diff`, `cmp`, `test` / `[` exiting 1, judged on the
+//     program whose status the line reports, its last segment). An edit between two attempts (an
+//     Edit/Write-type call, a Codex apply_patch, or a shell command that recognisably writes files)
+//     ends the chain: fixing and rerunning is not a repetition.
+//   - loop: 5+ consecutive identical calls (same tool, same input; a shell call compared by its
+//     normalised command line).
+//   - notfound: consecutive shell calls, with no other call between them, that fail because the
+//     same executable does not exist.
+//   - hook-block: only a hook that DENIED a tool call before it ran, read from structured fields
+//     (lib/transcripts.mjs, hook outcomes), never from result text. A Stop / SubagentStop hook that
+//     blocks the end of a response makes the agent keep working: that is the hook doing its job,
+//     counted apart in `hookOutcomes`, like UserPromptSubmit blocks and outcomes with no event.
+//   - correction: a real user message that follows a turn that did work, is not a question, is not
+//     a short answer to a question the assistant just asked, and carries a marker about the work
+//     (lib/transcripts.mjs, corrections). A bare leading "não" / "no" is not enough.
 // Also lists skills and MCP servers that were configured but never used, and shell output volume
 // by command head. Aggregates only: it never prints message text, command lines beyond the
 // 2-token head, tool output, file paths from inside a transcript, or absolute home paths.
@@ -48,8 +66,9 @@ import { IS_WIN, parseArgs, isMain, printJson, warn, normalizeInputPath, isDir, 
 import { claudeConfigDirs, codexDirs, agentsDirs } from './lib/locations.mjs';
 import { scanCodexToml } from './discover.mjs';
 import {
-  SHELL_TOOLS, EDIT_TOOLS, EXPLORE_TOOLS, NOT_FOUND_RE, SAFE_NAME, safeName, resultText, isHumanText, isCorrection,
-  hookBlockText, hookBlockAttachment, skillsReadIn, normalizeMcpName, eachJsonLine, listClaudeTranscripts, listJsonl, pool,
+  SHELL_TOOLS, EDIT_TOOLS, EXPLORE_TOOLS, NOT_FOUND_RE, SAFE_NAME, safeName, resultText, isHumanText, isCorrection, asksUser,
+  hookDenialOf, hookOutcomeOf, normalizeCommand, noMatchExit, claudeExitCode, writesFiles, retryRuns,
+  skillsReadIn, normalizeMcpName, eachJsonLine, listClaudeTranscripts, listJsonl, pool,
   commandHead, matchesProjectDir, matchesProjectCwd, codexCallReader, codexCallName, codexCallLine,
 } from './lib/transcripts.mjs';
 
@@ -66,7 +85,7 @@ const LABELS = {
   loop: 'Identical tool calls repeated in a row',
   notfound: 'Commands that do not exist here',
   correction: 'Work the user corrected',
-  'hook-block': 'Calls blocked by a hook',
+  'hook-block': 'Tool calls a hook denied',
   'error-end': 'Sessions ending on an error',
   exploration: 'Exploration before the first edit',
 };
@@ -75,12 +94,13 @@ const METHODS = {
   window: 'Files modified before the window start are skipped, and inside a file only model calls whose own timestamp falls in the window are counted.',
   contextAtStart: 'Input + cacheWrite + cacheRead of the first model call of each top-level session (subagents excluded), counted only when that call falls inside the window and is not a duplicate of an earlier file.',
   contextPeak: 'Per top-level session (subagents excluded), the largest input + cacheWrite + cacheRead of any in-window model call; sessionsOver160k counts sessions whose peak exceeded 160,000 tokens.',
-  retry: 'A shell command head that fails (is_error or non-zero exit) and is run again with the same head at least 3 more times before a success or the end of the thread; tokens are every turn from the first failure to the resolving success (or the last attempt).',
-  loop: 'At least 5 consecutive tool calls in a thread with the same tool name and an identical input (compared by hash, never stored); tokens are the turns from the first to the last call of the run, minus turns already claimed by a retry loop.',
-  notfound: 'A failed shell command whose output says the command or file does not exist (command not found, is not recognized as, No such file or directory); tokens are every turn from that failure to the last consecutive not-found attempt of the same head.',
-  'hook-block': 'A tool result marked as an error whose text says a hook blocked or denied the call (plus hook attachments of a blocking type); tokens are the turn that issued the blocked call.',
-  correction: 'A real user message (not a tool result, command wrapper or compaction summary) shorter than 280 characters that matches pt/en correction markers; tokens are the model turns between the previous user message and the correction (top-level threads only).',
-  'error-end': 'A top-level session whose last tool result is an error; tokens are its last 3 turns.',
+  retry: 'The same shell command, compared on its whole command line with whitespace collapsed (never on its first words alone), that fails and is run again at least 3 more times in the same thread, each attempt failing except possibly the last, before a success or the end of the thread. A failure is is_error or a non-zero exit, except a search or test finding nothing: exit status 1 of rg, grep, egrep, fgrep, zgrep, ag, ack, findstr, Select-String, git grep, git diff, diff, cmp, test or [ (the program whose status the line reports, its last segment) is not a failure. An edit between two attempts ends the chain (an Edit/Write/MultiEdit/NotebookEdit call, a Codex apply_patch, or a shell command that recognisably writes files: a redirection into a file, tee, sed -i, mv, cp, rm, git checkout/restore/apply and the like), because fixing and running again is not a repetition; other calls in between do not end it. Tokens are every turn from the first failure to the resolving success (or the last attempt).',
+  loop: 'At least 5 consecutive tool calls in a thread with the same tool name and an identical input (a shell call compared by its whole command line with whitespace collapsed, any other call by its full input; compared by hash, never stored); tokens are the turns from the first to the last call of the run, minus turns already claimed by a retry loop.',
+  notfound: 'A failed shell command whose output says the program does not exist (command not found, is not recognized as, a shell reporting No such file or directory for the program it runs); consecutive such failures of the same executable with no other tool call between them are one episode; tokens are the turns from the first to the last of them.',
+  'hook-block': 'A tool call that a hook denied before it ran, read only from structured transcript fields: a tool result whose permissionDecision is a rejection by a hook (PreToolUse, or PermissionRequest), or a hook_blocking_error record whose hookEvent is PreToolUse or PermissionRequest; one episode per denied call; tokens are the turn that issued it. The text of a tool result is never read for this, so a result that only mentions a hook is not counted. A Stop or SubagentStop hook that blocks (makes the agent continue), a UserPromptSubmit block and a blocking outcome with no event are not waste: see hookOutcomes.',
+  correction: 'A real user message (not a tool result, command wrapper or compaction summary) shorter than 280 characters that (a) follows at least one tool call in the same thread since the previous user message, (b) is not a question (does not end with "?" or open with a question form such as "por que", "dá pra", "não dá pra", "pode", "why", "can you"), (c) is not an answer of 12 words or fewer to a question the assistant just asked (its last text ended a paragraph with "?" or offered options), and (d) carries a pt/en marker about the work ("não era isso", "está errado", "desfaz", "reverte", "volta como estava", "você apagou/mudou/quebrou", "eu disse/pedi", "não mexe/não faça", "that\'s wrong", "revert", "undo", "I said/asked", "don\'t touch", "you broke"); a bare leading "não" or "no" is not a marker. Tokens are the model turns between the previous user message and the correction (top-level threads only).',
+  'error-end': 'A top-level session whose last tool result is an error (a search finding nothing is not an error, as in retry); tokens are its last 3 turns.',
+  hookOutcomes: 'Hook outcomes read from structured transcript fields, counted with the model turn they follow (so only in the window and never twice). denials: tool calls a hook denied before they ran, by event (the hook-block waste, before turns claimed by a higher kind are taken away). continues: a Stop or SubagentStop hook blocked the end of a response, so the agent kept working; promptBlocks: a UserPromptSubmit hook blocked a prompt; stopped: a hook stopped the agent (continue: false); otherBlocking: blocking outcomes of other events, by event; unknown: blocking outcomes that name no event. None of these is waste.',
   exploration: 'Turns that only issued Read/Grep/Glob/LS-type calls after a real user message and before the first Edit/Write/MultiEdit/NotebookEdit that follows it (segments with no edit are not counted; top-level Claude threads only).',
   unusedContext: 'Skills are folders with a SKILL.md in the scope\'s skills dirs whose skillInvocations count for the window is 0 (no Skill tool call, slash command, skill attribution or read of their SKILL.md among the counted events); MCP servers are names configured in the scope\'s settings, .mcp.json, ~/.claude.json and Codex config.toml whose mcpCalls count is 0. A name whose absence from the counts could not be established is listed under skillsUnknown or mcpServersUnknown instead and never here: see coverage. When --config-dirs or --codex-dirs names the accounts to read, only what those accounts hold is listed: ~/.claude.json counts only when ~/.claude is one of the config dirs named, and the skills of ~/.agents are left out.',
   carried: 'Derived from measured values, not measured itself. For each top-level session measured above: the context of its first model call, counted once for every later model call of that session in the window (turns counts the first call too), and capped on each later call at what that call really sent (input + cacheWrite + cacheRead), so a compaction that shrank the context never adds more than was sent. The assumption is that the starting context stays loaded for the whole session. carriedWeighted prices each of those re-reads at the cache-read ratio of the model of the later call (of the session\'s first call when the later call names no model), because later calls read the starting context from the prompt cache.',
@@ -108,7 +128,14 @@ function inputHash(v) {
 }
 
 function newThread(source, sessionId, sidechain, order) {
-  return { source, sessionId, sidechain, order, turns: [], byId: new Map(), events: [], calls: new Map(), cwd: null, slash: [] };
+  // work: a tool call since the last real user message; asked: the assistant's last text asked something.
+  return { source, sessionId, sidechain, order, turns: [], byId: new Map(), events: [], calls: new Map(), cwd: null, slash: [], hooks: [], denied: new Set(), work: false, asked: false };
+}
+
+/** A hook outcome that is not waste, hung on the turn it follows: counted exactly when that turn is. */
+function neutralHook(th, h) {
+  const key = h.outcome === 'continue' || h.outcome === 'other' ? `${h.outcome}:${h.event}` : h.outcome;
+  th.hooks.push([Math.max(0, th.turns.length - 1), key]);
 }
 
 // ---------------------------------------------------------------- Claude
@@ -118,7 +145,7 @@ function newThread(source, sessionId, sidechain, order) {
 function claudeWant(head) {
   if (head.startsWith('{"type":"api-request')) return false;
   if (head.includes('"role":"assistant"') || head.includes('"role":"user"') || head.includes('"type":"assistant"') || head.includes('"type":"user"')) return true;
-  return (head.includes('"type":"attachment"') || head.includes('"attachment":') || head.includes('"type":"system"')) && head.includes('hook');
+  return (head.includes('"type":"attachment"') || head.includes('"attachment":') || head.includes('"type":"system"')) && /hook/i.test(head);
 }
 
 async function parseClaudeFile(entry, ctx) {
@@ -153,12 +180,18 @@ async function parseClaudeFile(entry, ctx) {
       }
       if (Array.isArray(content)) {
         for (const c of content) {
+          if (c && c.type === 'text' && typeof c.text === 'string' && c.text.trim()) th.asked = asksUser(c.text);
           if (!c || c.type !== 'tool_use' || typeof c.name !== 'string') continue;
           const input = c.input && typeof c.input === 'object' ? c.input : {};
-          const call = { k: 'call', turn: idx, name: c.name, hash: inputHash(c.input), head: null, shell: SHELL_TOOLS.has(c.name), explore: EXPLORE_TOOLS.has(c.name), edit: EDIT_TOOLS.has(c.name) };
+          const call = { k: 'call', turn: idx, name: c.name, hash: inputHash(c.input), head: null, cmd: null, command: null, writes: false, shell: SHELL_TOOLS.has(c.name), explore: EXPLORE_TOOLS.has(c.name), edit: EDIT_TOOLS.has(c.name) };
+          th.work = true;
           t.tools.push(c.name);
           if (call.shell && typeof input.command === 'string') {
             call.head = commandHead(input.command);
+            call.command = input.command;
+            call.cmd = normalizeCommand(input.command);
+            call.writes = writesFiles(input.command);
+            if (call.cmd !== null) call.hash = inputHash(call.cmd); // identical command line, whatever else the input says
             for (const s of skillsReadIn(input.command)) t.reads.push(s);
           }
           if (c.name === 'Read' && typeof input.file_path === 'string') for (const s of skillsReadIn(input.file_path)) t.reads.push(s);
@@ -173,14 +206,23 @@ async function parseClaudeFile(entry, ctx) {
       }
     } else if (o.type === 'user' && msg) {
       let sawResult = false;
+      const denial = hookDenialOf(o);
       if (Array.isArray(content)) {
         for (const c of content) {
           if (!c || c.type !== 'tool_result') continue;
           sawResult = true;
           const call = th.calls.get(c.tool_use_id) || null;
           const text = resultText(c.content);
-          const isErr = c.is_error === true;
-          th.events.push({ k: 'result', call, isErr, notFound: isErr && NOT_FOUND_RE.test(text), hook: isErr && hookBlockText(text) });
+          // A search that found nothing exits 1 and is marked as an error: it is not a failure.
+          const isErr = c.is_error === true && !(call && call.shell && noMatchExit(call.command, claudeExitCode(text)));
+          th.events.push({ k: 'result', call, isErr, notFound: isErr && NOT_FOUND_RE.test(text) });
+          if (denial && c.is_error === true) {
+            const key = typeof c.tool_use_id === 'string' ? c.tool_use_id : null;
+            if (key === null || !th.denied.has(key)) {
+              if (key !== null) th.denied.add(key);
+              th.events.push({ k: 'hook', event: denial, turn: call ? call.turn : th.turns.length - 1, head: call ? call.head : null });
+            }
+          }
           // A shell result counts with the call it answers, so it is kept on that call's turn.
           if (call && call.shell) th.turns[call.turn].res.push(call.head || '<unknown>', text.length);
         }
@@ -189,20 +231,30 @@ async function parseClaudeFile(entry, ctx) {
         const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((c) => c && c.type === 'text').map((c) => c.text) : [];
         let human = false;
         let correction = false;
+        const ctx = { work: th.work, asked: th.asked };
         for (const t of texts) {
           if (typeof t !== 'string') continue;
           const cmd = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/.exec(t);
           if (cmd) { th.slash.push([parseTs(o.timestamp), typeof o.uuid === 'string' ? o.uuid : null, cmd[1]]); continue; }
           if (!isHumanText(t)) continue;
           human = true;
-          if (isCorrection(t)) correction = true;
+          if (isCorrection(t, ctx)) correction = true;
         }
-        if (human) th.events.push({ k: 'user', at: th.turns.length, correction });
+        if (human) {
+          th.events.push({ k: 'user', at: th.turns.length, correction });
+          th.work = false;
+          th.asked = false;
+        }
       }
-    } else if (o.type === 'attachment' && o.attachment && hookBlockAttachment(o.attachment.type)) {
-      th.events.push({ k: 'hook', turn: th.turns.length - 1 });
-    } else if (o.type === 'system' && /hook/i.test(String(o.subtype || '')) && o.preventedContinuation === true) {
-      th.events.push({ k: 'hook', turn: th.turns.length - 1 });
+    } else if (o.type === 'attachment' || o.type === 'system') {
+      const h = hookOutcomeOf(o);
+      if (h && h.outcome === 'denial') {
+        const call = h.toolUseId !== null ? th.calls.get(h.toolUseId) || null : null;
+        if (h.toolUseId === null || !th.denied.has(h.toolUseId)) {
+          if (h.toolUseId !== null) th.denied.add(h.toolUseId);
+          th.events.push({ k: 'hook', event: h.event, turn: call ? call.turn : th.turns.length - 1, head: call ? call.head : null });
+        }
+      } else if (h) neutralHook(th, h);
     }
   }, { want: claudeWant, onUnparsable: ctx.lost });
   const out = [main];
@@ -213,8 +265,11 @@ async function parseClaudeFile(entry, ctx) {
 // ---------------------------------------------------------------- Codex
 
 function codexWant(reader) {
-  return (head) => head.includes('"token_count"') || head.includes('"item_completed"') || head.includes('"session_meta"') || head.includes('"turn_context"') || head.includes('"user_message"') || codexCallLine(head, reader);
+  return (head) => head.includes('"token_count"') || head.includes('"item_completed"') || head.includes('"session_meta"') || head.includes('"turn_context"') || head.includes('"user_message"') || head.includes('"agent_message"') || head.includes('"patch_apply_end"') || codexCallLine(head, reader);
 }
+
+// Codex edits: an apply_patch tool call, a patch_apply_end event or a completed FileChange item.
+const CODEX_EDIT_TOOLS = new Set(['apply_patch']);
 
 async function parseCodexFile(file, ctx) {
   const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(file);
@@ -229,7 +284,15 @@ async function parseCodexFile(file, ctx) {
   const resultEvents = new Map(); // call -> the event of its outcome
   let sawUsage = false;
   let curModel = null; // the model named by the latest turn_context; used for price weights only
+  let asked = false; // the assistant's last message asked something
+  let edits = 0;
   const flush = (idx) => { for (const e of pending) e.turn = idx; pending = []; };
+  const editEvent = () => {
+    const ev = { k: 'call', turn: null, name: 'apply_patch', hash: `edit${edits++}`, head: null, cmd: null, command: null, writes: false, shell: false, explore: false, edit: true };
+    th.events.push(ev);
+    pending.push(ev);
+  };
+  const agentText = (text) => { if (typeof text === 'string' && text.trim()) asked = asksUser(text); };
   await eachJsonLine(file, (o) => {
     const p = o.payload && typeof o.payload === 'object' ? o.payload : null;
     if (!p) return;
@@ -237,26 +300,33 @@ async function parseCodexFile(file, ctx) {
     if (o.type === 'turn_context' && typeof p.model === 'string' && p.model) curModel = p.model;
     const hit = reader.read(o);
     if (hit) {
-      // Waste episodes are about commands, so only a shell call becomes an event of the thread.
-      // Its details are filled in once the file is read: a later record of the same call can
-      // still bring its command or a firmer outcome.
+      // Waste episodes are about commands and edits, so only a shell call or an edit becomes an
+      // event of the thread. A shell call's details are filled in once the file is read: a later
+      // record of the same call can still bring its command or a firmer outcome.
       if (hit.call.shell) {
         let ev = callEvents.get(hit.call);
         if (!ev) {
-          ev = { k: 'call', turn: null, name: '', hash: '', head: null, shell: true, explore: false, edit: false };
+          ev = { k: 'call', turn: null, name: '', hash: '', head: null, cmd: null, command: null, writes: false, shell: true, explore: false, edit: false };
           callEvents.set(hit.call, ev);
           th.events.push(ev);
           pending.push(ev);
         }
         if (hit.completed) {
-          const r = { k: 'result', call: ev, isErr: false, notFound: false, hook: false };
+          const r = { k: 'result', call: ev, isErr: false, notFound: false };
           resultEvents.set(hit.call, r);
           th.events.push(r);
         }
-      }
+      } else if (hit.created && CODEX_EDIT_TOOLS.has(hit.call.name)) editEvent();
       return;
     }
     if (o.type !== 'event_msg') return;
+    if (p.type === 'patch_apply_end' || (p.type === 'item_completed' && p.item && typeof p.item === 'object' && p.item.type === 'FileChange')) { editEvent(); return; }
+    if (p.type === 'agent_message') { agentText(p.message); return; }
+    if (p.type === 'item_completed' && p.item && typeof p.item === 'object' && p.item.type === 'AgentMessage') {
+      const it = p.item;
+      agentText(typeof it.text === 'string' ? it.text : Array.isArray(it.content) ? it.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n') : null);
+      return;
+    }
     if (p.type === 'token_count' && p.info && p.info.total_token_usage && typeof p.info.total_token_usage === 'object') {
       sawUsage = true;
       const t = p.info.total_token_usage;
@@ -269,10 +339,12 @@ async function parseCodexFile(file, ctx) {
       th.turns.push({ id: null, ts: parseTs(o.timestamp), input: Math.max(0, d.input - d.cached - d.cw), cacheWrite: d.cw, cacheRead: d.cached, output: d.output, cw1h: 0, model: curModel, calls: pending.slice() });
       flush(idx);
     } else if (p.type === 'user_message' && typeof p.message === 'string') {
-      evUsers.push({ at: th.turns.length, pos: th.events.length, text: p.message });
+      evUsers.push({ at: th.turns.length, pos: th.events.length, calls: reader.calls.length + edits, asked, text: p.message });
+      asked = false;
     } else if (p.type === 'item_completed' && p.item && typeof p.item === 'object' && p.item.type === 'UserMessage' && Array.isArray(p.item.content)) {
       const text = p.item.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
-      itemUsers.push({ at: th.turns.length, pos: th.events.length, text });
+      itemUsers.push({ at: th.turns.length, pos: th.events.length, calls: reader.calls.length + edits, asked, text });
+      asked = false;
     }
   }, { want: codexWant(reader), onUnparsable: ctx.lost });
   if (pending.length) {
@@ -284,17 +356,21 @@ async function parseCodexFile(file, ctx) {
   for (const [call, ev] of callEvents) {
     ev.name = codexCallName(call);
     ev.head = commandHead(call.command);
+    ev.command = call.command;
+    ev.cmd = normalizeCommand(call.command);
+    ev.writes = writesFiles(call.command);
     // A command that could not be read never looks identical to another one.
-    ev.hash = call.command === null ? `?${unread++}` : inputHash(call.command);
+    ev.hash = ev.cmd === null ? `?${unread++}` : inputHash(ev.cmd);
   }
   for (const [call, r] of resultEvents) {
-    r.isErr = call.failed;
-    r.notFound = call.failed && NOT_FOUND_RE.test(call.text);
-    r.hook = call.failed && hookBlockText(call.text);
+    // A search that found nothing exits 1: it is not a failure.
+    r.isErr = call.failed && !noMatchExit(call.command, call.code);
+    r.notFound = r.isErr && NOT_FOUND_RE.test(call.text);
   }
-  // One user turn is recorded in several places; use one source only.
-  const users = evUsers.length ? evUsers : itemUsers;
-  const ins = users.filter((u) => isHumanText(u.text)).map((u) => ({ pos: u.pos, ev: { k: 'user', at: u.at, correction: isCorrection(u.text) } }));
+  // One user turn is recorded in several places; use one source only. A message corrects work
+  // only when a tool call was recorded since the previous one.
+  const users = (evUsers.length ? evUsers : itemUsers).filter((u) => isHumanText(u.text));
+  const ins = users.map((u, i) => ({ pos: u.pos, ev: { k: 'user', at: u.at, correction: isCorrection(u.text, { work: u.calls > (i ? users[i - 1].calls : 0), asked: u.asked }) } }));
   for (let i = ins.length - 1; i >= 0; i--) th.events.splice(ins[i].pos, 0, ins[i].ev);
   // The counted calls of this rollout: one per call, by the time of its first record. Tool names,
   // skill reads and shell output all come from this one list.
@@ -327,31 +403,25 @@ export function episodesOf(th) {
   const outcome = new Map();
   for (const e of th.events) if (e.k === 'result' && e.call) outcome.set(e.call, e);
   const calls = th.events.filter((e) => e.k === 'call' && e.turn !== null && e.turn >= 0);
-  // Attempts per shell head, in call order, with their outcome.
-  const attempts = new Map();
-  for (const e of calls) {
-    if (!e.shell || !e.head) continue;
+  // retry: the same normalised command failing again and again, with no edit in between.
+  const seq = calls.map((e) => {
     const r = outcome.get(e) || null;
-    const list = attempts.get(e.head) || [];
-    list.push({ turn: e.turn, failed: !!(r && r.isErr), notFound: !!(r && r.notFound) });
-    attempts.set(e.head, list);
+    return { shell: !!e.shell, cmd: e.cmd || null, failed: !!(r && r.isErr), edit: !!(e.edit || e.writes) };
+  });
+  for (const run of retryRuns(seq)) {
+    const head = calls[run.first].head;
+    eps.push({ kind: 'retry', turns: range(calls[run.first].turn, calls[run.last].turn), heads: head ? [head] : [] });
   }
-  for (const [head, list] of attempts) {
-    for (let i = 0; i < list.length;) { // retry
-      if (!list[i].failed) { i++; continue; }
-      let j = i + 1;
-      while (j < list.length && list[j].failed) j++;
-      const end = j < list.length ? j : list.length - 1;
-      if (end - i >= 3) eps.push({ kind: 'retry', turns: range(list[i].turn, list[end].turn), heads: [head] });
-      i = j + 1;
-    }
-    for (let i = 0; i < list.length;) { // notfound
-      if (!list[i].notFound) { i++; continue; }
-      let j = i + 1;
-      while (j < list.length && list[j].notFound) j++;
-      eps.push({ kind: 'notfound', turns: range(list[i].turn, list[j - 1].turn), heads: [head] });
-      i = j;
-    }
+  // notfound: consecutive calls failing because the same executable does not exist.
+  const exeOf = (e) => (e.head ? e.head.split(' ')[0] : null);
+  for (let i = 0; i < calls.length;) {
+    const r = outcome.get(calls[i]);
+    if (!calls[i].shell || !(r && r.notFound)) { i++; continue; }
+    const exe = exeOf(calls[i]);
+    let j = i + 1;
+    while (j < calls.length && calls[j].shell && exe !== null && exeOf(calls[j]) === exe && (outcome.get(calls[j]) || {}).notFound) j++;
+    eps.push({ kind: 'notfound', turns: range(calls[i].turn, calls[j - 1].turn), heads: calls[i].head ? [calls[i].head] : [] });
+    i = j;
   }
   // loop: runs of identical consecutive calls (same tool, same input hash)
   for (let i = 0; i < calls.length;) {
@@ -360,9 +430,8 @@ export function episodesOf(th) {
     if (j - i >= LOOP_MIN) eps.push({ kind: 'loop', turns: range(calls[i].turn, calls[j - 1].turn), heads: calls[i].head ? [calls[i].head] : [] });
     i = j;
   }
-  for (const e of th.events) { // hook-block
-    if (e.k === 'result' && e.hook && e.call && e.call.turn !== null && e.call.turn >= 0) eps.push({ kind: 'hook-block', turns: [e.call.turn], heads: e.call.head ? [e.call.head] : [] });
-    else if (e.k === 'hook' && e.turn >= 0) eps.push({ kind: 'hook-block', turns: [e.turn], heads: [] });
+  for (const e of th.events) { // hook-block: a tool call a hook denied before it ran
+    if (e.k === 'hook' && e.turn !== null && e.turn >= 0) eps.push({ kind: 'hook-block', turns: [e.turn], heads: e.head ? [e.head] : [], event: e.event });
   }
   if (top) {
     let lastAt = 0;
@@ -641,6 +710,7 @@ async function parseJob(job, from, to, watch) {
         source: th.source, sessionId: th.sessionId, sidechain: th.sidechain, order: th.order, cwd: th.cwd,
         noUsage: !!th.noUsage, callCount: th.callCount || 0, unrecognized: th.unrecognized || [],
         eps: episodesOf(th),
+        hooks: th.hooks || [],
         turns: th.turns.map((t) => {
           const o = { id: t.id, ts: t.ts, input: t.input, cacheWrite: t.cacheWrite, cacheRead: t.cacheRead, output: t.output, cw1h: t.cw1h || 0, m: modelIndex(t.model) };
           if (t.tools && t.tools.length) o.tc = t.tools.map(nameOf);
@@ -850,6 +920,7 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
   const activeDays = new Set();
   const starts = [];
   const waste = Object.fromEntries(KINDS.map((k) => [k, { episodes: 0, sessions: new Set(), tokens: 0, weighted: 0, heads: {} }]));
+  const hookOutcomes = { denials: {}, continues: {}, promptBlocks: 0, stopped: 0, otherBlocking: {}, unknown: 0 };
   const sessKey = (th) => `${th.source}\u0000${th.sessionId}`;
   let codexNoUsage = 0;
   let startsWeighted = 0;
@@ -884,6 +955,22 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
         carried += again;
         if (again > 0) { if (t.cr === null) carriedUnrated++; else carriedScaled += again * t.cr; }
       }
+    }
+    // Hook outcomes, waste or not, count with the turn they follow.
+    for (const ep of th.eps) {
+      if (ep.kind !== 'hook-block') continue;
+      const t = th.turns[ep.turns[0]];
+      if (t && t.counted) bump(hookOutcomes.denials, ep.event || 'PreToolUse');
+    }
+    for (const [i, key] of th.hooks || []) {
+      const t = th.turns[i];
+      if (!t || !t.counted) continue;
+      const [kind, event] = key.split(':');
+      if (kind === 'continue') bump(hookOutcomes.continues, event);
+      else if (kind === 'other') bump(hookOutcomes.otherBlocking, event);
+      else if (kind === 'prompt-block') hookOutcomes.promptBlocks++;
+      else if (kind === 'stopped') hookOutcomes.stopped++;
+      else if (kind === 'unknown') hookOutcomes.unknown++;
     }
     // Waste: claim turns in priority order; a turn belongs to one kind at most.
     const owner = new Array(th.turns.length).fill(null);
@@ -987,6 +1074,7 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
       };
     }),
     wasteMethod: METHODS.dedupe,
+    hookOutcomes: { ...hookOutcomes, method: METHODS.hookOutcomes },
     unusedContext: {
       // Measured zeros only. A name whose absence could not be established is in the Unknown lists.
       skillsNeverInvoked: conf.skills.filter((n) => skillInvocations[n] === 0),

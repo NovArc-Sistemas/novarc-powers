@@ -1,6 +1,6 @@
 {
   "name": "novarc-harness-doctor",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "summary": "Finds every agent harness on your machine (each account, each project), measures what it cost over the last 30 days, and explains and fixes it on one interactive board.",
   "summary_pt": "Encontra todos os harness de agente da sua máquina (cada conta, cada projeto), mede o que custaram nos últimos 30 dias, e explica e corrige tudo num painel interativo.",
   "profile": {

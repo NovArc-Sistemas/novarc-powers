@@ -70,6 +70,9 @@ function statusTags(item) {
   if (carried) out.push(el('span', { cls: 'tag dashed', title: carriedLine(carried, T, FMT), text: T.hist.keptChip }));
   else if (e.status === 'open' && declinedBefore(item)) out.push(tag(T.hist.declinedBefore, 'dashed'));
   if (e.asked && e.status === 'open') out.push(tag(T.statusAsked, 'info'));
+  // Held for the experiment open on its harness: it waits for that date, not for a decision now.
+  var xp = isHeld(item) ? experimentOf(item.harness) : null;
+  if (xp) out.push(tag(tx(T.xp.heldTag, { date: fmtDate(xp.until) }), 'dashed'));
   return out;
 }
 

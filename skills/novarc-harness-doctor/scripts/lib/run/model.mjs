@@ -8,6 +8,7 @@ import { runPaths, latestRunId, RUN_ID_RE } from './paths.mjs';
 import { staticUnits, unitsView } from './units.mjs';
 import { itemRev, groupRev, DECISION_STATUSES } from './rev.mjs';
 import { earlierRecords, carriedDecline } from './followup.mjs';
+import { markerPath } from './experiments.mjs';
 
 /** `--run <id>`, else the latest run. */
 export function resolveRunId(args) {
@@ -192,5 +193,10 @@ export function inputsFingerprint(paths, run) {
   parts.push(`probe accounts/diff.json ${stat(path.join(paths.probeDir('accounts'), 'diff.json'))}`);
   // The review records a follow-up is compared with (never this run's own).
   for (const h of run.harnesses) for (const e of earlierRecords(run, h)) parts.push(`record ${e.record.harnessKey}/${e.name} ${stat(e.file)}`);
+  // An experiment ended early (`run.mjs experiment end`) changes what the board shows.
+  for (const h of run.harnesses) {
+    const last = earlierRecords(run, h).slice(-1)[0];
+    if (last) parts.push(`ended ${last.record.harnessKey}/${last.record.runId} ${stat(markerPath(last.record.harnessKey, last.record.runId))}`);
+  }
   return sha256(parts.join('\n'));
 }

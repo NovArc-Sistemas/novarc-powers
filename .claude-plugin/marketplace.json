@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "NovArc Powers: agent skills for Claude Code, Codex and other coding agents. One plugin per skill, so you install only what you use.",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "plugins": [
     {

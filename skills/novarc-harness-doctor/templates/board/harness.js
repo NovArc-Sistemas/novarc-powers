@@ -18,7 +18,7 @@ function reviewTrailEl(h) {
   if (trail.length > shown.length) list.appendChild(el('li', { cls: 'more', text: pl(T.fu.trailMore, trail.length - shown.length) }));
   var step = function (when, score, grade, cls) {
     list.appendChild(el('li', { cls: cls }, when,
-      score === null ? el('span', { text: T.notScored }) : [el('b', { text: grade || Scoring.gradeFor(score) }), el('span', { text: fmtScore(score) })]));
+      score === null ? el('span', { text: notScoredText() }) : [el('b', { text: grade || Scoring.gradeFor(score) }), el('span', { text: fmtScore(score) })]));
   };
   shown.forEach(function (r) { step(el('time', { datetime: r.at, text: fmtDate(r.at) }), r.score, r.grade, null); });
   var sc = scoresOf(h.id);
@@ -57,7 +57,19 @@ function ring(cls, r, value) {
   return svg('circle', { 'class': 'arc ' + cls, cx: 75, cy: 75, r: r, 'stroke-dasharray': c.toFixed(2), 'stroke-dashoffset': (c * (1 - v / 100)).toFixed(2) });
 }
 
+/**
+ * The one calm line a harness with an open experiment shows under its header: until when, what is
+ * being tested, and that changes to what loads at the start of sessions wait. Null without one.
+ */
+function experimentBanner(h) {
+  var e = experimentOf(h.id);
+  if (!e) return null;
+  return el('div', { cls: 'note-line xbanner', role: 'note' }, el('span', { cls: 'glyph' }), el('span', { text: experimentText(e) }));
+}
+
 function scoreConsole(h) {
+  // A measure-only run reviews nothing, so there is no score to draw: say so, once.
+  if (ST.mode === 'measure') return el('p', { cls: 'blank mnote' }, el('b', { text: T.ms.notScored + '. ' }), T.ms.console);
   var sc = scoresOf(h.id);
   var scored = sc.current !== null;
   var aria = scored ? tx(T.sc.aria, { current: fmtScore(sc.current), grade: sc.grade, baseline: fmtScore(sc.baseline), projected: fmtScore(sc.projected) }) : T.sc.ariaNone;
@@ -166,6 +178,23 @@ function impactStrip(h) {
 }
 
 /**
+ * What the hooks did that is not waste, next to the waste list and in neutral colours: a Stop hook
+ * that made the agent keep going, a prompt a UserPromptSubmit hook blocked. One line per event,
+ * then why it is not waste (with how it was counted) folded. Null when there is nothing to say.
+ */
+function hookOutcomesNote(outcomes) {
+  var notes = hookNotes(outcomes);
+  if (!notes.length) return null;
+  var box = el('div', { cls: 'ihooks', role: 'note' });
+  notes.forEach(function (n) {
+    box.appendChild(el('p', { text: n.kind === 'continue' ? pl(T.imp.hookContinues, n.n, { event: n.event }) : pl(T.imp.hookPromptBlocks, n.n) }));
+  });
+  var method = typeof outcomes.method === 'string' && outcomes.method ? outcomes.method : null;
+  box.appendChild(fold('why:hook-outcomes', 'why', T.why, [el('p', { text: T.imp.hookWhy }), method ? el('p', { cls: 'muted', text: tx(T.imp.hookMethod, { method: method }) }) : null], false));
+  return box;
+}
+
+/**
  * The full impact of one harness. `afterFixed` is drawn right after the headline panel: the
  * layers, which explain where the fixed cost comes from.
  */
@@ -261,6 +290,8 @@ function impactBlock(h, afterFixed) {
     if (byGroup.quiet.length) s.appendChild(el('p', { cls: 'quiet', text: tx(T.imp.noEpisodes, { list: kindNames(byGroup.quiet) }) }));
     if (byGroup.unknown.length) s.appendChild(el('p', { cls: 'quiet', text: T.notMeasured + ': ' + kindNames(byGroup.unknown) }));
   }
+  var hooks = hookOutcomesNote(I.hookOutcomes);
+  if (hooks) s.appendChild(hooks);
 
   // Estimate labels and sources are shown as they arrive: the scripts write them in the run language.
   var est = I.estimates || [];
@@ -493,7 +524,7 @@ function diagnosisPane(h, route) {
   var list = all.filter(function (i) { return matchesShow(i, f.show) && (!f.severity || i.severity === f.severity); })
     .map(function (i, k) { return { i: i, k: k }; })
     .sort(function (a, b) { return (a.i.round - b.i.round) || (SEV_RANK[a.i.severity] - SEV_RANK[b.i.severity]) || (a.k - b.k); });
-  if (!list.length) { pane.appendChild(el('p', { cls: 'empty', text: T.dg.none })); return pane; }
+  if (!list.length) { pane.appendChild(el('p', { cls: 'empty', text: ST.mode === 'measure' ? T.ms.noDiagnosis : T.dg.none })); return pane; }
   var cases = el('div', { cls: 'cases' });
   var round = null;
   list.forEach(function (x) {
@@ -594,6 +625,7 @@ function viewHarness(route) {
   }
   var out = el('div');
   out.appendChild(harnessHero(h));
+  append(out, [experimentBanner(h)]);
   // Nothing was found here at all: say so, instead of a row of empty panels.
   if (isEmptyHarness(h)) {
     out.appendChild(el('p', { cls: 'blank', text: emptyText(h) }));
@@ -625,7 +657,8 @@ function viewHarness(route) {
 
   out.appendChild(diagnosisPane(h, route));
   out.appendChild(defensesSection(h));
-  out.appendChild(roundsSection(h));
+  // A measure-only run has no rounds: the timeline of rounds would only say "skipped" eight times.
+  if (ST.mode !== 'measure') out.appendChild(roundsSection(h));
   out.appendChild(inventorySection(h));
   var leads = whereOf(h.id, 'leads');
   out.appendChild(section(null, T.lead.h, { why: T.lead.sub }, { id: 'dg-leads', label: T.lead.h }, leads.length ? leadList(leads) : el('p', { cls: 'empty', text: T.lead.none })));

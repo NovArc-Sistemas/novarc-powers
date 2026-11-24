@@ -11,6 +11,7 @@ import {
 import { anchorState } from '../scripts/lib/anchors.mjs';
 import { STRINGS } from '../scripts/lib/i18n.mjs';
 import { maskEmails } from '../scripts/lib/run/prose.mjs';
+import { prune, def } from '../scripts/lib/run/schema.mjs';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DATA_RE = /<script type="application\/json" id="board-data">([\s\S]*?)<\/script>/;
@@ -652,9 +653,9 @@ test('board.md: a command names the rev of what it answers, and a kind that was 
     '  - `run.mjs decide --run 20260110-ab12 --target U1-401 --action approve`\n', // no rev in the state, none in the command
     '- Retries of a command that keeps failing (measured): 100, 2 episodes',
     '- no occurrences: identical calls repeated in a row',
-    '- not measured: calls blocked by a hook, commands that do not exist here',
+    '- not measured: tool calls a hook denied, commands that do not exist here',
   ]) assert.ok(md.includes(s), `board.md has "${s}"`);
-  assert.ok(renderMarkdown(st, 'pt').includes('- sem medição: chamadas bloqueadas por um hook, comandos que não existem aqui'));
+  assert.ok(renderMarkdown(st, 'pt').includes('- sem medição: chamadas negadas por um hook, comandos que não existem aqui'));
   assert.equal(decideCommand('r1', 'A-1', 'ask', 'why "this"?', 'abcdefabcdef'), 'run.mjs decide --run r1 --target A-1 --action ask --note "why \\"this\\"?" --rev abcdefabcdef');
   assert.equal(decideCommand('r1', 'accounts.primary', 'approve', 'claude-1'), 'run.mjs decide --run r1 --target accounts.primary --action approve --note "claude-1"');
   // Only a rev reaches the command line: anything else in its place is left out.
@@ -1384,4 +1385,52 @@ test('masking for a published board: a state without addresses is not copied, an
     assert.ok(!art.read('board.md').includes('published board'), 'board.md is the same for every channel');
     assert.equal(art.read('board.md'), file.read('board.md'));
   } finally { rmrf(art.dir); rmrf(file.dir); }
+});
+
+test('board.md: what a hook did that is not waste follows the waste list, in pt and en; without it board.md is as before', () => {
+  const withImpact = (outcomes) => {
+    const st = fixture();
+    st.harnesses[0].impact = {
+      windowDays: 30, sessions: 10, totalTokens: 1000,
+      waste: [{ kind: 'hook-block', episodes: 2, tokens: 50 }],
+      ...(outcomes ? { hookOutcomes: outcomes } : {}),
+    };
+    applyScores(st);
+    assert.deepEqual(validateState(st, schema()), []);
+    return st;
+  };
+  const outcomes = { denials: { PreToolUse: 2 }, continues: { Stop: 42 }, promptBlocks: 1, stopped: 0, otherBlocking: {}, unknown: 0, method: 'Read from structured fields.' };
+  const en = renderMarkdown(withImpact(outcomes), 'en');
+  const waste = '- Tool calls a hook denied (measured): 50, 2 episodes';
+  const lines = [
+    'Your Stop hook made the agent keep going 42 times: that is the hook doing its job, not waste.',
+    'Your UserPromptSubmit hook blocked 1 prompt: that is the hook doing its job, not waste.',
+    `Why it matters: ${STRINGS.en.imp.hookWhy} How it is counted: Read from structured fields.`,
+  ];
+  assert.ok(en.includes(`${waste}\n\n${lines.join('\n\n')}\n`), 'the hook lines come right after the waste list');
+  const pt = renderMarkdown(withImpact(outcomes), 'pt');
+  assert.ok(pt.includes('- Chamadas negadas por um hook (medido): 50, 2 episódios'), pt.split('\n').filter((l) => l.includes('hook')).join('\n'));
+  for (const l of [
+    'Seu hook de Stop fez o agente continuar 42 vezes: é o hook fazendo o trabalho dele, não desperdício.',
+    'Seu hook de UserPromptSubmit bloqueou 1 prompt: é o hook fazendo o trabalho dele, não desperdício.',
+    `Por que isso importa: ${STRINGS.pt.imp.hookWhy} Como é contado: Read from structured fields.`,
+  ]) assert.ok(pt.includes(`\n${l}\n`), l);
+  // Absent, or holding only what is waste: the same board.md as before the field existed.
+  const before = renderMarkdown(withImpact(null), 'en');
+  assert.ok(!before.includes('doing its job'));
+  assert.equal(renderMarkdown(withImpact({ denials: { PreToolUse: 2 }, continues: {}, promptBlocks: 0 }), 'en'), before);
+});
+
+test('hookOutcomes fits the schema of the impact, and build keeps it (prune follows the schema)', () => {
+  const s = schema();
+  const props = s.$defs.impact.properties.hookOutcomes.properties;
+  assert.deepEqual(Object.keys(props).sort(), ['continues', 'denials', 'method', 'otherBlocking', 'promptBlocks', 'stopped', 'unknown']);
+  const st = fixture();
+  st.harnesses[0].impact = { windowDays: 30, sessions: 1, totalTokens: 10, hookOutcomes: { denials: { PreToolUse: 1 }, continues: { Stop: 2 }, promptBlocks: 0, stopped: 0, otherBlocking: { Notification: 1 }, unknown: 0, method: 'm' } };
+  assert.deepEqual(validateState(st, s), []);
+  // What build does with a probe's impact.json: pruned to .impact, the block and its maps survive whole.
+  const raw = { windowDays: 30, sessions: 1, totalTokens: 10, method: 'probe-only', hookOutcomes: { ...st.harnesses[0].impact.hookOutcomes, continues: { Stop: 2, SubagentStop: 5 } } };
+  assert.deepEqual(prune(raw, def(s, 'impact'), s), { windowDays: 30, sessions: 1, totalTokens: 10, hookOutcomes: raw.hookOutcomes });
+  st.harnesses[0].impact.hookOutcomes.extra = 1;
+  assert.ok(validateState(st, s).some((e) => /hookOutcomes: unknown property "extra"/.test(e)));
 });

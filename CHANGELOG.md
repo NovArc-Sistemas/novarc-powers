@@ -5,6 +5,33 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); 
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+### novarc-harness-doctor
+
+Ajustes vindos de um teste de campo.
+
+#### Corrigido
+
+- **Medição de desperdício mais honesta.** Retentativa agora é o mesmo comando inteiro falhando
+  de novo, sem edição no meio; busca sem resultado (`rg`, `grep`) não conta como falha.
+  Correção só conta depois de o agente ter feito trabalho, se não for pergunta nem resposta, e
+  se tiver um marcador real ("não era isso", "desfaz"). Bloqueio por hook só conta a chamada que
+  um hook negou antes de rodar, lida dos campos da transcrição, nunca do texto. Numa conta real
+  de teste, o desperdício medido caiu de 661 mi para 357 mi de tokens.
+- **Segredo em texto corrido.** "password is ...", "a senha é ...", "chave ...", "use secret ..."
+  agora são mascarados quando o que vem depois tem cara de valor.
+
+#### Adicionado
+
+- **Modo só medir** (`--mode measure`): mede e mostra o painel, sem rodadas de revisão nem
+  agentes auxiliares. Serve de linha de base para comparar depois.
+- **Experimento em andamento.** `close --experiment "o que estou testando"` abre uma janela em
+  que nada do que carrega no início das sessões é proposto como ação, para não confundir a
+  medição. Toda revisão que aplica correções abre uma janela dessas até o acompanhamento.
+- O painel mostra, sem contar como desperdício, quantas vezes um hook de Stop fez o agente
+  continuar.
+
 ## [0.2.1] - 2026-11-24
 
 ### novarc-harness-doctor

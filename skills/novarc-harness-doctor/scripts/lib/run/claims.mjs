@@ -15,6 +15,7 @@ import { validateFindings, findingsTemplate } from './findings.mjs';
 import { itemRev, DECISION_STATUSES } from './rev.mjs';
 import { hasCredential } from './secrets.mjs';
 import { harnessKeyOf, lastRecordOf, previousItem, carriedDecline } from './followup.mjs';
+import { experimentFor, experimentRule } from './experiments.mjs';
 import { refreshRecords } from './history.mjs';
 
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
@@ -108,6 +109,10 @@ export function unitBrief(ctx, unit, session, extra = {}) {
     // its items before proposing anything, and links what was seen before with `previous`.
     const last = unit.kind === 'apply' ? null : lastRecordOf(ctx.run, h);
     if (last) out.lastRecord = { runId: last.record.runId, reviewedAt: last.record.reviewedAt, file: last.file };
+    // An experiment open on this harness (experiments.mjs): what loads at the start of every
+    // session waits until it ends, and the brief says so in `experimentRules`.
+    const experiment = unit.kind === 'apply' ? null : experimentFor(ctx.run, h);
+    if (experiment) out.experiment = experiment;
     return out;
   });
   let roundFiles = unit.rounds.map((r) => ROUND_FILES[r]);
@@ -132,6 +137,8 @@ export function unitBrief(ctx, unit, session, extra = {}) {
     findingsTemplate: unit.kind === 'apply' ? null : findingsTemplate(unit, ctx.run, session),
     ...extra,
   };
+  const rules = harnesses.filter((h) => h.experiment).map((h) => experimentRule(h, h.experiment));
+  if (rules.length) brief.experimentRules = rules;
   // `revs`: the revision of each item the user approved. Pass it to `mark --rev` so that what is
   // applied is the proposal that was read, not one that replaced it in between.
   if (unit.kind === 'apply') { brief.items = unit.approved; brief.inProgress = unit.inProgress; brief.revs = unit.revs; }

@@ -22,15 +22,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeInputPath } from '../common.mjs';
-import { RunError, UsageError, Plain, readJson, readJsonl, readText, writeTextAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
+import { RunError, UsageError, Plain, readJson, readJsonl, readText, writeTextAtomic, writeJsonAtomic, toJsonText, withLock, sleepSync, sha256, nowIso, nowMs } from './store.mjs';
 import { runPaths, runsDir, latestRunId, historyDir, historyIndexPath, historyMutex, homeBase, RUN_ID_RE } from './paths.mjs';
 import { isDateTime } from './schema.mjs';
-import { loadFindings, loadItems, loadStatus, resolveGroups, resolveRunId, loadRun, inputsFingerprint } from './model.mjs';
+import { loadFindings, loadItems, loadStatus, resolveGroups, resolveRunId, loadRun, inputsFingerprint, appendLog } from './model.mjs';
 import { assembleCurrent } from './build.mjs';
 import { markClosed } from './init.mjs';
 import { limits, harnessKeyOf, ownsPath, harnessKeys, readIndexText, indexedPaths, holdsText, listRecords, ignoredRecords, starved, forgetRecords, recheckRecords, validateRecord, recordBaseName, sanitizeRecord } from './records.mjs';
 import { makeRecord, slimRecord, loadThresholds } from './followup.mjs';
 import { recordMarkdown, historyText } from './text.mjs';
+import { experimentOfRecord, openExperiment, endedAt, writeMarker, MAX_NOTE } from './experiments.mjs';
+import { hasCredential } from './secrets.mjs';
+import { homeMatchers, scrubString } from './scrub.mjs';
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const INDEX_SCHEMA = 1;
@@ -384,20 +387,60 @@ function healedPart() {
   return healed.index || healed.md ? { healed } : {};
 }
 
+const DAY = 86400000;
+
 /**
- * `run.mjs close`: write the review record of every harness, then mark the run closed. Closing a
- * run that is already closed changes nothing, except that a run closed before records existed
- * gets them. A run whose records were written and that was never marked closed (the command died
- * in between) is closed here like any other.
+ * `close --experiment <note> [--follow-up-days <n>]`: what the user is testing, as run.json keeps
+ * it (`{ note, days }`), or null without `--experiment`. The note is prose that goes into the
+ * records and onto the board: no credential, home paths as `~`.
  */
-export function closeRun(ctx) {
+function experimentArgs(args) {
+  if (args.experiment === undefined) {
+    if (args['follow-up-days'] !== undefined) throw new UsageError('--follow-up-days goes with --experiment "<what you are testing>"');
+    return null;
+  }
+  if (typeof args.experiment !== 'string' || !args.experiment.trim()) throw new UsageError('--experiment needs a short text: what you are testing');
+  const note = scrubString(args.experiment.trim().replace(/\s+/g, ' '), homeMatchers());
+  if (note.length > MAX_NOTE) throw new UsageError(`--experiment takes at most ${MAX_NOTE} characters`);
+  if (hasCredential(note)) throw new UsageError('--experiment must not hold a credential: say what you are testing in words');
+  let days = loadThresholds().followUpAfterDays;
+  if (args['follow-up-days'] !== undefined) {
+    days = Number(args['follow-up-days']);
+    if (!Number.isInteger(days) || days < 1 || days > 365) throw new UsageError('--follow-up-days must be a whole number from 1 to 365');
+  }
+  return { note, days };
+}
+
+/**
+ * `run.mjs close [--experiment <note> [--follow-up-days <n>]]`: write the review record of every
+ * harness, then mark the run closed. Closing a run that is already closed changes nothing, except
+ * that a run closed before records existed gets them, and `--experiment` marks its records as the
+ * start of an experiment (for when the flag was forgotten at the close). A run whose records were
+ * written and that was never marked closed (the command died in between) is closed here like any
+ * other.
+ *
+ * With `--experiment`, run.json keeps `{ note, days }` before the records are made, so every later
+ * writing of them says it too; the experiment ends `days` after the run was closed.
+ */
+export function closeRun(ctx, args = {}) {
+  const experiment = experimentArgs(args);
+  if (experiment) {
+    withLock(ctx.paths.mutex, () => {
+      const run = readRun(ctx.paths);
+      run.experiment = experiment;
+      writeJsonAtomic(ctx.paths.run, run);
+      ctx.run = run;
+      appendLog(ctx.paths, { event: 'experiment', days: experiment.days });
+    });
+  }
   const at = nowIso();
   const { records, extra } = withRecords(ctx, { at }, () => {
     const run = readRun(ctx.paths);
     if (run.closed === true) return { runId: ctx.paths.runId, closed: true, closedAt: run.closedAt || null, already: true };
     return markClosed(ctx, at);
   });
-  return { ...extra, historyDir: historyDir(), records, ...healedPart() };
+  const until = experiment && extra.closedAt ? new Date(Date.parse(extra.closedAt) + experiment.days * DAY).toISOString() : null;
+  return { ...extra, historyDir: historyDir(), records, ...(until ? { experiment: { note: experiment.note, until } } : {}), ...healedPart() };
 }
 
 /**
@@ -429,23 +472,31 @@ export function unrecordedRuns(limit = 25) {
  * what was found in the history folder that is not a record. Everything comes from the records;
  * the index is not read for it.
  */
+/**
+ * Does `wanted` (`--harness`) name the harness `key`? Its key, the display path of its last
+ * record, or a path that gives the hash its key ends in.
+ */
+function namesHarness(key, records, wanted) {
+  if (wanted === undefined || wanted === key) return true;
+  if (!records.length) return false;
+  const last = records[records.length - 1].record;
+  if (wanted.replace(/\\/g, '/').replace(/\/+$/, '') === last.path) return true;
+  try { return ownsPath(key, last, normalizeInputPath(wanted)); } catch { return false; }
+}
+
 function historyReport(wanted) {
   const now = nowMs();
   const harnesses = [];
   const ignored = [];
+  const experiments = [];
   for (const key of harnessKeys()) {
     const records = listRecords(key);
-    let hit = wanted === undefined || wanted === key;
-    if (!hit && records.length) {
-      const last = records[records.length - 1].record;
-      hit = wanted.replace(/\\/g, '/').replace(/\/+$/, '') === last.path;
-      // A path names a harness when it gives the hash its key ends in.
-      if (!hit) { try { hit = ownsPath(key, last, normalizeInputPath(wanted)); } catch { hit = false; } }
-    }
-    if (!hit) continue;
+    if (!namesHarness(key, records, wanted)) continue;
     for (const x of ignoredRecords(key)) ignored.push({ harness: key, file: x.file, ...(x.count ? { count: x.count } : {}), reason: x.reason });
     if (!records.length) continue;
     const last = records[records.length - 1].record;
+    const experiment = openExperiment(key, records, now);
+    if (experiment) experiments.push({ harness: key, name: last.name, ...experiment });
     harnesses.push({
       key, kind: last.kind, provider: last.provider, name: last.name, path: last.path,
       reviews: records.map(({ record }) => ({
@@ -456,9 +507,11 @@ function historyReport(wanted) {
         fixed: record.items.filter((i) => i.status === 'fixed').length,
         expectedTokens: record.items.filter((i) => i.status === 'fixed' && i.saves).reduce((sum, i) => sum + i.saves.tokens, 0),
         followUpAfter: record.followUpAfter,
+        ...(record.mode ? { mode: record.mode } : {}),
       })),
       followUpAfter: last.followUpAfter,
       due: Date.parse(last.followUpAfter) <= now,
+      ...(experiment ? { experiment } : {}),
     });
   }
   return {
@@ -466,9 +519,34 @@ function historyReport(wanted) {
     at: new Date(now).toISOString(),
     harnesses,
     due: harnesses.filter((h) => h.due).map((h) => h.key),
+    experiments,
     unrecordedRuns: unrecordedRuns(),
     ...(ignored.length ? { ignored } : {}),
   };
+}
+
+/**
+ * `run.mjs experiment end --harness <key|path>`: end the experiment open on a harness before its
+ * date. The record is not touched: a marker beside it says the experiment ended
+ * (experiments.mjs). Ending one that was already ended says so and changes nothing.
+ */
+export function endExperiment(args) {
+  if (typeof args.harness !== 'string' || !args.harness.trim()) throw new UsageError('experiment end needs --harness <key|path> (run.mjs history lists the harnesses)');
+  const wanted = args.harness.trim();
+  const keys = harnessKeys().filter((key) => { const records = listRecords(key); return records.length > 0 && namesHarness(key, records, wanted); });
+  if (!keys.length) throw new RunError('no review record names that harness: run.mjs history lists the harnesses that have one');
+  if (keys.length > 1) throw new RunError('more than one harness has that path: pass the harness key', { harnesses: keys });
+  const key = keys[0];
+  const last = listRecords(key).slice(-1)[0].record;
+  const e = experimentOfRecord(last);
+  const now = nowMs();
+  if (!e || !(Date.parse(e.until) > now)) throw new RunError(`no experiment is open on ${key}`, { harnessKey: key });
+  const base = { harnessKey: key, name: last.name, path: last.path, runId: last.runId, until: e.until, ...(e.note ? { note: e.note } : {}) };
+  const before = endedAt(key, last.runId);
+  if (before) return { ...base, ended: true, endedAt: before, already: true };
+  const at = new Date(now).toISOString();
+  withLock(historyMutex(), () => { if (!endedAt(key, last.runId)) writeMarker(key, last.runId, at); });
+  return { ...base, ended: true, endedAt: endedAt(key, last.runId) || at };
 }
 
 /** The language of the latest run: what `history` speaks when `--lang` does not say. */

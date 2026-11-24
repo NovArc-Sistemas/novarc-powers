@@ -471,6 +471,20 @@
             "basis": "measured"
           }
         ],
+        "hookOutcomes": {
+          "denials": {
+            "PreToolUse": 9
+          },
+          "continues": {
+            "Stop": 42,
+            "SubagentStop": 3
+          },
+          "promptBlocks": 2,
+          "stopped": 0,
+          "otherBlocking": {},
+          "unknown": 0,
+          "method": "Hook outcomes read from structured transcript fields, counted with the model turn they follow (so only in the window and never twice). denials: tool calls a hook denied before they ran, by event (the hook-block waste, before turns claimed by a higher kind are taken away). continues: a Stop or SubagentStop hook blocked the end of a response, so the agent kept working; promptBlocks: a UserPromptSubmit hook blocked a prompt; stopped: a hook stopped the agent (continue: false); otherBlocking: blocking outcomes of other events, by event; unknown: blocking outcomes that name no event. None of these is waste."
+        },
         "estimates": [
           {
             "id": "mcp-github",

@@ -30,14 +30,18 @@ function pendingQueue(state) {
   (state.items || []).forEach(function (i) { byId[i.id] = i; });
   var covered = {};
   var queue = [];
+  // A finding held for the experiment open on its harness is not waiting for a decision now.
+  var experimenting = {};
+  (state.harnesses || []).forEach(function (h) { if (h.experiment) experimenting[h.id] = true; });
+  var decidable = function (i) { return i.status === 'open' && !(i.heldForExperiment === true && experimenting[i.harness]); };
   (state.groups || []).forEach(function (g) {
-    var open = (g.items || []).filter(function (id) { return byId[id] && byId[id].status === 'open'; });
+    var open = (g.items || []).filter(function (id) { return byId[id] && decidable(byId[id]); });
     if (!open.length) return;
     open.forEach(function (id) { covered[id] = true; });
     queue.push({ kind: 'group', id: g.id });
   });
   (state.items || [])
-    .filter(function (i) { return i.status === 'open' && !covered[i.id]; })
+    .filter(function (i) { return decidable(i) && !covered[i.id]; })
     .map(function (i, k) { return { i: i, k: k }; })
     .sort(function (a, b) { return (again(a.i) - again(b.i)) || (sev[a.i.severity] - sev[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k); })
     .forEach(function (x) { queue.push({ kind: 'item', id: x.i.id }); });
@@ -145,6 +149,24 @@ function wasteGroups(rows) {
       var n = countOf(e.x.episodes);
       (n === null ? out.unknown : n > 0 ? out.seen : out.quiet).push(e.x);
     });
+  return out;
+}
+
+/**
+ * What the hooks did that is not waste (impact.hookOutcomes), as notes to show beside the waste:
+ * one per event whose hook made the agent keep going (`continue`, most times first, then by
+ * name), then the prompts a UserPromptSubmit hook blocked (`prompt`). Only positive whole counts
+ * are kept: an absent block, or one with nothing to say, gives an empty list.
+ */
+function hookNotes(outcomes) {
+  var out = [];
+  if (!outcomes || typeof outcomes !== 'object') return out;
+  var whole = function (n) { return typeof n === 'number' && isFinite(n) && Math.floor(n) === n && n > 0; };
+  var cont = outcomes.continues && typeof outcomes.continues === 'object' && !Array.isArray(outcomes.continues) ? outcomes.continues : {};
+  Object.keys(cont).filter(function (k) { return whole(cont[k]); })
+    .sort(function (a, b) { return (cont[b] - cont[a]) || (a < b ? -1 : a > b ? 1 : 0); })
+    .forEach(function (k) { out.push({ kind: 'continue', event: k, n: cont[k] }); });
+  if (whole(outcomes.promptBlocks)) out.push({ kind: 'prompt', n: outcomes.promptBlocks });
   return out;
 }
 

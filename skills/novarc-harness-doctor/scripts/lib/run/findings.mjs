@@ -10,6 +10,7 @@ import { homeMatchers, findHomePaths, findLongStrings } from './scrub.mjs';
 import { findCredentials, credentialErrors } from './secrets.mjs';
 import { roundApplies, ACCOUNTS_ID_BLOCK, ROUNDS } from './units.mjs';
 import { nowMs } from './store.mjs';
+import { experimentFor } from './experiments.mjs';
 
 export const MAX_STRING_BYTES = 200 * 1024;
 export const REVIEWER_STATUSES = ['open', 'ok', 'not-applicable'];
@@ -115,6 +116,13 @@ export function validateFindings(data, { unit, run, session, schemaRoot, now = n
     // `previous` naming the declined item (model.mjs, `loadItems`).
     if (!REVIEWER_STATUSES.includes(item.status)) {
       errors.push(`${at}/status: a reviewer may only set ${REVIEWER_STATUSES.join(', ')}${item.status === 'declined' ? ' (a decline of an earlier review is carried by the run: send the same proposal as open, with `previous`)' : ''}`);
+    }
+    // A finding about what loads at the start of every session waits while an experiment is open
+    // on its harness (experiments.mjs). Only an open finding can wait; without an open experiment
+    // the flag is kept and has no effect.
+    if (item.heldForExperiment === true) {
+      if (item.status !== 'open') errors.push(`${at}/heldForExperiment: only an open finding can wait for an experiment`);
+      else if (harnesses.has(item.harness) && !experimentFor(run, harnesses.get(item.harness))) warnings.push(`${at}/heldForExperiment: no experiment is open on ${item.harness}; the finding is listed with the others`);
     }
     if (ownsHarness(item.harness, at) && typeof item.id === 'string') {
       const h = harnesses.get(item.harness);

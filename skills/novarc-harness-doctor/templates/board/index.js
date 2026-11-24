@@ -39,6 +39,7 @@ function harnessEntry(h, sectionsBase) {
   li.appendChild(el('a', { cls: 'ix-hl', href: R.harness(h.id), 'aria-current': current ? 'page' : null, 'data-fk': 'ix:h:' + h.id, 'data-harness': h.id },
     kindMark(h.kind, { word: false }),
     el('span', { cls: 'nm', text: h.name }),
+    experimentOf(h.id) ? el('span', { cls: 'xm', title: tx(T.xp.markTitle, { date: fmtDate(experimentOf(h.id).until) }), text: T.xp.mark }) : null,
     el('span', { cls: 'gr', title: T.sc.label, text: sc.current === null ? '-' : sc.grade }),
     open ? el('span', { cls: 'n', title: pl(T.nav.openCount, open), text: String(open) }) : null));
   if (!current || isEmptyHarness(h)) return li;

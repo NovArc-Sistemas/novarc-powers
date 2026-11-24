@@ -239,10 +239,15 @@ test('transcript-signals aggregates counts and never prints message text', () =>
   assert.equal(j.toolCalls.exec, 1);
   assert.deepEqual(j.shellFailures, { 'npm test': 3, 'Get-ChildItem': 1, 'cargo build': 1, 'git push': 1, 'supabase db': 1 });
   assert.deepEqual(j.commandNotFound, { 'supabase db': 1 });
-  assert.equal(j.hookBlocks, 2, 'one denied tool result + one blocking hook attachment; non-blocking ignored');
-  assert.deepEqual(j.retries, [{ head: 'npm test', sessions: 1 }]);
+  // Hook blocks come from structured fields only: the fixture's denial is result text and its
+  // hook_blocking_error names no event, so neither is a block (transcript-signals-rules.test.mjs
+  // covers the structured shapes).
+  assert.equal(j.hookBlocks, 0);
+  // Three failures of `npm test` are a first failure and two reruns: a retry needs three reruns.
+  assert.deepEqual(j.retries, []);
   assert.equal(j.userMessages, 4);
-  assert.equal(j.userCorrections, 3);
+  // Only "no, that's wrong" (after work); "Pare com isso" opens a session and "de novo" is no marker.
+  assert.equal(j.userCorrections, 1);
   assert.equal(j.sessionsEndingOnError, 2);
   assert.deepEqual(j.skillInvocations, { 'alpha-skill': 1 });
   assert.deepEqual(j.slashCommands, { 'alpha-skill': 1 });
@@ -336,9 +341,9 @@ test('transcript-signals reads subagent threads into their parent session', asyn
     assert.equal(j.unparsableLines, 0, 'the line with U+2028 is read whole');
     assert.deepEqual(j.toolCalls, { Bash: 5, Grep: 1, Read: 1 }); // 2 top-level + 3 subagent Bash
     assert.deepEqual(j.shellFailures, { 'pnpm lint': 3, 'npm test': 1 });
-    assert.deepEqual(j.retries, [{ head: 'pnpm lint', sessions: 1 }]);
+    assert.deepEqual(j.retries, [], 'three different `pnpm lint` command lines are not one command run again');
     assert.equal(j.userMessages, 2, 'subagent prompts are not user messages');
-    assert.equal(j.userCorrections, 1, '"de novo" counts; "no arquivo ..." and the subagent prompts do not');
+    assert.equal(j.userCorrections, 0, '"roda de novo agora", "no arquivo ..." and the subagent prompts are not corrections');
     assert.equal(j.sessionsEndingOnError, 0, 'the top-level thread ended on a success');
     assert.deepEqual(j.topFailureSessions, [{ source: 'claude', id: 'sess-a', failures: 4 }]);
   } finally {

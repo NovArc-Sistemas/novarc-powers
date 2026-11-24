@@ -169,8 +169,12 @@ const REC = {
     changed: 'Changed',
     seenBefore: 'Same finding as {item} of run {run}.',
     none: 'No item in this review.',
+    measureOnly: 'Measure only: no review rounds and no items. This record is the baseline the next review compares with.',
+    experiment: 'Experiment: {note}. It runs until {date}.',
     history: {
       title: { one: 'Review history: 1 harness', other: 'Review history: {n} harnesses' },
+      experiment: 'Experiment in progress until {date}: {note}.',
+      experimentApplied: 'the changes applied on {date}',
       empty: 'No review recorded yet.',
       emptyFor: 'No review recorded for that harness.',
       fixed: { one: '1 fixed', other: '{n} fixed' },
@@ -212,8 +216,12 @@ const REC = {
     changed: 'Alterado',
     seenBefore: 'Mesmo achado que {item} da execução {run}.',
     none: 'Nenhum item nesta revisão.',
+    measureOnly: 'Somente medição: sem rodadas de revisão e sem itens. Este registro é a base com que a próxima revisão compara.',
+    experiment: 'Experimento: {note}. Vai até {date}.',
     history: {
       title: { one: 'Histórico de revisões: 1 harness', other: 'Histórico de revisões: {n} harnesses' },
+      experiment: 'Experimento em andamento até {date}: {note}.',
+      experimentApplied: 'as mudanças aplicadas em {date}',
       empty: 'Nenhuma revisão registrada ainda.',
       emptyFor: 'Nenhuma revisão registrada para esse harness.',
       fixed: { one: '1 corrigido', other: '{n} corrigidos' },
@@ -321,7 +329,9 @@ export function recordMarkdown(record, language) {
   out.push(`- ${T.col.score}: ${[s.baseline, s.current, s.projected].some((v) => typeof v === 'number')
     ? `${fill(t.asFound, { baseline: score(s.baseline), current: score(s.current), projected: score(s.projected) })}${s.grade ? ` (${lowerFirst(T.col.grade)} ${s.grade})` : ''}`
     : T.notScored}`);
+  if (record.mode === 'measure') out.push(`- ${t.measureOnly}`);
   out.push(`- ${record.changesAppliedAt ? fill(t.applied, { date: day(record.changesAppliedAt) }) : t.nothingApplied}`);
+  if (record.experiment && record.experiment.note) out.push(`- ${fill(t.experiment, { note: clip(record.experiment.note), date: day(record.experiment.until) })}`);
   out.push(`- ${fill(t.followUpFrom, { date: day(record.followUpAfter) })}`, '');
 
   out.push(`## ${t.measured}`, '');
@@ -390,6 +400,7 @@ export function historyText(report, language, { filtered = false } = {}) {
         out.push(`  ${bits.join('  ')}`);
       }
       out.push(`  ${x.due ? fill(h.due, { date: day(x.followUpAfter) }) : plural(h.notDue, Math.max(1, Math.ceil((Date.parse(x.followUpAfter) - now) / 86400000)), { date: day(x.followUpAfter) })}`);
+      if (x.experiment) out.push(`  ${fill(h.experiment, { date: day(x.experiment.until), note: x.experiment.note ? cell(x.experiment.note) : fill(h.experimentApplied, { date: day(x.experiment.since) }) })}`);
     }
   }
   if (report.unrecordedRuns && report.unrecordedRuns.length) out.push('', fill(h.unrecorded, { ids: report.unrecordedRuns.join(', ') }));
