@@ -9,12 +9,19 @@
 // are read too and counted into their parent session; their prompts are written by the parent
 // agent, so they never count as user messages or corrections. It never prints message text,
 // command lines, tool output or file paths from inside a transcript.
+//
+// A Codex tool call is counted once per call id, whichever shapes the rollout wrote it in, under
+// the same names session-impact.mjs uses (`mcp__<server>__<tool>` for an MCP call, `exec_command`
+// for a command known only from its completion). These counts have no window filter, no check for
+// replayed copies and no coverage report: a tool that is absent from `toolCalls` was not seen,
+// which is weaker than "never called". For that claim use session-impact.mjs, whose `coverage`
+// and null counts say when it cannot be made.
 import path from 'node:path';
 import { IS_WIN, parseArgs, isMain, printJson, warn, normalizeInputPath, isDir, readdirSafe, realpathSafe } from './lib/common.mjs';
 import { claudeConfigDirs, codexDirs } from './lib/locations.mjs';
 import {
   SHELL_TOOLS, NOT_FOUND_RE, safeName, resultText, isHumanText, isCorrection, hookBlockText, hookBlockAttachment,
-  commandHead, codexCommandString, matchesProjectDir, matchesProjectCwd, eachJsonLine, listClaudeTranscripts, listJsonl,
+  commandHead, matchesProjectDir, matchesProjectCwd, eachJsonLine, listClaudeTranscripts, listJsonl, codexCallReader, codexCallName,
 } from './lib/transcripts.mjs';
 
 // These live in lib/transcripts.mjs; other scripts and tests import them from here too.
@@ -118,31 +125,36 @@ async function parseCodexSession(file, agg) {
   const itemUser = [];
   const eventUser = [];
   const responseUser = [];
+  // One entry per call id, whichever shapes the rollout wrote the call in: a response_item call,
+  // an exec_command_end / mcp_tool_call_end event, a completed item (lib/transcripts.mjs).
+  const reader = codexCallReader();
+  let lastCommand = null; // the command whose outcome was recorded last
   await eachJsonLine(file, (o) => {
     trackTime(sess, o.timestamp);
     const p = o.payload && typeof o.payload === 'object' ? o.payload : null;
     if (!p) return;
+    const hit = reader.read(o);
+    if (hit) {
+      if (hit.completed) lastCommand = hit.call;
+      return;
+    }
     if (o.type === 'response_item') {
-      if (p.type === 'function_call' || p.type === 'custom_tool_call' || p.type === 'local_shell_call') bump(agg.toolCalls, safeName(p.name || p.type) || '<unknown>');
       if (p.type === 'message' && p.role === 'user' && Array.isArray(p.content)) for (const c of p.content) if (c && typeof c.text === 'string') responseUser.push(c.text);
     } else if (o.type === 'event_msg') {
       if (p.type === 'user_message' && typeof p.message === 'string') eventUser.push(p.message);
       const item = p.item && typeof p.item === 'object' ? p.item : null;
-      if (p.type === 'item_completed' && item) {
-        if (item.type === 'CommandExecution') {
-          const failed = (typeof item.exit_code === 'number' && item.exit_code !== 0) || item.status === 'failed';
-          sess.lastToolError = failed;
-          if (failed) {
-            const text = `${typeof item.stderr === 'string' ? item.stderr : ''}\n${typeof item.aggregated_output === 'string' ? item.aggregated_output : ''}`;
-            recordFailure(agg, sess, commandHead(codexCommandString(item.command)), text);
-            if (hookBlockText(text)) agg.hookBlocks++;
-          }
-        } else if (item.type === 'UserMessage' && Array.isArray(item.content)) {
-          for (const c of item.content) if (c && typeof c.text === 'string') itemUser.push(c.text);
-        }
+      if (p.type === 'item_completed' && item && item.type === 'UserMessage' && Array.isArray(item.content)) {
+        for (const c of item.content) if (c && typeof c.text === 'string') itemUser.push(c.text);
       }
     }
   }, { onUnparsable: () => { agg.unparsableLines++; } });
+  for (const call of reader.calls) {
+    bump(agg.toolCalls, safeName(codexCallName(call)) || '<unknown>');
+    if (!call.shell || !call.done || !call.failed) continue;
+    recordFailure(agg, sess, commandHead(call.command), call.text);
+    if (hookBlockText(call.text)) agg.hookBlocks++;
+  }
+  if (lastCommand) sess.lastToolError = lastCommand.failed;
   // The same user turn can be recorded in several places; count from one source only.
   const users = itemUser.length ? itemUser : eventUser.length ? eventUser : responseUser;
   for (const t of users) {

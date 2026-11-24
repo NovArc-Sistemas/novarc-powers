@@ -70,7 +70,7 @@ function store(dir, name, fileName, scriptFile, res, matchers) {
   if (res.ok) {
     writeTextAtomic(out, res.stdout);
     fs.rmSync(err, { force: true });
-    return { ok: true, ms: res.ms, bytes: res.bytes, ...(res.shared ? { shared: true } : {}) };
+    return { ok: true, ms: res.ms, bytes: res.bytes, ...(res.toolsFrom ? { toolsFrom: res.toolsFrom } : {}) };
   }
   fs.mkdirSync(dir, { recursive: true });
   fs.rmSync(out, { force: true }); // the folder reflects the last probe run, not an older success
@@ -89,7 +89,9 @@ function store(dir, name, fileName, scriptFile, res, matchers) {
 async function probeHarness(ctx, h, opts, shared) {
   const dir = ctx.paths.probeDir(h.id);
   fs.mkdirSync(dir, { recursive: true });
-  const days = String(ctx.run.windowDays || 30);
+  // A harness with an earlier review record may carry its own window (`run.mjs init` writes it:
+  // the days since that review); every other harness is measured over the run's window.
+  const days = String(Number.isInteger(h.windowDays) && h.windowDays > 0 ? h.windowDays : (ctx.run.windowDays || 30));
   const result = {};
   const one = async (name, args, runner) => {
     const p = PROBES[name];
@@ -99,8 +101,14 @@ async function probeHarness(ctx, h, opts, shared) {
   };
 
   const fileOf = (name) => path.join(dir, PROBES[name].file);
-  const discoverOk = await one('discover', ['--scope', h.kind, '--cwd', h.pathAbs]);
-  await one('checks', ['--scope', h.kind, '--cwd', h.pathAbs]);
+  // A user harness is one account: one config dir of one provider. Told so, the two scripts read
+  // that dir and nothing of any other account; without the two flags `--scope user` means every
+  // account on the machine, and each account's probe would carry the others' files and findings.
+  const where = h.kind === 'project'
+    ? ['--scope', 'project', '--cwd', h.pathAbs]
+    : ['--scope', 'user', '--cwd', h.pathAbs, '--provider', h.provider || 'other', '--config-dir', h.pathAbs];
+  const discoverOk = await one('discover', where);
+  await one('checks', where);
   let impactOk = false;
   const skip = shared.impactSkip.get(h.id);
   if (h.kind === 'project') impactOk = await one('impact', ['--cwd', h.pathAbs, '--days', days]);
@@ -113,22 +121,27 @@ async function probeHarness(ctx, h, opts, shared) {
   // An account is measured on its own sessions: one Claude config dir, or the Codex home.
   else if (h.provider === 'claude-code') impactOk = await one('impact', ['--scope', 'user', '--days', days, '--config-dirs', h.pathAbs, '--sources', 'claude']);
   else impactOk = await one('impact', ['--scope', 'user', '--days', days, '--sources', 'codex', '--codex-dirs', h.pathAbs]);
-  // The CLI probe reads PATH and project signals; a config dir has no project signals, so user
-  // harnesses share one run.
+  // The CLI probe has a part about the machine (which CLIs are on PATH, what they answer) and a
+  // part about the harness (its signals, the MCP servers configured for it). A project runs it
+  // whole. The accounts share the machine: the first of them runs it whole, the others reuse
+  // that part and read only their own config dir, so each account's file names its own servers.
   const clisOk = h.kind === 'project'
     ? await one('clis', ['--cwd', h.pathAbs])
-    : await one('clis', null, async () => { const first = shared.userClisOwner === null; const res = await shared.userClis(h); return first ? res : { ...res, shared: true }; });
+    : await one('clis', null, () => shared.userClis(h, fileOf('clis')));
 
+  // What the board shows as it is comes in the language of the run: the snapshot's layer names
+  // and notes here, the estimates below.
+  const lang = ctx.run.language === 'pt' ? 'pt' : 'en';
   const snapArgs = h.kind === 'project'
-    ? ['--kind', 'project', '--cwd', h.pathAbs, '--id', h.id]
-    : ['--kind', 'user', '--config-dir', h.pathAbs, '--provider', h.provider || 'other', '--id', h.id];
+    ? ['--kind', 'project', '--cwd', h.pathAbs, '--id', h.id, '--lang', lang]
+    : ['--kind', 'user', '--config-dir', h.pathAbs, '--provider', h.provider || 'other', '--id', h.id, '--lang', lang];
   if (impactOk) snapArgs.push('--impact', fileOf('impact'));
   if (clisOk) snapArgs.push('--clis', fileOf('clis'));
   const snapshotOk = await one('snapshot', snapArgs);
 
   // Estimates multiply what was measured by catalog factors: no measurement, nothing to estimate.
   if (impactOk) {
-    const estArgs = ['--impact', fileOf('impact'), '--lang', ctx.run.language === 'pt' ? 'pt' : 'en'];
+    const estArgs = ['--impact', fileOf('impact'), '--lang', lang];
     if (clisOk) estArgs.push('--clis', fileOf('clis'));
     if (snapshotOk) estArgs.push('--snapshot', fileOf('snapshot'));
     if (discoverOk) estArgs.push('--discover', fileOf('discover'));
@@ -204,13 +217,25 @@ export async function probe(ctx, args) {
   }
   const opts = { timeoutMs, matchers: homeMatchers() };
 
-  let userClis = null;
+  // The whole CLI probe of the first account to ask for it: { owner, file, done }.
+  let machine = null;
+  const accountArgs = (h) => ['--cwd', h.pathAbs, '--provider', h.provider || 'other', '--config-dir', h.pathAbs];
   const shared = {
     impactSkip: impactSkips(run),
-    userClisOwner: null,
-    userClis: (h) => {
-      if (!userClis) { shared.userClisOwner = h.id; userClis = runScript(PROBES.clis.script, ['--cwd', h.pathAbs], timeoutMs); }
-      return userClis;
+    /** The CLI probe of account `h`, whose output is kept in `file`. */
+    userClis: async (h, file) => {
+      if (!machine) {
+        // The output is written here, before anything waiting on `done` goes on: it is what the
+        // other accounts are pointed at. (The caller stores the same text again; each write is
+        // a rename into place, so a reader gets one whole copy or the other.)
+        const done = runScript(PROBES.clis.script, accountArgs(h), timeoutMs).then((res) => { if (res.ok) writeTextAtomic(file, res.stdout); return res; });
+        machine = { owner: h.id, file, done };
+        return done;
+      }
+      const whole = await machine.done;
+      if (!whole.ok) return whole; // the machine could not be probed: one failure, not one per account
+      const res = await runScript(PROBES.clis.script, [...accountArgs(h), '--tools-from', machine.file], timeoutMs);
+      return res.ok ? { ...res, toolsFrom: machine.owner } : res;
     },
   };
   const started = Date.now();

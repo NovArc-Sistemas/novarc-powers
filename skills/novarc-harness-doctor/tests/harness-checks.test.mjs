@@ -6,7 +6,7 @@ import { ruleCovers, frontmatter, safeSnippet, proseOnly } from '../scripts/lib/
 import { interpreterWildcard, denyEvasion } from '../scripts/lib/checks/permissions.mjs';
 import { originFor } from '../scripts/lib/checks/collect.mjs';
 import { CHECK_IDS, detectDefenses } from '../scripts/lib/checks/index.mjs';
-import { hookAutoAllow, hookPolicyExit1, withBlockingFields } from '../scripts/lib/checks/hooks.mjs';
+import { hookAutoAllow, hookExpensiveUnscoped, hookPolicyExit1, withBlockingFields } from '../scripts/lib/checks/hooks.mjs';
 
 // Fake secret and hidden payloads are assembled at runtime so the repository leak scan stays clean.
 const FAKE_TOKEN = `ghp_${'q'.repeat(36)}`;
@@ -503,6 +503,47 @@ test('a PreToolUse hook is a defense only when it can really block', () => {
   assert.ok(!blocks({ event: 'PostToolUse', scriptText: 'exit 2\n' }));
   assert.ok(!blocks({ command: 'my-guard --strict', scriptText: null, scriptDisplay: null }), 'a program that could not be read');
   assert.ok(!blocks({ scriptText: ALLOW_ALL }));
+});
+
+// A comment is never evidence, and "could not tell" is never a claim: hookBlocking answers null
+// when the code does not settle it, and neither the defense list nor a check may turn that into
+// "this hook blocks" or "this hook does not block" (tests/hook-code.test.mjs has the reading itself).
+test('no defense and no finding comes from a comment or from an unknown', () => {
+  const REFUSE = 'echo "Blocked: not allowed here" >&2\nexit 1\n';
+  const defense = (o) => detectDefenses(modelOf(hook(o))).filter((d) => d.title === 'Blocking PreToolUse hook').length;
+  const policy = (o) => found(hookPolicyExit1, o).length;
+  const allow = (o) => found(hookAutoAllow, o).length;
+
+  // `exit 2` in a comment: the hook does not block, so it is no defense and its exit 1 is the finding.
+  const commented = { scriptText: `#!/bin/sh\n# TODO: this should exit 2\n${REFUSE}` };
+  assert.equal(defense(commented), 0);
+  assert.equal(policy(commented), 1);
+  // `exit 2` only inside a message, or a status the source does not show: unknown. Not a
+  // defense, and not "refuses with exit 1, which blocks nothing" either.
+  for (const scriptText of ['echo "Blocked: this hook should exit 2" >&2\nexit 1\n', REFUSE.replace('exit 1', 'exit "$status"'), `${REFUSE}exec other-guard\n`]) {
+    assert.equal(defense({ scriptText }), 0, scriptText);
+    assert.equal(policy({ scriptText }), 0, scriptText);
+  }
+  // A decision whose value is computed: unknown again, in both directions, whatever the script is called.
+  const computed = {
+    command: 'node ~/.claude/hooks/deny-push.mjs', scriptDisplay: '~/.claude/hooks/deny-push.mjs',
+    scriptText: 'console.error("Denied");\nconsole.log(JSON.stringify({ hookSpecificOutput: { permissionDecision: verdict } }));\nprocess.exit(1);\n',
+  };
+  assert.equal(defense(computed), 0);
+  assert.equal(policy(computed), 0);
+  // A refusal that is only a comment is no refusal.
+  assert.equal(policy({ scriptText: '# echo "Blocked" >&2\nexit 1\n' }), 0);
+
+  // hook-auto-allow: an approval quoted in a comment approves nothing, and a condition written in
+  // a comment does not make a real approval conditional.
+  assert.equal(allow({ scriptText: '# prints {"hookSpecificOutput":{"permissionDecision":"allow"}} for read-only tools\necho ok\n' }), 0);
+  assert.equal(allow({ scriptText: `# only if the tool is Read\n${ALLOW_ALL}\n` }), 1);
+  assert.equal(allow({ command: 'node hook.mjs', scriptDisplay: '~/.claude/hooks/hook.mjs', scriptText: '// if (tool === "Read") below\n/* permissionDecision: "allow" */\nconsole.log("{}");\n' }), 0);
+
+  // hook-expensive-unscoped: a command named in a comment does not run.
+  const slow = (o) => hookExpensiveUnscoped.run(modelOf(hook({ event: 'PostToolUse', matcher: 'Edit|Write', ...o }))).length;
+  assert.equal(slow({ scriptText: '# npx tsc --noEmit is too slow here\necho formatted\n' }), 0);
+  assert.equal(slow({ scriptText: 'npx tsc --noEmit # every edit\n' }), 1);
 });
 
 test('withBlockingFields reads async, asyncRewake and onFailure back from the registration', () => {

@@ -38,6 +38,9 @@ está errado, por quê, e exatamente o que muda.
   backup e pode ser desfeita com um comando.
 - **Mantém suas contas iguais.** Escolha uma conta como principal; as outras do mesmo provedor
   passam a apontar para ela, e as de outros provedores recebem a parte que dá para replicar.
+- **Volta para conferir.** Cada revisão fica registrada: o que foi decidido, o que mudou e o que
+  cada mudança prometia economizar. Um mês depois, a mesma skill mede de novo, mostra o que se
+  confirmou, o que foi desfeito e o que voltou, e reavalia cada harness.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-explorer.png" alt="Explorador de um harness: o arquivo de instruções com a mudança proposta em vermelho e verde e a explicação ao lado" width="820">

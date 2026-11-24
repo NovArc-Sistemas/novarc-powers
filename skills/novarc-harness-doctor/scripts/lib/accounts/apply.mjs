@@ -4,17 +4,21 @@
 // the disk plus the choices recorded in the file, and refuses when the two no longer agree.
 // Everything it replaces is MOVED into the run's backup folder, never deleted; every in-place
 // edit is journalled as a reverse patch, so `undo` restores the originals byte for byte.
+// Right before a step writes, what it is about to change is compared with what the plan signed,
+// content behind links included: a step whose input moved is given up with nothing written.
+// `undo` records each journal entry it has undone, so one that stops half way can be run again.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   TOOL, MANIFEST_VERSION, MCP_PREFIX, homeDir, syncDir, manifestFile, stableCheckPath, displayPath,
   scrub, lstatSafe, isDir, readBuf, readText, parseJson, sha256, hashFile, canon, mkdirp, isInside,
-  writeInPlace, writeAtomic, linkStatus, linkOrCopy, linkRecord, removeLink, generateInstructions,
-  readServers, rewriteCodexServers, readManifest, writeManifest,
+  writeKeepingLinks, writeAtomic, linkStatus, linkOrCopy, linkRecord, removeLink, generateInstructions,
+  readServers, rewriteCodexServers, reconcileServers, readManifest, writeManifest, destIdentity,
+  destinationProblem,
 } from '../../sync-check.mjs';
 import { detectAccounts } from './detect.mjs';
-import { manifestIsFor } from './diff.mjs';
+import { manifestIsFor, liveSignature, serverSignature, instructionSignature } from './diff.mjs';
 import { buildPlan, resolutionsFromPlan, PlanError, PLAN_VERSION } from './plan.mjs';
 import { copyTree, removeTree, movePath, compareTrees, sameContent, listFiles } from './fsops.mjs';
 import { setIn, removeIn, makePatch, revertPatch } from './jsonedit.mjs';
@@ -42,17 +46,12 @@ function readExact(file) {
   return text;
 }
 
-/** A plain file nothing links to can be replaced atomically; anything linked is written in place. */
-function writeKeepingLinks(file, text) {
-  const l = lstatSafe(file);
-  if (l && l.isFile() && !l.isSymbolicLink() && l.nlink === 1) writeAtomic(file, text);
-  else writeInPlace(file, text);
-}
-
 /** One apply (or install) run: its backup folder and its undo journal. */
 export class Run {
-  constructor(home, primaryId) {
+  /** `signed`: the signatures of the plan being applied (see `confirm`); none for an install. */
+  constructor(home, primaryId, signed = null) {
     this.home = home;
+    this.signed = signed;
     this.root = backupsDir(home);
     this.stamp = null;
     this.journal = { version: JOURNAL_VERSION, tool: TOOL, primary: primaryId, startedAt: new Date().toISOString(), ops: [] };
@@ -87,6 +86,19 @@ export class Run {
   }
 }
 
+/**
+ * Right before a step writes: what it is about to change must still be what the plan signed.
+ * The whole plan is compared when `apply` starts, but steps run one after another: an earlier
+ * step, or anything else on the machine, can change what a later one is about to read. `live`
+ * is the element's signature read from the disk now. Throws, before anything is written for
+ * that step, when it is no longer the signed one.
+ */
+function confirm(run, account, name, live) {
+  if (!run.signed) return;
+  if (sha256(live).slice(0, 16) === run.signed[`${account}:${name}`]) return;
+  throw Object.assign(new Error(`${name} changed after the plan was made (its content, or what a link leads to, is not what the plan showed); nothing was written for it: plan again`), { stale: true });
+}
+
 // ---- manifest records -----------------------------------------------------------------------
 
 function accountRecord(manifest, settings) {
@@ -96,6 +108,9 @@ function accountRecord(manifest, settings) {
   if (!rec) { rec = { id: a.id, provider: a.provider, pathAbs: a.pathAbs, mode: settings.mode, elements: [], exceptions: [] }; manifest.accounts.push(rec); }
   Object.assign(rec, { id: a.id, provider: a.provider, pathAbs: a.pathAbs, mode: settings.mode });
   for (const k of ['imports', 'skills', 'mcp']) { if (settings[k]) rec[k] = settings[k]; else delete rec[k]; }
+  // Where the account's MCP file is, with this plan approved. The unattended check writes that
+  // file only while it is still a plain file there (see destinationProblem).
+  if (rec.mcp && rec.mcp.format === 'codex-toml') rec.mcp = { ...rec.mcp, identity: destIdentity(rec.mcp.path, { ids: false }) };
   return rec;
 }
 
@@ -105,10 +120,11 @@ function except(rec, name) { forget(rec, name); if (!rec.exceptions.includes(nam
 
 // ---- steps ----------------------------------------------------------------------------------
 
-function doLink(run, step, rec) {
+function doLink(run, step, rec, confirmed = false) {
   const { e } = step;
   const { S, P } = e;
   const dir = !!e.dir;
+  if (!confirmed) confirm(run, step.account, step.name, liveSignature(e));
   const mark = run.mark();
   let moved = null;
   if (lstatSafe(S)) {
@@ -137,6 +153,9 @@ function doLink(run, step, rec) {
 function doAdopt(run, step, rec, primaryId) {
   const { e } = step;
   const { S, P } = e;
+  // The account's version is about to be copied into the primary: it must be, byte for byte and
+  // behind any link, the version the plan showed.
+  confirm(run, step.account, step.name, liveSignature(e));
   const mark = run.mark();
   let kept = 0;
   try {
@@ -151,7 +170,7 @@ function doAdopt(run, step, rec, primaryId) {
       fs.copyFileSync(P, pb);
       const data = fs.readFileSync(S);
       run.op({ op: 'overwrite', path: P, backup: pb, afterHash: sha256(data) });
-      writeInPlace(P, data);
+      writeKeepingLinks(P, data, { home: run.home });
     } else {
       for (const rel of listFiles(S)) {
         const src = path.join(S, rel);
@@ -164,19 +183,20 @@ function doAdopt(run, step, rec, primaryId) {
         run.op({ op: 'add', path: dst, like: src });
       }
     }
-    const r = doLink(run, step, rec);
+    const r = doLink(run, step, rec, true); // confirmed above; the primary's side has just changed
     if (kept) r.note = `${kept} entr${kept === 1 ? 'y differs' : 'ies differ'} on both sides: the primary's stayed, the account's are in the backup`;
     return r;
   } catch (err) {
     // The account is as it was (doLink restores it): take back what was brought into the primary.
     const seen = { gone: new Set(), back: new Map() };
-    for (const op of run.journal.ops.slice(mark).reverse()) { try { undoOp(op, false, seen); } catch { /* reported by the failed step */ } }
+    for (const op of run.journal.ops.slice(mark).reverse()) { try { undoOp(op, false, seen, run.home); } catch { /* reported by the failed step */ } }
     run.rewind(mark);
     throw err;
   }
 }
 
 function doDrop(run, step, rec) {
+  confirm(run, step.account, step.name, liveSignature(step.e));
   const moved = run.backupPath(step.account, step.name);
   movePath(step.e.S, moved);
   run.op({ op: 'move', from: step.e.S, to: moved });
@@ -193,14 +213,19 @@ function doInstructions(run, step, rec, home) {
   const data = Buffer.from(gen.text, 'utf8');
   const hash = sha256(data);
   if (step.pre !== 'same') {
+    confirm(run, step.account, step.name, instructionSignature(hash, lstatSafe(S) ? hashFile(S) : null));
     const mark = run.mark();
     let moved = null;
     let previous = null;
     try {
       if (step.pre === 'stale' && lstatSafe(S)) {
+        // Rewritten where it is, so only while it is still the plain file that was generated.
+        const tracked = rec.elements.find((x) => x.name === step.name);
+        const problem = destinationProblem(tracked && tracked.identity, S, rec.pathAbs);
+        if (problem) throw new Error(`${problem}; nothing was written: plan again to decide what happens to it`);
         previous = readExact(S);
         run.op({ op: 'patch', path: S, afterHash: hash, patch: makePatch(previous, gen.text) });
-        writeInPlace(S, data);
+        writeKeepingLinks(S, data, { home });
       } else {
         if (lstatSafe(S)) {
           moved = run.backupPath(step.account, step.name);
@@ -209,12 +234,12 @@ function doInstructions(run, step, rec, home) {
         }
         run.parents(S);
         run.op({ op: 'write', path: S, hash });
-        writeInPlace(S, data);
+        writeKeepingLinks(S, data, { home });
       }
       if (hashFile(S) !== hash) throw new Error('verification failed: the generated file does not match');
     } catch (err) {
-      if (previous !== null) writeInPlace(S, previous);
-      else {
+      // A failed write leaves the file as it was; only a write that went through is taken back.
+      if (previous !== null) { if (hashFile(S) !== sha256(Buffer.from(previous, 'utf8'))) writeKeepingLinks(S, previous, { home }); } else {
         if (lstatSafe(S) && (moved || step.pre === 'missing')) removeLink(S);
         if (moved) movePath(moved, S);
       }
@@ -222,15 +247,28 @@ function doInstructions(run, step, rec, home) {
       throw err;
     }
   }
-  upsert(rec, { name: step.name, kind: 'generated', path: S, target: e.P, generator: { type: 'instructions', provider, sourceDisplay: e.sourceDisplay, inlineImports: e.inlineImports }, sourceHash: hash, contentHash: hash });
+  // `identity`: where the generated file is. The unattended check rewrites it only while that holds.
+  upsert(rec, { name: step.name, kind: 'generated', path: S, target: e.P, generator: { type: 'instructions', provider, sourceDisplay: e.sourceDisplay, inlineImports: e.inlineImports }, sourceHash: hash, contentHash: hash, identity: destIdentity(S) });
   return {};
 }
+
+const SERVER_WRITES = new Set(['write', 'replace', 'remove', 'adopt']);
 
 function doServers(run, step, rec) {
   const m = step.mcp;
   const src = readServers(m.source, m.sourceFormat);
   const tgt = readServers(m.path, m.format);
   if (!src.ok || !tgt.ok) throw new Error('the server definitions can no longer be read');
+  // Before anything is touched: each server about to change is compared again, as the plan did.
+  const managed = {};
+  for (const x of rec.elements) if (x.kind === 'managed-block') managed[x.name.slice(MCP_PREFIX.length)] = x.contentHash;
+  const live = new Map(reconcileServers({ source: src.servers, target: tgt.servers, sourceFormat: m.sourceFormat, targetFormat: m.format, managed }).map((x) => [x.name, x]));
+  for (const it of step.items) {
+    if (!SERVER_WRITES.has(it.op)) continue;
+    const now = live.get(it.name);
+    const cur = tgt.servers[it.name];
+    confirm(run, step.account, MCP_PREFIX + it.name, now ? serverSignature(now.status, now.want, cur ? cur.def : undefined) : '-');
+  }
   const write = [];
   const remove = [];
   const changed = new Set();
@@ -262,17 +300,15 @@ function doServers(run, step, rec) {
   if (after !== before) {
     if (!tgt.exists) run.parents(m.path);
     run.op({ op: 'patch', path: m.path, afterHash: sha256(Buffer.from(after, 'utf8')), patch: makePatch(before, after), created: !tgt.exists });
-    try {
-      if (json) writeKeepingLinks(m.path, after);
-      else writeInPlace(m.path, after);
-    } catch (err) { run.rewind(mark); throw err; }
+    try { writeKeepingLinks(m.path, after, { home: run.home }); } catch (err) { run.rewind(mark); throw err; }
   }
   const now = readServers(m.path, m.format).servers;
   const bad = write.filter((w) => !now[w.name] || canon(now[w.name].def) !== canon(w.def)).map((w) => w.name).concat(remove.filter((n) => now[n]));
   if (bad.length) {
-    if (after !== before) { if (tgt.exists) writeKeepingLinks(m.path, before); else removeLink(m.path); run.rewind(mark); }
+    if (after !== before) { if (tgt.exists) writeKeepingLinks(m.path, before, { home: run.home }); else removeLink(m.path); run.rewind(mark); }
     throw new Error(`verification failed for: ${bad.join(', ')}`);
   }
+  if (rec.mcp && rec.mcp.format === 'codex-toml') rec.mcp = { ...rec.mcp, identity: destIdentity(m.path, { ids: false }) };
   for (const name of remove) forget(rec, MCP_PREFIX + name);
   for (const it of step.items) {
     if (it.op !== 'keep' && it.op !== 'write' && it.op !== 'replace' && it.op !== 'adopt') continue;
@@ -289,7 +325,7 @@ const CHANGES = new Set(['link', 'adopt', 'drop']);
 function stepChanges(step) {
   if (CHANGES.has(step.kind)) return true;
   if (step.kind === 'instructions') return step.pre !== 'same';
-  if (step.kind === 'mcp') return step.items.some((it) => it.op === 'write' || it.op === 'replace' || it.op === 'remove' || it.op === 'adopt');
+  if (step.kind === 'mcp') return step.items.some((it) => SERVER_WRITES.has(it.op));
   return false;
 }
 
@@ -336,10 +372,11 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
     throw err;
   }
   const pending = fresh.steps.filter(stepChanges);
+  const seen = file.signatures && typeof file.signatures === 'object' ? file.signatures : {};
   if (pending.length) {
     // Stale when an element changed state, or when the content of something about to be
-    // changed is no longer what the user was shown.
-    const seen = file.signatures && typeof file.signatures === 'object' ? file.signatures : {};
+    // changed (behind a link too) is no longer what the user was shown. Each step compares its
+    // own element once more right before it writes: see `confirm`.
     const moved = fresh.changes.filter((key) => fresh.plan.signatures[key] !== seen[key]);
     if (fresh.plan.fingerprint !== file.fingerprint || moved.length) {
       return refuse(1, 'the accounts changed since this plan was made; plan again and review the new plan', moved.length ? { changed: moved } : {});
@@ -355,7 +392,7 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
   const working = manifest ? JSON.parse(JSON.stringify(manifest)) : { version: MANIFEST_VERSION, tool: TOOL, primary: file.primary.id, accounts: [] };
   working.primary = file.primary.id;
   working.primaryPathAbs = fresh.primary.pathAbs;
-  const run = new Run(home, file.primary.id);
+  const run = new Run(home, file.primary.id, seen);
   const done = [];
   let failed = 0;
   for (const step of fresh.steps) {
@@ -380,7 +417,7 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
       done.push({ ...entry, ...r, result: 'done' });
     } catch (err) {
       failed++;
-      done.push({ ...entry, result: 'failed', error: scrub(String(err && err.message ? err.message : err), home) });
+      done.push({ ...entry, result: 'failed', ...(err && err.stale ? { stale: true } : {}), error: scrub(String(err && err.message ? err.message : err), home) });
     }
   }
   // Records with nothing left to manage, or for an account whose folder is gone, are dropped.
@@ -414,9 +451,10 @@ export function applyPlan({ planFile, yes = false, dryRun = false, newPrimary = 
 
 /**
  * Undo one journal entry. In a dry run nothing is touched, so `seen` remembers what the earlier
- * entries would have removed or moved back; later entries are judged against that.
+ * entries would have removed or moved back; later entries are judged against that. `seen.pending`
+ * lists the paths of the entries that could not be undone so far in this attempt.
  */
-function undoOp(op, dryRun, seen) {
+function undoOp(op, dryRun, seen, home = homeDir()) {
   const key = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
   const present = (p) => !!lstatSafe(p) && !(dryRun && seen.gone.has(key(p)));
   const now = (p) => (dryRun && seen.back.get(key(p))) || p; // where a moved-back original sits
@@ -445,21 +483,24 @@ function undoOp(op, dryRun, seen) {
     if (buf === null) return conflict('the file is gone');
     if (sha256(buf) !== op.afterHash) return conflict('edited since the run; left as it is');
     if (op.created) return remove(op.path, () => removeLink(op.path));
-    return act(() => writeKeepingLinks(op.path, revertPatch(buf.toString('utf8'), op.patch)));
+    return act(() => writeKeepingLinks(op.path, revertPatch(buf.toString('utf8'), op.patch), { home }));
   }
   if (op.op === 'overwrite') {
     if (hashFile(op.path) !== op.afterHash) return conflict('the primary\'s file was edited since the run; its earlier version is in the backup');
     const data = readBuf(op.backup);
     if (data === null) return conflict('the backup is missing');
-    return act(() => writeInPlace(op.path, data));
+    return act(() => writeKeepingLinks(op.path, data, { home }));
   }
   if (op.op === 'create' || op.op === 'add') {
     if (!present(op.path)) return { ok: true };
     return compareTrees(op.path, now(op.like)) === 'same' ? remove(op.path, () => removeTree(op.path)) : conflict('changed in the primary since the run; left there');
   }
   if (op.op === 'mkdir') {
-    if (!dryRun) { try { fs.rmdirSync(op.path); } catch { /* not empty: it holds something else now */ } }
-    return { ok: true };
+    if (dryRun || !lstatSafe(op.path)) return { ok: true };
+    try { fs.rmdirSync(op.path); return { ok: true }; } catch { /* not empty */ }
+    // While a step of this run inside the folder is still to be undone, the folder waits for
+    // it and is tried again with it. Otherwise it holds something else now, and stays.
+    return (seen.pending || []).some((p) => isInside(p, op.path)) ? { ok: false, waiting: true } : { ok: true };
   }
   return conflict('unknown journal entry');
 }
@@ -475,6 +516,11 @@ export function listRuns(home = homeDir()) {
  * Undo one apply run: remove the links and generated files it created and move the originals
  * back, only where each thing is still as the run left it. Anything changed since is reported
  * as a conflict and left alone.
+ *
+ * Each journal entry is marked (`undoneAt`) the moment it is undone, and the run as a whole only
+ * when every entry is. An undo that could not finish can therefore be run again: it skips what
+ * is already undone and retries exactly what is still pending. `pending` in the result counts
+ * those entries; `conflicts` says why each one could not be undone.
  */
 export function undoRun({ stamp, yes = false, dryRun = false, home = homeDir() }) {
   const runs = listRuns(home);
@@ -485,36 +531,61 @@ export function undoRun({ stamp, yes = false, dryRun = false, home = homeDir() }
   const j = parseJson(readText(journalPath));
   if (!j.ok || !j.value || j.value.version !== JOURNAL_VERSION || !Array.isArray(j.value.ops)) return { code: 1, out: { ok: false, error: 'the journal of that run cannot be read' } };
   const journal = j.value;
-  if (journal.undoneAt) return { code: 0, out: { ok: true, stamp, note: 'This run was already undone.', restored: 0, removed: 0, conflicts: [] } };
+  if (journal.undoneAt) return { code: 0, out: { ok: true, stamp, note: 'This run was already undone.', restored: 0, removed: 0, conflicts: [], pending: 0 } };
+  // Nothing more is undone once the journal cannot record it: the error stops the undo there.
+  const save = () => {
+    try { writeAtomic(journalPath, JSON.stringify(journal, null, 2) + '\n'); } catch (err) {
+      throw new Error(`the journal of run ${stamp} could not be updated (${scrub(String(err && (err.code || err.message)), home)}); undo stopped there, run it again once that folder can be written`);
+    }
+  };
   const counts = { restored: 0, removed: 0 };
   const conflicts = [];
-  const seen = { gone: new Set(), back: new Map() };
+  const notes = [];
+  const seen = { gone: new Set(), back: new Map(), pending: [] };
+  let pending = 0;
+  let already = 0;
+  // Newest first. What an earlier attempt undid is not touched again.
   for (const op of [...journal.ops].reverse()) {
+    if (op.undoneAt) { already++; continue; }
     let r;
-    try { r = undoOp(op, dryRun, seen); } catch (err) { r = { ok: false, reason: scrub(String(err && err.message ? err.message : err), home) }; }
-    const where = displayPath(op.path || op.from, home);
-    if (!r.ok) { conflicts.push({ path: where, reason: r.reason }); continue; }
+    try { r = undoOp(op, dryRun, seen, home); } catch (err) { r = { ok: false, reason: scrub(String(err && err.message ? err.message : err), home) }; }
+    if (!r.ok) {
+      pending++;
+      seen.pending.push(op.path || op.from);
+      if (!r.waiting) conflicts.push({ path: displayPath(op.path || op.from, home), reason: r.reason });
+      continue;
+    }
     if (op.op === 'move' || op.op === 'patch' || op.op === 'overwrite') counts.restored++;
     else if (op.op !== 'mkdir') counts.removed++;
+    // Recorded entry by entry, so an undo that is interrupted resumes exactly where it stopped.
+    if (!dryRun) { op.undoneAt = new Date().toISOString(); save(); }
   }
-  let note;
-  if (journal.manifest && !dryRun) {
+  const complete = pending === 0;
+  const m = journal.manifest;
+  if (m && !dryRun && !m.settledAt) {
+    // The manifest goes back with the FIRST attempt, whether or not entries are still pending.
+    // A manifest that kept claiming the links this undo removed would have the session-start
+    // check re-create them; and what is still pending is either something changed since the
+    // run (no longer what the manifest recorded) or waits for the retry. Done once per run.
     const mf = manifestFile(home);
-    if (hashFile(mf) === journal.manifest.afterHash) {
-      if (journal.manifest.before) writeAtomic(mf, JSON.stringify(journal.manifest.before, null, 2) + '\n');
+    if (hashFile(mf) === m.afterHash) {
+      if (m.before) writeAtomic(mf, JSON.stringify(m.before, null, 2) + '\n');
       else removeLink(mf);
     } else {
       // The manifest moved on since the run (the check refreshed it): drop what no longer holds.
       pruneManifest(home);
-      note = 'The manifest had changed since the run, so it was not restored: the elements that no longer hold were dropped from it instead.';
+      notes.push('The manifest had changed since the run, so it was not restored: the elements that no longer hold were dropped from it instead.');
     }
+    m.settledAt = new Date().toISOString();
   }
   if (!dryRun) {
-    journal.undoneAt = new Date().toISOString();
-    writeAtomic(journalPath, JSON.stringify(journal, null, 2) + '\n');
+    // The run counts as undone only when nothing of it is left to undo.
+    if (complete) journal.undoneAt = new Date().toISOString();
+    save();
+    if (!complete) notes.push(`${pending} step${pending === 1 ? ' is' : 's are'} still pending. Clear what "conflicts" reports and run the same undo again: it retries only what is pending.`);
   }
-  const out = { ok: conflicts.length === 0, stamp, ...(dryRun ? { dryRun: true } : {}), ...counts, conflicts, ...(note ? { note } : {}) };
-  return { code: conflicts.length ? 1 : 0, out };
+  const out = { ok: complete, stamp, ...(dryRun ? { dryRun: true } : {}), ...counts, conflicts, pending, ...(already ? { alreadyUndone: already } : {}), ...(notes.length ? { note: notes.join(' ') } : {}) };
+  return { code: complete ? 0 : 1, out };
 }
 
 /** Drop from the manifest every element that is no longer what it records. */

@@ -168,7 +168,7 @@ export class FileSet {
       e.tokens = approxTokens(r.text.length);
       if (spent) { e.omitted = 'budget'; continue; }
       const cut = cutToBytes(r.text, this.fileCap);
-      const masked = scrubHome(isSensitiveName(e.abs) ? maskSensitiveText(cut) : maskText(cut));
+      const masked = scrubHome(isSensitiveName(e.abs) ? maskSensitiveText(cut) : maskText(cut, { lang: e.lang }));
       const size = Buffer.byteLength(masked, 'utf8');
       if (size > remaining) { e.omitted = 'budget'; spent = true; continue; }
       remaining -= size;

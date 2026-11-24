@@ -15,6 +15,17 @@
 // publish as an Artifact; the state file itself is never trimmed. The board chrome follows `state.language`, else
 // --lang, else English (lib/i18n.mjs). Re-rendering an unchanged state is byte-identical.
 //
+// The channel also decides the shape of board.html (see SHELLS). `server` and `file` get a
+// standalone document. `artifact` gets a page fragment, because the Artifact publisher wraps what
+// it receives in its own document, and its embedded data is written on several lines so that the
+// agent that publishes the page can read it whole and patch it. A fragment is not meant to be
+// opened from disk: it has no charset declaration of its own. And since an Artifact has no file
+// beside it, its noscript and its drawing-failed texts point at the agent, not at board.md.
+//
+// A harness that was reviewed before carries `history` and `followUp` (references/follow-up.md):
+// the page and board.md then show what that review expected against what happened since. A state
+// without those fields renders exactly as a first review.
+//
 // stdout: { ok, language, scores, warnings: [{ item, change, problem }], bytes, files }
 // Exit 0 on success, 2 on bad arguments, 1 on failure (an invalid state changes nothing on disk).
 import fs from 'node:fs';
@@ -167,12 +178,41 @@ function referenceWarnings(state) {
 // The page
 // ---------------------------------------------------------------------------------------------
 
-/** JSON safe to place inside <script type="application/json">: no `<`, `>` or `&` can close the tag. */
-export function embedJson(obj) {
-  return JSON.stringify(obj)
+/** JSON text made safe inside a script element: no `<`, `>` or `&` is left to close the tag. */
+function scriptSafe(json) {
+  return json
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e')
     .replace(/&/g, '\\u0026');
+}
+
+/** JSON safe to place inside <script type="application/json">, on one line. */
+export function embedJson(obj) {
+  return scriptSafe(JSON.stringify(obj));
+}
+
+/**
+ * The same data as embedJson on several lines, for a page an agent has to read whole and then
+ * patch with exact-string edits (the artifact channel): one line per key of the boot object, of
+ * the dictionary (`t`) and of the state, and one line per entry of every list in the state,
+ * `accounts.list` included. Each entry stays compact, so the page grows by its line breaks only.
+ * It parses to exactly what embedJson writes, with the keys in the same order.
+ */
+export function embedJsonLines(boot) {
+  const one = (v) => scriptSafe(JSON.stringify(v));
+  const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  // JSON has no undefined: a key without a value is left out, as JSON.stringify leaves it out.
+  const kept = (v) => v !== undefined && typeof v !== 'function' && typeof v !== 'symbol';
+  const list = (arr) => (arr.length ? `[\n${arr.map((v) => (kept(v) ? one(v) : 'null')).join(',\n')}\n]` : '[]');
+  const map = (obj, value) => {
+    const rows = Object.keys(obj).filter((k) => kept(obj[k])).map((k) => `${one(k)}:${value(obj[k], k)}`);
+    return rows.length ? `{\n${rows.join(',\n')}\n}` : '{}';
+  };
+  const listOrOne = (v) => (Array.isArray(v) ? list(v) : one(v));
+  // In the state a list is one entry per line, and so is a list one level down (accounts.list).
+  const stateValue = (v) => (isMap(v) && Object.values(v).some(Array.isArray) ? map(v, listOrOne) : listOrOne(v));
+  if (!isMap(boot)) return one(boot);
+  return map(boot, (v, k) => (k === 'state' && isMap(v) ? map(v, stateValue) : k === 't' && isMap(v) ? map(v, one) : one(v)));
 }
 
 function escHtml(s) {
@@ -209,10 +249,42 @@ function assets() {
   return assetsCache;
 }
 
-/** The inline script: every fragment in one function, and a visible message if drawing fails. */
-function clientScript(js, failText) {
+/** What the root element says the page language is. */
+const HTML_LANG = { pt: 'pt-BR', en: 'en' };
+
+/**
+ * The page has one source, templates/board/board.html, and two shells around it.
+ *   document  a standalone file, for the local server and for opening from disk.
+ *   fragment  what a claude.ai Artifact is published from. The publisher puts what it receives
+ *             inside its own document (doctype, root element, head with charset and viewport,
+ *             body), so a page that brought its own would end up nested in another one. The
+ *             fragment starts at its title and has no document, root, head or body tag.
+ * A shell fills three slots of the template and nothing else: `open` before the title, `body`
+ * between what a document keeps in its head and the content, `close` after the script. All the
+ * rest is the shared source, so the two outputs cannot drift apart.
+ */
+export const SHELLS = {
+  document: {
+    open: (htmlLang) => `<!doctype html>\n<html lang="${escHtml(htmlLang)}">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n`,
+    body: '</head>\n<body>\n',
+    close: '\n</body>\n</html>',
+  },
+  fragment: { open: () => '', body: '', close: '' },
+};
+
+/** The shell a channel is rendered in: a fragment for the Artifact publisher, a document otherwise. */
+export function shellOf(channel) {
+  return channel === 'artifact' ? 'fragment' : 'document';
+}
+
+/**
+ * The inline script: every fragment in one function, and a visible message if drawing fails.
+ * The page language is set here too, because a fragment has no root element of its own to carry it.
+ */
+function clientScript(js, failText, htmlLang) {
   return `(function () {
 'use strict';
+document.documentElement.lang = ${embedJson(htmlLang)};
 function main() {
 ${js}
 }
@@ -246,6 +318,8 @@ export function boardTitle(state, T) {
 
 /**
  * board.html for a validated state. `opts`: { lang, channel, offline, files }.
+ * The channel picks the shell (SHELLS) and how the data is written: for an Artifact, a fragment
+ * with the data on several lines; otherwise a standalone document with the data on one line.
  * State strings are untrusted: they travel only inside the embedded JSON, and the client sets
  * them with textContent.
  */
@@ -253,20 +327,27 @@ export function renderHtml(state, opts = {}) {
   const lang = opts.lang || resolveLanguage(state.language);
   const T = STRINGS[lang];
   const channel = CHANNELS.includes(opts.channel) ? opts.channel : (state.environment.channel || 'file');
+  const shell = SHELLS[shellOf(channel)];
+  const htmlLang = HTML_LANG[lang] || HTML_LANG.en;
   const a = assets();
   const fonts = opts.offline ? '' : `<link rel="stylesheet" href="${escHtml(FONTS_URL)}">\n`;
+  // What the reader is told when the page cannot draw itself. A file on disk has board.md beside
+  // it; a published Artifact has nothing beside it, so there the report comes from the agent.
+  const fallback = channel === 'artifact' ? { noscript: T.noscriptArtifact, error: T.renderErrorArtifact } : { noscript: T.noscript, error: T.renderError };
   const boot = { lang, locale: LOCALES[lang], channel, home: HOMEPAGE_URL, t: T, state: opts.files === 'changed' ? withChangedFilesOnly(state) : state };
   const parts = {
-    LANG: lang === 'pt' ? 'pt-BR' : 'en',
+    OPEN: shell.open(htmlLang),
+    BODY: shell.body,
+    CLOSE: shell.close,
     TITLE: escHtml(boardTitle(state, T)),
     FONTS: fonts,
     CSS: a.css,
     SKIP: escHtml(T.skip),
     NAV: escHtml(T.nav.label),
     TRAY: escHtml(T.tray.label),
-    NOSCRIPT: escHtml(T.noscript),
-    DATA: embedJson(boot),
-    JS: clientScript(a.js, T.renderError),
+    NOSCRIPT: escHtml(fallback.noscript),
+    DATA: channel === 'artifact' ? embedJsonLines(boot) : embedJson(boot),
+    JS: clientScript(a.js, fallback.error, htmlLang),
   };
   // One pass with a function replacer: inserted text is never scanned again, so nothing in the
   // state, the stylesheet or the script can be mistaken for a placeholder or a `$` pattern.
@@ -293,16 +374,120 @@ const lowerFirst = (s) => String(s).charAt(0).toLowerCase() + String(s).slice(1)
 function pointsText(n) { return String(Number(n.toFixed(4))); }
 function quoteArg(text) { return `"${String(text).replace(/\s+/g, ' ').trim().replace(/[\\"$`]/g, '\\$&')}"`; }
 
-/** The line that records a decision from chat (references/contracts.md, `run.mjs decide`). */
-export function decideCommand(runId, target, action, note) {
-  return `run.mjs decide --run ${runId} --target ${target} --action ${action}${note ? ` --note ${quoteArg(note)}` : ''}`;
+/** What a `rev` looks like in the state (templates/state.schema.json). */
+const REV_RE = /^[0-9a-f]{12}$/;
+
+/**
+ * The line that records a decision from chat (references/contracts.md, `run.mjs decide`). `rev`
+ * is the revision of the item or group as this board shows it: with it, the decision is applied
+ * only to that proposal. The page writes the same line (decisionCommand in templates/board/logic.js).
+ */
+export function decideCommand(runId, target, action, note, rev) {
+  const revArg = typeof rev === 'string' && REV_RE.test(rev) ? ` --rev ${rev}` : '';
+  return `run.mjs decide --run ${runId} --target ${target} --action ${action}${note ? ` --note ${quoteArg(note)}` : ''}${revArg}`;
 }
 
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 
+/** ISO timestamp shown as "YYYY-MM-DD". */
+function isoDate(s) { return isoDateTime(s).slice(0, 10); }
+const upperFirst = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+
+/**
+ * The pure helpers of the page that read a follow-up (templates/board/logic.js has no DOM and no
+ * globals), evaluated here so that board.md says about an earlier review exactly what the page says.
+ */
+const LOGIC_NAMES = ['metricUnit', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail', 'itemHistory', 'historyLine'];
+let logicCache = null;
+function boardLogic() {
+  if (!logicCache) {
+    const source = fs.readFileSync(path.join(BOARD_DIR, 'logic.js'), 'utf8');
+    logicCache = new Function(`${source}\nreturn { ${LOGIC_NAMES.join(', ')} };`)();
+  }
+  return logicCache;
+}
+/** The formatters those helpers take, for text: dates as YYYY-MM-DD. */
+const TEXT_FORMAT = { date: isoDate, plural, fill, label };
+
+/**
+ * "Since the last review" for one harness (references/follow-up.md), as text: what that review
+ * expected against what was measured since, and what it fixed against what is on disk now.
+ * The same content, in the same order, as the section of the page's Impact tab.
+ */
+function followUpMarkdown(fu, T, lang) {
+  const Logic = boardLogic();
+  const C = T.fu.col;
+  const tk = (n) => compactTokens(n, lang);
+  const num1 = (n) => (Math.round(n * 10) / 10).toLocaleString(LOCALES[lang], { maximumFractionDigits: 1 });
+  const sign = (n) => (n > 0 ? '+' : n < 0 ? '-' : '');
+  const sum = Logic.followUpSummary(fu);
+  const waiting = sum.state === 'waiting';
+  const sample = fu.sample || {};
+  const L = [`### ${T.fu.h}`, ''];
+
+  const when = isoDate(fu.of && fu.of.reviewedAt);
+  const lead = [typeof fu.days === 'number' ? plural(T.fu.sub, fu.days, { date: when }) : `${fill(T.fu.since, { date: when })}.`];
+  if (typeof sample.sessions === 'number') lead.push(`${upperFirst(plural(T.fu.sessions, sample.sessions))}.`);
+  const line = Logic.followUpLine(sum, T, TEXT_FORMAT);
+  // Too little data to compare: say so, with the day the comparison will be ready.
+  if (waiting) lead.push(line === T.fu.notReady ? `${T.fu.waitH}.` : `${T.fu.waitH}: ${line}.`);
+  else lead.push(`${upperFirst(line)}.`);
+  L.push(lead.join(' '), '');
+
+  const sc = fu.score || {};
+  const scoreText = (v) => (typeof v === 'number' ? `${v} (${gradeFor(v)})` : T.notScored);
+  if ([sc.then, sc.expected, sc.now].some((v) => typeof v === 'number')) {
+    L.push(`${upperFirst(T.fu.scoreThen)}: ${scoreText(sc.then)} · ${T.fu.scoreExpected}: ${scoreText(sc.expected)} · ${T.fu.scoreNow}: ${scoreText(sc.now)}`, '');
+  }
+
+  const metrics = Array.isArray(fu.metrics) ? fu.metrics : [];
+  if (metrics.length) {
+    L.push(`| ${C.metric} | ${C.before} | ${C.expected} | ${C.now} | ${C.change} | ${C.verdict} |`, '|---|---|---|---|---|---|');
+    for (const m of metrics) {
+      const unit = Logic.metricUnit(m);
+      const value = (v, none) => (typeof v !== 'number' ? none : unit === 'percent' ? `${num1(v)}%` : tk(v));
+      const change = Logic.metricChange(m, waiting);
+      // While the sample is too small no verdict counts, whatever the state carries.
+      const verdict = waiting ? 'not-enough-data' : m.verdict;
+      L.push(`| ${cell(label(T.fu.metric, m.metric))} (${label(T.fu.unit, unit)}) | ${value(m.before, T.notMeasured)} | ${value(m.expected, '-')} | ${value(m.after, T.notMeasured)} | ${change.pct === null ? '-' : `${sign(change.pct)}${num1(Math.abs(change.pct))}%`} | ${label(T.fu.verdict, verdict)} |`);
+    }
+    L.push('');
+  } else if (!waiting) L.push(T.fu.metricsNone, '');
+
+  const sm = fu.summary || {};
+  const totals = [];
+  if (typeof sm.expectedTokensPerSession === 'number') totals.push(`${T.fu.sumExpected}: ${tk(sm.expectedTokensPerSession)}`);
+  if (typeof sm.observedTokensPerSession === 'number') totals.push(`${T.fu.sumObserved}: ${sign(sm.observedTokensPerSession)}${tk(Math.abs(sm.observedTokensPerSession))}`);
+  for (const [key, forms] of [['inPlace', T.fu.sumInPlace], ['reverted', T.fu.sumReverted], ['cameBack', T.fu.sumCameBack]]) {
+    if (typeof sm[key] === 'number') totals.push(`${sm[key]} ${plural(forms, sm[key])}`);
+  }
+  if (totals.length) L.push(upperFirst(totals.join(' · ')), '');
+
+  const items = Logic.followUpItems(fu);
+  const nowOf = (i) => (i.now ? ` · ${lowerFirst(C.nowItem)}: ${cell(i.now)}` : '');
+  L.push(`#### ${T.fu.fixedH}`, '');
+  if (!items.fixed.length) L.push(T.fu.fixedNone);
+  for (const i of items.fixed) {
+    // A fix that was not checked reads "not checked", never "still in place".
+    const bits = [label(T.fu.check, Object.hasOwn(T.fu.check, i.check) ? i.check : 'not-checked')];
+    if (Array.isArray(i.paths) && i.paths.length) bits.push(i.paths.map(cell).join(', '));
+    if (typeof i.saves === 'number') bits.push(`${lowerFirst(C.saving)} ${fill(T.fu.saved, { tokens: tk(i.saves) })}`);
+    L.push(`- **${cell(i.id)}** ${cell(i.title)}: ${bits.join(' · ')}${nowOf(i)}`);
+  }
+  L.push('');
+  if (items.carried.length) {
+    L.push(`#### ${plural(T.fu.carriedH, items.carried.length)}`, '');
+    for (const i of items.carried) L.push(`- **${cell(i.id)}** ${cell(i.title)}: ${label(T.status, i.status)}${nowOf(i)}`);
+    L.push('');
+  }
+  L.push(T.fu.note, '');
+  return L;
+}
+
 export function renderMarkdown(state, lang = resolveLanguage(state.language), warnings = []) {
   const T = STRINGS[lang];
   const C = T.col;
+  const Logic = boardLogic();
   const days = state.run.windowDays || Math.max(0, ...state.harnesses.map((h) => (h.impact ? h.impact.windowDays : 0))) || 30;
   const nameOf = (id) => (state.harnesses.find((h) => h.id === id) || { name: id }).name;
   const tk = (n) => compactTokens(n, lang);
@@ -317,6 +502,8 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
     `${T.by.window}: ${plural(T.windowDays, days)}`,
     `${T.by.date}: ${isoDateTime(state.run.lastRun || state.run.startedAt)}`,
     `${T.by.run}: ${state.run.id}`,
+    // A run started as the follow-up of an earlier one says which.
+    ...(state.run.followUpOf && state.run.followUpOf.reviewedAt ? [`${T.fu.runOf} ${isoDate(state.run.followUpOf.reviewedAt)}`] : []),
   ].join(' · '), '');
 
   // Fleet
@@ -384,12 +571,12 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
     }
     for (const g of openGroups) {
       L.push(`- **${g.id}** (${T.dc.group}) ${cell(g.title)}: ${g.items.filter((id) => openIds.has(id)).join(', ')}`);
-      L.push(`  - \`${decideCommand(state.run.id, g.id, 'approve')}\``);
+      L.push(`  - \`${decideCommand(state.run.id, g.id, 'approve', '', g.rev)}\``);
     }
     const sorted = openItems.map((i, k) => ({ i, k })).sort((a, b) => (SEVERITY_ORDER[a.i.severity] - SEVERITY_ORDER[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k));
     for (const { i } of sorted) {
       L.push(`- **${i.id}** (${label(T.severity, i.severity)}, ${cell(nameOf(i.harness))}${i.group ? `, ${i.group}` : ''}) ${cell(i.title)}`);
-      L.push(`  - \`${decideCommand(state.run.id, i.id, 'approve')}\``);
+      L.push(`  - \`${decideCommand(state.run.id, i.id, 'approve', '', i.rev)}\``);
       if (i.question) L.push(`  - ${T.field.question}: ${cell(i.question)}`);
     }
     L.push('');
@@ -408,12 +595,21 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
     else {
       L.push(`${T.sc.label}: ${C.baseline} ${s.baseline} (${s.baselineGrade}) · ${C.current} ${s.current} (${s.grade}) · ${C.projected} ${s.projected} (${s.projectedGrade})${s.previous === null || s.previous === undefined ? '' : ` · ${C.previous} ${s.previous}`}`, '');
     }
+    // The earlier reviews of this harness, oldest first, ending in the score it has now.
+    const trail = Logic.reviewTrail(h.history);
+    if (trail.length) {
+      const step = (when, score, grade) => `${when} ${typeof score === 'number' ? `${score} (${grade || gradeFor(score)})` : T.notScored}`;
+      L.push(`${T.fu.trail}: ${[...trail.map((r) => step(isoDate(r.at), r.score, r.grade)), step(T.fu.now, s.current, s.grade)].join(' › ')}`, '');
+    }
 
     L.push(`### ${T.md.scoresByRound}`, '', `| ${C.round} | ${C.weight} | ${C.status} | ${C.score} | ${C.deducted} | ${C.projected} | ${C.items} |`, '|---|---|---|---|---|---|---|');
     for (const r of roundBreakdown(state, h.id)) {
       L.push(`| ${r.round} ${T.rounds[r.round]} | ${r.weight} | ${label(T.roundStatus, r.status)} | ${r.counted ? floor1(r.score) : '-'} | ${r.counted ? pointsText(r.deductions) : '-'} | ${r.counted ? floor1(r.projectedScore) : '-'} | ${r.items} |`);
     }
     L.push('');
+
+    // What the last review expected and what happened since comes before this run's own measurement.
+    if (h.followUp) L.push(...followUpMarkdown(h.followUp, T, lang));
 
     if (h.impact) {
       const I = h.impact;
@@ -427,12 +623,17 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       } else if (typeof start.total === 'number' && typeof start.perSessionMedian === 'number') {
         L.push(fill(T.md.impactFixed, { total: tk(start.total), median: tk(start.perSessionMedian) }), '');
       }
-      const kinds = [...(I.waste || [])].sort((a, b) => b.tokens - a.tokens);
-      for (const k of kinds.filter((x) => x.episodes > 0)) {
+      const kinds = [...(I.waste || [])].sort((a, b) => (b.tokens || 0) - (a.tokens || 0));
+      // A kind without an episode count was not measured: it is listed as such, never as "no occurrences".
+      const counted = (x) => typeof x.episodes === 'number';
+      for (const k of kinds.filter((x) => counted(x) && x.episodes > 0)) {
         L.push(`- ${label(T.waste, k.kind)} (${T.basis.measured}): ${tk(k.tokens)}, ${plural(T.imp.episodes, k.episodes)}${(k.items || []).length ? `; ${T.imp.addressedBy} ${k.items.join(', ')}` : ''}`);
       }
-      const quiet = kinds.filter((x) => !(x.episodes > 0)).map((x) => lowerFirst(label(T.waste, x.kind)));
-      if (quiet.length) L.push(`- ${fill(T.imp.noEpisodes, { list: quiet.join(', ') })}`);
+      const namesOf = (list) => list.map((x) => lowerFirst(label(T.waste, x.kind))).join(', ');
+      const quiet = kinds.filter((x) => counted(x) && !(x.episodes > 0));
+      if (quiet.length) L.push(`- ${fill(T.imp.noEpisodes, { list: namesOf(quiet) })}`);
+      const unknown = kinds.filter((x) => !counted(x));
+      if (unknown.length) L.push(`- ${T.notMeasured}: ${namesOf(unknown)}`);
       for (const e of I.estimates || []) L.push(`- ${cell(e.label)} (${T.basis.estimated}): ${tk(e.tokens)}; ${fill(T.imp.source, { source: cell(e.source) })}`);
       L.push('');
     } else if (h.impactSkipped) {
@@ -454,6 +655,9 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       L.push('');
       for (const i of inRound) {
         L.push(`- **${i.id}** ${cell(i.finding)}`);
+        // What the records say about this finding in earlier reviews; a `previous` link alone says nothing.
+        const hist = Logic.itemHistory(i);
+        if (hist) L.push(`  - ${F.history}: ${cell(Logic.historyLine(hist, T, TEXT_FORMAT))}`);
         if (i.evidence) L.push(`  - ${F.evidence}: ${cell(i.evidence)}`);
         const paths = [...new Set((i.changes || []).map((c) => c.path))];
         if (paths.length) L.push(`  - ${F.file}: ${paths.map(cell).join(', ')} (${plural(T.md.changes, i.changes.length)})`);

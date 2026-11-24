@@ -31,8 +31,28 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); 
   levar e o custo da mudança.
 - **Desfazer.** Toda mudança fica registrada com backup; um comando desfaz um item ou a
   revisão inteira.
+- **Registro e acompanhamento.** Ao fechar, cada harness ganha um registro da revisão em
+  `~/.novarc-powers/novarc-harness-doctor/history/`: decisões, mudanças aplicadas, economia
+  esperada e as medições do dia. A revisão seguinte mede de novo desde então, diz por medida se
+  o efeito esperado se confirmou, confere no disco se cada correção continua no lugar e mostra
+  o que voltou. `run.mjs history` lista o que já foi revisado e o que está na hora de rever.
+- **Decisão presa ao que você viu.** Uma aprovação vale para a versão exata da proposta; se a
+  proposta mudar depois, o item volta a ficar aberto e nada é aplicado sem nova decisão.
 - Veredito por skill (manter, melhorar, atualizar, aposentar, juntar), regras que nunca
   disparam, e correções repetidas que viram proposta de regra.
+
+#### Segurança
+
+- Credenciais nunca chegam ao painel: um achado ou uma nota que contenha uma é recusado na
+  entrada, e o estado passa por uma última barreira antes de ser gravado. O mascaramento dos
+  arquivos mostrados é por nome da chave (senha, token, segredo), em JSON, TOML e YAML, além
+  dos formatos de token conhecidos.
+- A sincronização entre contas não grava mais por cima de um arquivo que virou link ou ganhou
+  outro nome, nunca trunca antes de gravar, e confere o conteúdo por trás de um link antes de
+  aplicar um plano. Um desfazer parcial pode ser repetido até completar.
+- As sondas de uma conta não leem mais nada de outra conta.
+- Uma contagem que não pôde ser medida aparece como "não medido", nunca como zero: uma skill
+  ou um servidor MCP só é dado como sem uso quando isso foi de fato medido.
 
 #### Alterado
 

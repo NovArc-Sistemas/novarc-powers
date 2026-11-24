@@ -38,6 +38,9 @@ board what is wrong, why, and exactly what changes.
   up and can be undone with one command.
 - **It keeps your accounts in step.** Pick one account as the primary; the others of the same
   provider link to it, and other providers get the part that can be replicated.
+- **It comes back to check.** Every review is recorded: what was decided, what changed and what
+  each change promised to save. A month later the same skill measures again, shows what was
+  confirmed, what was undone and what came back, and reviews each harness again.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-explorer.png" alt="Harness explorer: the instruction file with the proposed change in red and green and the explanation beside it" width="820">

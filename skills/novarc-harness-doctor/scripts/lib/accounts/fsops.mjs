@@ -2,7 +2,7 @@
 // without ever following a link into somebody else's files.
 import fs from 'node:fs';
 import path from 'node:path';
-import { lstatSafe, readlinkSafe, readdirSafe, sha256, mkdirp, removeLink, realpathSafe } from '../../sync-check.mjs';
+import { lstatSafe, statSafe, readlinkSafe, readdirSafe, sha256, mkdirp, removeLink, realpathSafe, pathKey } from '../../sync-check.mjs';
 
 const CHUNK = 1024 * 1024;
 
@@ -69,33 +69,50 @@ export function compareTrees(a, b, budget = { entries: 20000, bytes: 64 * 1024 *
 }
 
 /**
- * A cheap signature of what is at a path, used to notice that something changed between a plan
- * and its apply: content hash for a file, link target for a link, names/sizes/times for a folder
- * (bounded, so a huge folder costs a fixed amount).
+ * A signature of what is at a path AND of what it holds, used to notice that something changed
+ * between a plan and its apply:
+ *   file     the hash of its content
+ *   link     where it points (the link text) and, signed by these same rules, what it resolves
+ *            to: content edited behind a link is a change, although the link itself is the same
+ *   folder   a hash over every entry: its name and its own signature, links included
+ * Bounded, so a huge folder costs a fixed amount: past `cap` entries the rest is left out, past
+ * `bytes` of content a file is signed by size and time instead, and the signature then ends in
+ * `+`. A link that leads back into a folder being walked is signed as `loop`, not followed.
  */
-export function signature(p, cap = 4000) {
-  const l = lstatSafe(p);
-  if (!l) return '-';
-  if (l.isSymbolicLink()) return `l:${readlinkSafe(p) || ''}`;
-  if (l.isFile()) {
-    try { return `f:${sha256(fs.readFileSync(p))}`; } catch { return `f:${l.size}:${Math.round(l.mtimeMs)}`; }
-  }
-  if (!l.isDirectory()) return 'o';
-  const parts = [];
-  let left = cap;
-  const walk = (dir, rel) => {
-    for (const e of readdirSafe(dir).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
-      if (--left < 0) return;
-      const full = path.join(dir, e.name);
-      const s = lstatSafe(full);
-      if (!s) continue;
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (s.isSymbolicLink()) parts.push(`${r}>l:${readlinkSafe(full) || ''}`);
-      else if (s.isDirectory()) { parts.push(`${r}/`); walk(full, r); } else parts.push(`${r}:${s.size}:${Math.round(s.mtimeMs)}`);
+export function signature(p, { cap = 4000, bytes = 64 * 1024 * 1024 } = {}) {
+  const left = { entries: cap, bytes };
+  let cut = false;
+  const open = new Set(); // the folders being walked
+  const at = (real, st) => {
+    if (st.isFile()) {
+      if (st.size <= left.bytes) {
+        try { const buf = fs.readFileSync(real); left.bytes -= buf.length; return `f:${sha256(buf)}`; } catch { /* unreadable: by size and time */ }
+      }
+      cut = true;
+      return `f:${st.size}:${Math.round(st.mtimeMs)}`;
     }
+    if (!st.isDirectory()) return 'o';
+    const key = pathKey(real);
+    if (open.has(key)) return 'loop';
+    open.add(key);
+    const parts = [];
+    for (const name of readdirSafe(real).map((e) => e.name).sort()) {
+      if (--left.entries < 0) { cut = true; break; }
+      parts.push(`${name}\0${any(path.join(real, name))}`);
+    }
+    open.delete(key);
+    return `d:${sha256(parts.join('\0'))}`;
   };
-  walk(p, '');
-  return `d:${sha256(parts.join('\n'))}${left < 0 ? '+' : ''}`;
+  const any = (q) => {
+    const l = lstatSafe(q);
+    if (!l) return '-';
+    if (!l.isSymbolicLink()) return at(q, l);
+    const real = realpathSafe(q);
+    const st = real ? statSafe(real) : null;
+    return `l:${readlinkSafe(q) || ''}|${st ? at(real, st) : '!'}`; // `!`: it points nowhere
+  };
+  const sig = any(p);
+  return cut ? `${sig}+` : sig;
 }
 
 /** Copy a file or a tree. Links are re-created as links (or, where refused, as what they hold). */

@@ -3,13 +3,13 @@
 // The check script is copied to a stable place under the home directory so it survives the skill
 // being fetched on demand. The hook entry is merged into the primary's settings.json (Claude
 // Code) or hooks.json (Codex) with a surgical edit: every other byte of the file is kept, and the
-// file is written IN PLACE so a link on it survives.
+// file is written so that a link on it survives and a failed write leaves it as it was.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   IS_WIN, homeDir, syncDir, manifestFile, stableCheckPath, displayPath, lstatSafe, readBuf, readText,
-  parseJson, sha256, hashFile, mkdirp, writeInPlace, writeAtomic, removeLink, readManifest,
+  parseJson, sha256, hashFile, mkdirp, writeKeepingLinks, writeAtomic, removeLink, readManifest,
 } from '../../sync-check.mjs';
 import { scanText } from '../../secret-scan.mjs';
 import { detectAccounts } from './detect.mjs';
@@ -105,7 +105,7 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
 
   if (!lstatSafe(target.file)) {
     const text = JSON.stringify({ hooks: { SessionStart: [target.entry] } }, null, 2) + '\n';
-    writeInPlace(target.file, text);
+    writeKeepingLinks(target.file, text, { home });
     writeAtomic(recordFile(home), JSON.stringify({ ...record, created: true, afterHash: sha256(Buffer.from(text, 'utf8')) }, null, 2) + '\n');
     return { code: 0, out: { ok: true, installed: true, changed: true, ...base, file: shown, backup: null, notes: [...notes, 'The file did not exist; it was created.'] } };
   }
@@ -136,10 +136,13 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
   const patch = makePatch(text, next);
   const afterHash = sha256(Buffer.from(next, 'utf8'));
   run.op({ op: 'patch', path: target.file, afterHash, patch });
-  writeInPlace(target.file, next);
+  try { writeKeepingLinks(target.file, next, { home }); } catch (err) {
+    run.unop(); // a failed write leaves the file as it was
+    throw err;
+  }
   const check = parseJson(readText(target.file));
   if (!check.ok || !findHooks(check.value, home).length) {
-    writeInPlace(target.file, buf);
+    writeKeepingLinks(target.file, buf, { home });
     run.unop();
     return { code: 1, out: { ok: false, ...base, file: shown, error: 'verification failed; the file was restored' } };
   }
@@ -170,7 +173,7 @@ export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env =
     if (record && sha256(buf) === record.afterHash) {
       // Untouched since the install: restore the exact previous bytes.
       if (record.created) removeLink(file);
-      else writeInPlace(file, revertPatch(text, record.patch));
+      else writeKeepingLinks(file, revertPatch(text, record.patch), { home });
       out.changed = true;
     } else {
       const parsed = parseJson(text);
@@ -185,7 +188,7 @@ export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env =
           next = removeIn(next, ['hooks', 'SessionStart']);
           if (!Object.keys(parseJson(next).value.hooks).length) next = removeIn(next, ['hooks']);
         }
-        writeInPlace(file, next);
+        writeKeepingLinks(file, next, { home });
         out.changed = true;
       }
     }

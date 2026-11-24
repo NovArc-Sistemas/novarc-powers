@@ -1,6 +1,8 @@
 // Walks one harness (a project root, or one account's config dir) and registers its files and
 // the raw facts the element views are built from. Read-only. Nothing here formats output:
-// elements.mjs turns the raw facts into the schema's shape once file ids exist.
+// elements.mjs turns the raw facts into the schema's shape once file ids exist. The few notes
+// written here (where an MCP server is kept, what a plugin's record says) are worded through
+// `ctx.t`, the translator of the language the snapshot was asked for (strings.mjs).
 //
 // lib/checks/collect.mjs reads the same things for the checks engine, but merges every account
 // and drops a file a second account links to. A snapshot is per harness and must list those
@@ -14,6 +16,7 @@ import { parseImports, scanCodexToml, detectLanguage } from '../../discover.mjs'
 import { hookScriptPath, resolveRef } from '../checks/collect.mjs';
 import { frontmatter } from '../checks/util.mjs';
 import { keyOf, under, gitHooksDir, readHead } from './project.mjs';
+import { translator } from './strings.mjs';
 
 // Lower numbers keep their content first when the harness budget runs out. A file imported by
 // an instruction file sits one step below the file that imports it.
@@ -48,12 +51,12 @@ const MAX_NESTED = 40;
 const str = (v) => (typeof v === 'string' ? v : Array.isArray(v) ? v.filter((x) => typeof x === 'string').join(', ') : '');
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
-export function newScan({ kind, root, provider = null, files, loader }) {
+export function newScan({ kind, root, provider = null, files, loader, t = translator('en') }) {
   const configDirs = [...claudeConfigDirs(), ...codexDirs(), ...agentsDirs()];
   const scriptRoots = new Set([root, realpathSafe(root) || root]);
   for (const d of configDirs) { scriptRoots.add(d.path); scriptRoots.add(d.realpath || d.path); }
   return {
-    kind, root, provider, files, loader,
+    kind, root, provider, files, loader, t,
     claudeDirs: claudeConfigDirs().map((d) => d.path),
     scriptRoots: [...scriptRoots],
     chains: [], settings: [], permissions: [], hooks: [], skills: [], agents: [], plugins: [], mcp: [], docs: [],
@@ -305,7 +308,7 @@ function addStateMcp(ctx) {
     seen.add(keyOf(realpathSafe(f) || f));
     const j = stateJson(f);
     if (!j) continue;
-    const note = `kept in ${ctx.files.display(f)}, which is not part of the snapshot`;
+    const note = ctx.t('mcp.stateFile', { file: ctx.files.display(f) });
     if (ctx.kind === 'user') { addMcpServers(ctx, j.mcpServers, { level: 'user', note }); continue; }
     const projects = j.projects && typeof j.projects === 'object' ? j.projects : {};
     for (const [k, v] of Object.entries(projects)) {
@@ -428,9 +431,9 @@ function addClaudePlugins(ctx, { registries, listInstalled }) {
     const inst = installs.get(key) || null;
     const def = marketplace ? markets.get(marketplace) : null;
     const notes = [];
-    if (inst && inst.version) notes.push(`version ${inst.version}`);
-    if (def && def.autoUpdate === true) notes.push('marketplace auto-updates');
-    if (enabled.get(key) === true && !inst) notes.push('enabled but no install record found');
+    if (inst && inst.version) notes.push(ctx.t('plugin.version', { version: inst.version }));
+    if (def && def.autoUpdate === true) notes.push(ctx.t('plugin.autoUpdate'));
+    if (enabled.get(key) === true && !inst) notes.push(ctx.t('plugin.noInstall'));
     ctx.plugins.push({ name, marketplace, enabled: enabled.get(key) === true, pinned: def ? marketplacePinned(def) : null, note: notes.join('; ') || null });
     if (enabled.get(key) !== true || !inst || !isDir(inst.root)) continue;
     const root = inst.root;
@@ -443,7 +446,7 @@ function addClaudePlugins(ctx, { registries, listInstalled }) {
     const e = asFile ? ctx.files.add(hk, { category: 'hook', loaded: 'always', priority: PRIORITY.pluginHookFile }) : null;
     const hj = isFile(hk) ? jsonOf(ctx, hk) : null;
     if (hj) addAgentHooks(ctx, hj.hooks && typeof hj.hooks === 'object' ? hj.hooks : hj, { fileAbs: e ? e.abs : null, configDir: inst.dir, source: 'plugin', plugin: name, pluginRoot: root, asFile });
-    const note = `from plugin ${name}`;
+    const note = ctx.t('mcp.fromPlugin', { name });
     const pm = isFile(path.join(root, '.mcp.json')) ? jsonOf(ctx, path.join(root, '.mcp.json')) : null;
     if (pm) addMcpServers(ctx, pm.mcpServers && typeof pm.mcpServers === 'object' ? pm.mcpServers : pm, { level: 'plugin', note });
     const pj = isFile(path.join(root, '.claude-plugin', 'plugin.json')) ? jsonOf(ctx, path.join(root, '.claude-plugin', 'plugin.json')) : null;
@@ -608,12 +611,12 @@ function addGitHooks(ctx) {
     if (entry && !ctx.hooks.some((h) => h.source === 'git' && h.fileAbs === entry.abs)) ctx.hooks.push({ source: 'git', event: e.name, fileAbs: entry.abs, note: 'husky' });
   }
   const pc = ctx.files.add(path.join(ctx.root, '.pre-commit-config.yaml'), { category: 'gate', loaded: 'never', priority: PRIORITY.gateConfig });
-  if (pc) ctx.hooks.push({ source: 'git', event: 'pre-commit', fileAbs: pc.abs, note: 'pre-commit framework config; active only where `pre-commit install` was run' });
+  if (pc) ctx.hooks.push({ source: 'git', event: 'pre-commit', fileAbs: pc.abs, note: ctx.t('hook.preCommit') });
   for (const n of ['lefthook.yml', '.lefthook.yml', 'lefthook.yaml']) {
     const lh = ctx.files.add(path.join(ctx.root, n), { category: 'gate', loaded: 'never', priority: PRIORITY.gateConfig });
     if (!lh) continue;
     const text = ctx.loader.text(lh.abs) || '';
-    for (const m of text.matchAll(/^([a-z][a-z-]+):/gm)) if (GIT_HOOK_NAMES.has(m[1])) ctx.hooks.push({ source: 'git', event: m[1], fileAbs: lh.abs, note: 'lefthook config; active only where `lefthook install` was run' });
+    for (const m of text.matchAll(/^([a-z][a-z-]+):/gm)) if (GIT_HOOK_NAMES.has(m[1])) ctx.hooks.push({ source: 'git', event: m[1], fileAbs: lh.abs, note: ctx.t('hook.lefthook') });
   }
 }
 
@@ -672,7 +675,7 @@ function addCi(ctx) {
     const wf = parseWorkflow(ctx.loader.text(entry.abs) || '');
     const command = wf.jobs.length ? `jobs: ${wf.jobs.join(', ')}` : '';
     const triggers = wf.triggers.length ? wf.triggers : [{ event: 'unknown' }];
-    for (const t of triggers) ctx.hooks.push({ source: 'ci', event: t.event, matcher: t.filter || '', command, fileAbs: entry.abs, note: wf.name ? `workflow ${wf.name}` : null });
+    for (const t of triggers) ctx.hooks.push({ source: 'ci', event: t.event, matcher: t.filter || '', command, fileAbs: entry.abs, note: wf.name ? ctx.t('hook.workflow', { name: wf.name }) : null });
   }
   for (const rel of CI_FILES) {
     const entry = ctx.files.add(path.join(ctx.root, rel), { category: 'gate', loaded: 'never', priority: PRIORITY.ci });

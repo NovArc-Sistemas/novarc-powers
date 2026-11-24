@@ -23,12 +23,30 @@ next time they touch a harness, without this skill. Every item is written to tha
    `why` beside it. A user reading `CLAUDE.md` on the board sees the whole file, with every
    proposed edit in place.
 3. **`saves`**, when the measurement supports it: the tokens this fix is expected to save over
-   the window, `measured` or `estimated`, with one line on where the number comes from.
+   the window, `measured` or `estimated`, with one line on where the number comes from, and
+   **`metric`**: the measurement the saving should show up in (`context-at-start` for anything
+   that shrinks what every session loads, `waste:retry`, `waste:exploration` and the other
+   waste kinds, `tool-output` for shell output; the full list is `$defs.metric` in the schema).
+   The next review of this harness measures that metric again and tells the user whether the
+   saving happened (`references/follow-up.md`), so name the metric the fix really moves and
+   keep the number honest: an inflated saving comes back as "not confirmed". The next review
+   reads the number as `tokens / sessions in the window`, so compute it that way:
+   - `context-at-start`: the tokens the fix removes from what a session loads, times the
+     sessions in the window (not times the turns);
+   - `waste:<kind>`: the tokens of that kind of waste the fix removes over the window (the
+     measured tokens of the episodes it prevents);
+   - `tokens-per-session`: any other saving in tokens over the window.
 
 Items that change nothing (status `ok`, a fine inventory entry) need no lesson; their `opinion`
 says why they are fine, which teaches too.
 
 ## Writing the changes
+
+**Never write a credential anywhere in a findings file.** `run.mjs complete` refuses the file
+and names the place. For an item about a secret in a config file: class `secret`; `before`
+copied from the snapshot (it shows the masked form), never from disk; `after` a reference
+(`${VAR}`, a helper command, a `<placeholder>`), never a value; `evidence` as file and line,
+the kind of credential, and the masked form.
 
 The board finds a change in its file by exact text, so precision is what makes it appear in the
 right place. `run.mjs build` prints a warning for every change it could not place; fix them all.

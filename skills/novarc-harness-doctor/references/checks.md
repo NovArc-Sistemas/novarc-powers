@@ -122,7 +122,10 @@ Reported in `defenses`, never as findings, so the board can show what is already
   `exit(2)`, `process.exitCode = 2`) and the command does not throw that status away (an or-true
   or `; exit 0` ending), or it prints a deny, ask or block decision, or it sets
   `onFailure: "block"`. A hook that runs in the background (`async`, `asyncRewake`) is never
-  listed.
+  listed. Only the hook's code counts: an `exit 2` in a comment or inside a message proves
+  nothing. When the code does not show which it is (a computed exit status, a decision held in
+  a variable), `blocking` is `null`: no defense is listed and no check fires on it. Never turn
+  an unknown into "blocks" or "does not block" in a finding; read the script.
 - **Sandbox enabled**: `sandbox.enabled: true` in a settings layer.
 - **Secret scan before commit**: the project's git `pre-commit` hook (respecting
   `core.hooksPath`), `.pre-commit-config.yaml`, `.husky/pre-commit` or `lefthook.yml` runs

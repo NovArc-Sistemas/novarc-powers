@@ -36,6 +36,11 @@ Depois basta pedir "revisa meus harness" em qualquer sessão. Precisa de Node 20
 4. **Mostra o painel**, com uma aba por harness.
 5. **Aplica o que você aprovar**, com backup, verificação depois da mudança e registro do que
    não deu para verificar. `run.mjs undo` desfaz um item ou a revisão inteira.
+6. **Registra e volta para conferir.** Ao fechar, cada harness ganha um registro da revisão: o
+   que foi decidido, o que mudou, quanto cada mudança prometia economizar e as medições do dia.
+   Peça a revisão de novo depois de um mês: ela mede o período desde então, diz por medida se
+   o efeito esperado se confirmou, confere no disco se cada correção continua no lugar, mostra
+   o que voltou e reavalia o harness. O que você recusou não é proposto de novo sem motivo.
 
 ## O painel
 
@@ -100,6 +105,7 @@ arquivos do harness (com segredos mascarados); ele só vai para o claude.ai se v
 ```text
 ~/.novarc-powers/novarc-harness-doctor/
 ├── runs/<id>/     # uma pasta por revisão: medições, achados, decisões, backups, painel
+├── history/       # um registro por harness e por revisão, que a próxima revisão compara
 ├── sync/          # registro e checagem das contas ligadas
 └── latest.json
 ```

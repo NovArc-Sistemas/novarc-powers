@@ -60,6 +60,10 @@ loaded in every session of the window and never called once, and the board's MCP
 call count of each. More than ten servers at one level is a finding by itself, whatever each
 one does: every tool definition is paid for in every session.
 
+A server listed in `impact.unusedContext.mcpServersUnknown` (call count `null`) was not measured:
+its transcripts could not be fully read. Never propose removing it as unused; say that its use
+is unknown and ask the user.
+
 Options to put in front of the user for each server, in this order: replace with CLI; move to
 project level; keep at user level; disable for now. One line each on what changes.
 

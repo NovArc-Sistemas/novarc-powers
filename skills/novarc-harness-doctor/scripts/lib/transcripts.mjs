@@ -1,6 +1,7 @@
 // Shared transcript reading pieces for the harness-doctor probes that read agent session logs.
-// Zero dependencies, read-only. Nothing here returns message text: callers get flags, counts,
-// command heads and names that pass SAFE_NAME.
+// Zero dependencies, read-only. Nothing here prints. What a caller gets to print is flags, counts,
+// command heads and names that pass SAFE_NAME; a result text, a command or a line that could not
+// be parsed is handed over only to be tested in memory.
 import fs from 'node:fs';
 import path from 'node:path';
 import { IS_WIN, readdirSafe, statSafe, realpathSafe, normalizeInputPath } from './common.mjs';
@@ -138,6 +139,210 @@ export function codexCommandString(cmd) {
   return cmd.join(' ');
 }
 
+// ---------------------------------------------------------------- Codex tool calls
+
+// A Codex rollout records one tool call in up to three shapes, depending on the CLI version and
+// on who made the call:
+//   response_item  `function_call`, `custom_tool_call`, `local_shell_call` (and their `*_output`
+//                  items), keyed by `call_id`: what the model asked for;
+//   event_msg      `exec_command_end`, `mcp_tool_call_end`, keyed by `call_id`: the completion
+//                  events of older versions;
+//   event_msg      `item_completed` with a `CommandExecution` or `McpToolCall` item, keyed by the
+//                  item `id`: the call id when the model made the call itself, an id of its own
+//                  when a script tool made it.
+// Records that share an id are one call, so a call written in two shapes is counted once.
+
+/** Tools whose `response_item` call carries a shell command. A script tool (`exec`) is not one. */
+const CODEX_SHELL_TOOLS = new Set(['shell', 'local_shell', 'exec_command', 'shell_command', 'container.exec']);
+// Record kinds that can hold a tool call and are not read here: a completed item of another
+// `...Call` / `...Execution` type (the only record a call made from inside a script tool leaves),
+// and another MCP or exec end event. They are counted, never guessed at. Events of other tools
+// are left alone: a call the model makes itself is always a response_item too.
+const CODEX_ITEM_CALL_LIKE = /(?:Call|Execution)$/;
+const CODEX_EVENT_CALL_LIKE = /^(?:mcp|exec)_[a-z_]*_end$/;
+
+function timeOf(ts) {
+  if (typeof ts !== 'string') return null;
+  const t = Date.parse(ts);
+  return Number.isNaN(t) ? null : t;
+}
+
+function codexText(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
+  if (v && typeof v === 'object' && typeof v.content === 'string') return v.content;
+  return '';
+}
+
+/**
+ * What the output item of a Codex shell call says: whether the command failed and the command's
+ * own output. Older rollouts wrap both in JSON (`{"output": "...", "metadata": {"exit_code": 1}}`);
+ * newer ones put a short header before the output (`Exit code: 1` or `Process exited with code 1`,
+ * then `Output:`). An output that names no exit code is not a failure. The text stays in memory.
+ */
+export function codexShellOutput(output) {
+  const raw = codexText(output);
+  const refused = !!output && typeof output === 'object' && !Array.isArray(output) && output.success === false;
+  if (raw.startsWith('{')) {
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j === 'object' && !Array.isArray(j) && (typeof j.output === 'string' || (j.metadata && typeof j.metadata === 'object'))) {
+        const code = j.metadata && typeof j.metadata === 'object' && typeof j.metadata.exit_code === 'number' ? j.metadata.exit_code : null;
+        return { failed: code !== null ? code !== 0 : refused, text: typeof j.output === 'string' ? j.output : '' };
+      }
+    } catch { /* plain text that happens to open with a brace */ }
+  }
+  let code = null;
+  let from = 0;
+  let pos = 0;
+  for (let n = 0; n < 8; n++) { // the header is a few short lines; the command's own output is never searched
+    const end = raw.indexOf('\n', pos);
+    const line = (end === -1 ? raw.slice(pos) : raw.slice(pos, end)).trimEnd();
+    const m = /^(?:Exit code:|Process exited with code) (-?\d+)$/.exec(line);
+    if (m && code === null) code = Number(m[1]);
+    if (line === 'Output:') { from = end === -1 ? raw.length : end + 1; break; }
+    if (end === -1) break;
+    pos = end + 1;
+  }
+  return { failed: code !== null ? code !== 0 : refused, text: raw.slice(from) };
+}
+
+/** The shell command a `response_item` call carries, or null when it has none that can be read. */
+function codexCallCommand(p) {
+  if (p.type === 'local_shell_call') return codexCommandString(p.action && typeof p.action === 'object' ? p.action.command : null);
+  let a = p.arguments;
+  if (typeof a === 'string') { try { a = JSON.parse(a); } catch { return null; } }
+  if (!a || typeof a !== 'object') return null;
+  return codexCommandString(a.command !== undefined ? a.command : a.cmd);
+}
+
+/**
+ * Reads the tool calls of ONE Codex rollout, one per call id, whichever shapes recorded them.
+ * Feed every parsed line to `read`; `calls` then holds each call once, in the order it was first
+ * seen:
+ *   { id, ts, name, shell, command, mcp: { server, tool } | null, done, failed, text, outChars }
+ * `ts` is the time of the first record that mentions the call, `name` the tool name a
+ * `response_item` gave it (null when only its completion was recorded), `done` whether an outcome
+ * was read (shell calls only). `command` and `text` are never to be printed.
+ * `unrecognized` counts, per record kind (`item:<type>`, `event:<type>`, `<kind>:no-server`), the
+ * records that look like a tool call in a shape this reader does not know: with any of those,
+ * "this tool was never called" is not established.
+ */
+export function codexCallReader() {
+  const byId = new Map();
+  const calls = [];
+  const unrecognized = new Map();
+  const odd = (kind) => { unrecognized.set(kind, (unrecognized.get(kind) || 0) + 1); return null; };
+  const open = (id, ts) => {
+    const key = typeof id === 'string' && id ? id : null;
+    let call = key !== null ? byId.get(key) : undefined;
+    if (call) return { call, created: false };
+    call = { id: key, ts, name: null, shell: false, command: null, mcp: null, done: false, sure: false, failed: false, text: '', outChars: 0 };
+    calls.push(call);
+    if (key !== null) byId.set(key, call);
+    return { call, created: true };
+  };
+  // The outcome a completion event reports is kept over the one read from an output item.
+  const settle = (call, failed, text, outChars, sure) => {
+    const first = !call.done;
+    if (first || (sure && !call.sure)) { call.failed = failed; call.text = text; call.outChars = outChars; call.sure = sure; }
+    call.done = true;
+    return first;
+  };
+  const command = (id, ts, cmd, o) => {
+    const { call, created } = open(id, ts);
+    call.shell = true;
+    if (call.command === null) call.command = codexCommandString(cmd);
+    const failed = (typeof o.exit_code === 'number' && o.exit_code !== 0) || o.status === 'failed';
+    const out = typeof o.aggregated_output === 'string' ? o.aggregated_output : typeof o.stdout === 'string' ? o.stdout : '';
+    const completed = settle(call, failed, `${typeof o.stderr === 'string' ? o.stderr : ''}\n${out}`, out.length, true);
+    return { call, created, completed };
+  };
+  const mcpCall = (id, ts, inv, kind) => {
+    if (!inv || typeof inv !== 'object' || typeof inv.server !== 'string' || !inv.server) return odd(`${kind}:no-server`);
+    const { call, created } = open(id, ts);
+    call.mcp = { server: inv.server, tool: typeof inv.tool === 'string' ? inv.tool : '' }; // the event names the real server
+    return { call, created, completed: false };
+  };
+  return {
+    calls,
+    unrecognized,
+    /** True while a shell call with this id has no outcome yet: only then is its output item worth parsing. */
+    awaits(id) {
+      const call = byId.get(id);
+      return !!call && call.shell && !call.done;
+    },
+    /** Read one parsed rollout line. Returns `{ call, created, completed }` when it is a tool call record, else null. */
+    read(o) {
+      const p = o && o.payload && typeof o.payload === 'object' ? o.payload : null;
+      if (!p || typeof p.type !== 'string') return null;
+      const ts = timeOf(o.timestamp);
+      if (o.type === 'response_item') {
+        if (p.type.endsWith('_call_output')) {
+          const call = typeof p.call_id === 'string' ? byId.get(p.call_id) : undefined;
+          if (!call || !call.shell) return null; // only a command's outcome is counted
+          const out = codexShellOutput(p.output);
+          return { call, created: false, completed: settle(call, out.failed, out.text, out.text.length, false) };
+        }
+        if (!p.type.endsWith('_call')) return null;
+        const { call, created } = open(p.call_id, ts);
+        const name = p.type === 'local_shell_call' ? 'local_shell' : typeof p.name === 'string' && p.name ? p.name : p.type.slice(0, -5);
+        const ns = typeof p.namespace === 'string' ? p.namespace.replace(/_+$/, '') : '';
+        let mcp = null;
+        if (ns.startsWith('mcp__') && ns.length > 5) mcp = { server: ns.slice(5), tool: name };
+        else if (!ns && name.startsWith('mcp__')) {
+          const end = name.indexOf('__', 5);
+          if (end > 5) mcp = { server: name.slice(5, end), tool: name.slice(end + 2) };
+        }
+        if (call.name === null) call.name = ns && !mcp ? `${ns}.${name}` : name;
+        if (mcp && call.mcp === null) call.mcp = mcp;
+        if (!mcp && !ns && (p.type === 'local_shell_call' || CODEX_SHELL_TOOLS.has(name))) {
+          call.shell = true;
+          if (call.command === null) call.command = codexCallCommand(p);
+        }
+        return { call, created, completed: false };
+      }
+      if (o.type !== 'event_msg') return null;
+      if (p.type === 'item_completed') {
+        const item = p.item && typeof p.item === 'object' ? p.item : null;
+        if (!item || typeof item.type !== 'string') return null;
+        if (item.type === 'CommandExecution') return command(item.id, ts, item.command, item);
+        if (item.type === 'McpToolCall') return mcpCall(item.id, ts, item, 'McpToolCall');
+        return CODEX_ITEM_CALL_LIKE.test(item.type) ? odd(`item:${item.type}`) : null;
+      }
+      if (p.type === 'exec_command_end') return command(p.call_id, ts, p.command, p);
+      if (p.type === 'mcp_tool_call_end') return mcpCall(p.call_id, ts, p.invocation, 'mcp_tool_call_end');
+      return CODEX_EVENT_CALL_LIKE.test(p.type) ? odd(`event:${p.type}`) : null;
+    },
+  };
+}
+
+/**
+ * The name a Codex call is counted under: `mcp__<server>__<tool>` for an MCP call (the way Claude
+ * Code names one, so both agents count under one key shape), else the tool name the rollout
+ * records, else `exec_command` for a command known only from its completion record.
+ */
+export function codexCallName(call) {
+  if (call.mcp) return `mcp__${normalizeMcpName(call.mcp.server)}__${SAFE_NAME.test(call.mcp.tool) ? call.mcp.tool : 'unnamed'}`;
+  return call.name !== null ? call.name : 'exec_command';
+}
+
+/**
+ * Decide from the first bytes of a rollout line whether it can be a tool call record. An output
+ * item is wanted only while a shell call waits for it: the outputs of other tools are large and
+ * say nothing that is counted.
+ */
+export function codexCallLine(head, reader) {
+  if (/"type"\s*:\s*"(?:mcp|exec)_[a-z_]*_end"/.test(head)) return true;
+  if (!head.includes('"response_item"')) return false;
+  const m = /"payload"\s*:\s*\{\s*"type"\s*:\s*"([^"]*)"/.exec(head);
+  if (!m) return true; // the item type is not where it usually is: parse the line to find out
+  if (m[1].endsWith('_call')) return true;
+  if (!m[1].endsWith('_call_output')) return false;
+  const id = /"call_id"\s*:\s*"([^"]*)"/.exec(head);
+  return id ? reader.awaits(id[1]) : true;
+}
+
 // ---------------------------------------------------------------- which project a transcript belongs to
 
 function eqPath(a, b) { return IS_WIN ? a.toLowerCase() === b.toLowerCase() : a === b; }
@@ -187,9 +392,10 @@ function matchesOneCwd(cwd, projectRoot) {
 /**
  * Stream a JSONL file. `want(head)` sees only the first HEAD_BYTES of a line (decoded as latin1) and
  * decides whether the line is worth decoding and parsing, so big irrelevant entries cost a byte
- * scan only. Only wanted lines that fail JSON.parse count as unparsable. Lines are split on raw
- * bytes: readline and full-string scans are several times slower on multi-megabyte lines.
- * Reading stops early when `onObj` returns exactly `false`.
+ * scan only. Only wanted lines that fail JSON.parse count as unparsable; `onUnparsable` gets the
+ * line's text, so a caller can still search what it could not read (it must never print it).
+ * Lines are split on raw bytes: readline and full-string scans are several times slower on
+ * multi-megabyte lines. Reading stops early when `onObj` returns exactly `false`.
  */
 export const HEAD_BYTES = 512;
 export async function eachJsonLine(file, onObj, { want = null, onUnparsable = null } = {}) {
@@ -199,8 +405,9 @@ export async function eachJsonLine(file, onObj, { want = null, onUnparsable = nu
     if (end > start && buf[end - 1] === 13) end--;
     if (end <= start) return;
     if (want && !want(buf.toString('latin1', start, Math.min(end, start + HEAD_BYTES)))) return;
+    const text = buf.toString('utf8', start, end);
     let obj;
-    try { obj = JSON.parse(buf.toString('utf8', start, end)); } catch { if (onUnparsable) onUnparsable(); return; }
+    try { obj = JSON.parse(text); } catch { if (onUnparsable) onUnparsable(text); return; }
     if (obj && typeof obj === 'object' && onObj(obj) === false) stop = true;
   };
   let pieces = [];

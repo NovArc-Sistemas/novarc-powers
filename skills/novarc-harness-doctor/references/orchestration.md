@@ -46,13 +46,25 @@ references/contracts.md ("Findings file", "Item ids").
 Rules: read-only, you change no harness file. Rule-engine output is candidates: open the real
 file and confirm each before it becomes an item. Mask secrets. Every item needs its lesson
 (why, impact, better, principle, tradeoff), exact changes copied from disk with a `why` each,
-and `origin` when the file is not live configuration. Record what is fine as inventory and
-defenses. The same finding in several harnesses is one group. Write user-facing text in
-[language]. When done:
+`origin` when the file is not live configuration, and `saves` with its `metric` when the
+measurement supports a number. Record what is fine as inventory and defenses. The same finding
+in several harnesses is one group. When the brief names an earlier review record for a harness,
+read its items first and follow "Reviewing a harness again" in references/follow-up.md: link
+every finding that was seen before with `previous`, and do not propose again what the user
+declined unless something changed. Write user-facing text in [language]. When done:
   node [<skill>]/scripts/run.mjs complete --run [runId] --unit [unitId] --session [label] --findings [file]
 Report: how many items per harness and severity, what you could not check, and anything the
 other rounds should know.
 ```
+
+### Applying an item about a secret
+
+The board and the findings never hold the secret: `changes[].before` shows the masked form the
+snapshot has (`"GITHUB_TOKEN": "ghp_…40"`). The executor finds the real line by the surrounding
+text, the visible prefix and the length, backs the file up **with the secret masked**, records
+it with `run.mjs record --masked` (undo then leaves that file alone, it never writes a masked
+value over a real one), and tells the user to rotate the credential: removing it from a file
+does not un-leak it.
 
 ### Executor brief
 

@@ -1,16 +1,22 @@
 // `run.mjs init`: turn a selection (accounts from `accounts.mjs list`, projects from
-// `find-projects.mjs`) into a run directory. `list` and `close` live here too: they are the other
-// two commands that are about the run as a whole.
+// `find-projects.mjs`) into a run directory, or start a run over the harnesses of an earlier one
+// (`--follow-up`). `list` lives here too, and the step that marks a run closed.
+//
+// A harness that was reviewed before has a review record (references/follow-up.md). `init` finds
+// it, notes it in run.json, and gives the harness its own measuring window: the days since that
+// review, so that what is measured now is what happened after it.
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeInputPath, isDir } from '../common.mjs';
-import { RunError, UsageError, readJson, writeJsonAtomic, withLock, nowIso } from './store.mjs';
+import { RunError, UsageError, readJson, writeJsonAtomic, nowMs } from './store.mjs';
 import { runPaths, runsDir, latestPath, latestRunId, newRunId, homeBase, RUN_ID_RE } from './paths.mjs';
 import { assignHarnesses } from './ids.mjs';
 import { homeMatchers, scrubString } from './scrub.mjs';
 import { staticUnits, queueSnapshot, unitsView } from './units.mjs';
 import { emptyStatus, appendLog } from './model.mjs';
 import { isDateTime } from './schema.mjs';
+import { hasCredential } from './secrets.mjs';
+import { harnessKeyOf, listRecords, followUpWindow, loadThresholds } from './followup.mjs';
 
 export const PROVIDERS = ['claude-code', 'codex', 'gemini', 'opencode', 'cursor', 'copilot', 'agents', 'other'];
 export const AGENTS = ['claude-code', 'codex', 'opencode', 'cursor', 'gemini', 'other'];
@@ -126,11 +132,24 @@ function parseSelection(sel) {
   return { accounts, projects, primary };
 }
 
-/** `current` score of the same harness in the most recent earlier run, per new harness id. */
+/**
+ * The score each harness ended its last review with, per new harness id: from its review record,
+ * else, for a harness whose reviews predate records, from the state.json of the most recent
+ * earlier run that scored it. `unrecorded` lists those runs: `history --write` gives them a
+ * record, so the next review can compare with them.
+ */
 function previousScores(harnesses) {
-  const out = {};
+  const scores = {};
+  const pending = [];
+  for (const h of harnesses) {
+    const list = listRecords(h.harnessKey);
+    if (!list.length) { pending.push(h); continue; }
+    const last = list[list.length - 1].record;
+    if (typeof last.scores.current === 'number') scores[h.id] = last.scores.current;
+  }
+  const unrecorded = new Set();
   let runs = [];
-  try { runs = fs.readdirSync(runsDir()).filter((n) => RUN_ID_RE.test(n)).sort().reverse().slice(0, 25); } catch { return out; }
+  try { runs = pending.length ? fs.readdirSync(runsDir()).filter((n) => RUN_ID_RE.test(n)).sort().reverse().slice(0, 25) : []; } catch { runs = []; }
   const states = [];
   for (const id of runs) {
     try {
@@ -140,37 +159,103 @@ function previousScores(harnesses) {
     } catch { /* no state yet, or unreadable */ }
   }
   states.sort((a, b) => b.run.startedAt.localeCompare(a.run.startedAt));
-  for (const h of harnesses) {
+  for (const h of pending) {
     for (const s of states) {
       const old = s.harnesses.find((x) => x.kind === h.kind && x.path === h.path && (h.kind !== 'user' || x.account === h.account));
-      if (old && old.scores && typeof old.scores.current === 'number') { out[h.id] = old.scores.current; break; }
+      if (old && old.scores && typeof old.scores.current === 'number') {
+        scores[h.id] = old.scores.current;
+        if (typeof s.run.id === 'string' && RUN_ID_RE.test(s.run.id)) unrecorded.add(s.run.id);
+        break;
+      }
     }
   }
-  return out;
+  return { scores, unrecorded };
+}
+
+/**
+ * `--follow-up <runId|latest>`: the selection of an earlier run, as far as it still exists.
+ * `{ runId, run, selection, dropped }`; `dropped` lists the harnesses whose folder is gone.
+ */
+function followUpBase(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new UsageError('--follow-up takes a run id, or latest');
+  const runId = value.trim() === 'latest' ? latestRunId() : value.trim();
+  if (!runId) throw new RunError('no run found to follow up: start one with `run.mjs init --select <selection.json>`');
+  if (!RUN_ID_RE.test(runId)) throw new UsageError('--follow-up takes a run id such as 20260101-ab12, or latest');
+  let old = null;
+  try { old = readJson(runPaths(runId).run); } catch { old = null; }
+  if (!old || !Array.isArray(old.harnesses)) throw new RunError(`run ${runId} not found`);
+  const dropped = [];
+  const accounts = [];
+  for (const a of Array.isArray(old.accounts) ? old.accounts : []) {
+    if (!a || typeof a !== 'object') continue;
+    if (typeof a.pathAbs === 'string' && isDir(a.pathAbs)) { const { harness: _harness, ...account } = a; accounts.push(account); }
+    else dropped.push({ kind: 'user', name: a.label || a.id, path: a.path, reason: 'folder not found' });
+  }
+  const projects = [];
+  for (const h of old.harnesses) {
+    if (!h || h.kind !== 'project') continue;
+    if (typeof h.pathAbs === 'string' && isDir(h.pathAbs)) {
+      // What the folder is does not change from one run to the next; how active it was does.
+      const project = (h.hints && h.hints.project) || {};
+      projects.push({ name: h.name, path: h.path, pathAbs: h.pathAbs, ...(typeof project.isCode === 'boolean' ? { isCode: project.isCode } : {}), ...(Number.isInteger(project.worktrees) ? { worktrees: project.worktrees } : {}) });
+    } else dropped.push({ kind: 'project', name: h.name, path: h.path, reason: 'folder not found' });
+  }
+  if (!accounts.length && !projects.length) throw new RunError(`none of the harnesses of run ${runId} exists any more`, { dropped });
+  const primary = accounts.some((a) => a.id === old.primary) ? old.primary : null;
+  return { runId, run: old, selection: { accounts, primary, projects }, dropped };
 }
 
 export function init(args) {
-  if (typeof args.select !== 'string') throw new UsageError('init needs --select <selection.json>');
-  const mode = args.mode === undefined ? 'guided' : args.mode;
+  if (args.select !== undefined && args['follow-up'] !== undefined) throw new UsageError('pass --select <selection.json> or --follow-up <runId|latest>, not both');
+  if (args['follow-up'] === undefined && typeof args.select !== 'string') throw new UsageError('init needs --select <selection.json>, or --follow-up <runId|latest>');
+  // The run this one follows up gives the selection, and the mode and language unless a flag says otherwise.
+  const base = args['follow-up'] === undefined ? null : followUpBase(args['follow-up']);
+  const mode = args.mode === undefined ? (base && ['guided', 'doctor'].includes(base.run.mode) ? base.run.mode : 'guided') : args.mode;
   if (!['guided', 'doctor'].includes(mode)) throw new UsageError('--mode must be guided or doctor');
   const days = args.days === undefined ? 30 : Number(args.days);
   if (!Number.isInteger(days) || days < 1 || days > 365) throw new UsageError('--days must be a whole number from 1 to 365');
-  const language = args.lang === undefined ? 'en' : args.lang;
+  const language = args.lang === undefined ? (base && ['pt', 'en'].includes(base.run.language) ? base.run.language : 'en') : args.lang;
   if (!['pt', 'en'].includes(language)) throw new UsageError('--lang must be pt or en');
   let title;
   if (args.title !== undefined) {
     if (typeof args.title !== 'string' || !args.title.trim()) throw new UsageError('--title needs a text');
     title = args.title.trim().slice(0, 80);
     if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(title)) throw new UsageError('--title must not be an e-mail address: use a first name or the project name');
+    if (hasCredential(args.title)) throw new UsageError('--title must not hold a credential: use a first name or the project name');
     title = scrubString(title, homeMatchers());
   }
   const agent = args.agent === undefined ? detectAgent() : args.agent;
   if (!AGENTS.includes(agent)) throw new UsageError(`--agent must be one of ${AGENTS.join(', ')}`);
 
-  const rawSelection = readJson(normalizeInputPath(args.select));
-  if (rawSelection === null) throw new UsageError('selection file not found');
+  let rawSelection = base ? base.selection : null;
+  if (!base) {
+    rawSelection = readJson(normalizeInputPath(args.select));
+    if (rawSelection === null) throw new UsageError('selection file not found');
+  }
   const selection = parseSelection(rawSelection);
   const { accounts, harnesses } = assignHarnesses(selection.accounts, selection.projects);
+
+  // Review records: the stable key of every harness and, for one that was reviewed before, its
+  // last record and its own window (references/follow-up.md, "Window").
+  const now = nowMs();
+  const followed = new Map();
+  let reviewedAt = null;
+  for (const h of harnesses) {
+    h.harnessKey = harnessKeyOf(h);
+    const list = listRecords(h.harnessKey);
+    if (!list.length) continue;
+    const last = list[list.length - 1];
+    const window = followUpWindow(last.record, now, days, loadThresholds());
+    h.lastRecord = { runId: last.record.runId, reviewedAt: last.record.reviewedAt, file: last.file };
+    h.windowDays = window.windowDays;
+    followed.set(h.id, { runId: last.record.runId, reviewedAt: last.record.reviewedAt, days: window.days, windowDays: window.windowDays });
+    const ofBase = base ? list.find((e) => e.record.runId === base.runId) : null;
+    if (ofBase && (reviewedAt === null || ofBase.record.reviewedAt > reviewedAt)) reviewedAt = ofBase.record.reviewedAt;
+  }
+  const previous = previousScores(harnesses);
+  if (base && reviewedAt === null) previous.unrecorded.add(base.runId);
+  const unrecorded = [...previous.unrecorded].sort();
+  const followUpOf = base ? { runId: base.runId, ...(reviewedAt ? { reviewedAt } : {}) } : null;
 
   // Reserve the run directory: an exclusive mkdir, so two inits never share one.
   fs.mkdirSync(runsDir(), { recursive: true });
@@ -184,16 +269,17 @@ export function init(args) {
   const run = {
     version: 1,
     runId: paths.runId,
-    createdAt: nowIso(),
+    createdAt: new Date(now).toISOString(),
     mode,
     language,
     ...(title ? { title } : {}),
     windowDays: days,
+    ...(followUpOf ? { followUpOf } : {}),
     primary: selection.primary,
     environment: { agent, os: detectOs() },
     accounts,
     harnesses,
-    previousScores: previousScores(harnesses),
+    previousScores: previous.scores,
     closed: false,
   };
   for (const d of [paths.claims, paths.probes, paths.findings, paths.backups, paths.drafts]) fs.mkdirSync(d, { recursive: true });
@@ -208,8 +294,14 @@ export function init(args) {
     runId: paths.runId,
     dir: paths.dir,
     mode,
-    harnesses: harnesses.map((h) => ({ id: h.id, key: h.key, kind: h.kind, name: h.name, path: h.path, ...(h.inherits ? { inherits: h.inherits } : {}) })),
+    harnesses: harnesses.map((h) => ({
+      id: h.id, key: h.key, kind: h.kind, name: h.name, path: h.path, ...(h.inherits ? { inherits: h.inherits } : {}),
+      harnessKey: h.harnessKey, ...(followed.has(h.id) ? { followUp: followed.get(h.id) } : {}),
+    })),
     units: staticUnits(run).map((u) => u.id),
+    ...(followUpOf ? { followUpOf } : {}),
+    ...(base && base.dropped.length ? { dropped: base.dropped } : {}),
+    ...(unrecorded.length ? { unrecordedRuns: unrecorded, hint: 'these earlier runs left no review record: `run.mjs history --write --run <id>` writes it, and a run started after that is compared with it' } : {}),
   };
 }
 
@@ -232,15 +324,16 @@ export function listRuns() {
   return { runs };
 }
 
-/** `run.mjs close`: mark the run closed. `serve-board.mjs` exits when it sees it. */
-export function close(ctx) {
-  return withLock(ctx.paths.mutex, () => {
-    const run = readJson(ctx.paths.run);
-    if (run.closed === true) return { runId: ctx.paths.runId, closed: true, closedAt: run.closedAt || null, already: true };
-    run.closed = true;
-    run.closedAt = nowIso();
-    writeJsonAtomic(ctx.paths.run, run);
-    appendLog(ctx.paths, { event: 'run-closed' });
-    return { runId: ctx.paths.runId, closed: true, closedAt: run.closedAt };
-  });
+/**
+ * Mark the run closed at `at` (the last step of `run.mjs close`, history.mjs). Must run under the
+ * run mutex. `serve-board.mjs` exits when it sees it.
+ */
+export function markClosed(ctx, at) {
+  const run = readJson(ctx.paths.run);
+  run.closed = true;
+  run.closedAt = at;
+  writeJsonAtomic(ctx.paths.run, run);
+  ctx.run = run;
+  appendLog(ctx.paths, { at, event: 'run-closed' });
+  return { runId: ctx.paths.runId, closed: true, closedAt: at };
 }

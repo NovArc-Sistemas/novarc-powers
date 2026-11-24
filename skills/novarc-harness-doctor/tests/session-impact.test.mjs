@@ -281,6 +281,20 @@ test('unused skills and MCP servers', () => {
   assert.deepEqual(out.unusedContext.mcpServersNeverCalled, ['idle-srv']);
 });
 
+test('coverage: what was read of each source, and nothing left unknown', () => {
+  // Claude: A, its subagent, B and C (D is older than the window and is never opened). C holds the
+  // one line that cannot be parsed; it names no configured skill or server, so every 0 stays a 0.
+  assert.deepEqual(out.coverage.claude, { read: true, files: 4, filesFailed: 0, unparsableLines: 1, toolCalls: 'partial' });
+  assert.deepEqual(out.coverage.codex, {
+    read: true, files: 1, filesFailed: 0, unparsableLines: 0, unrecognizedCallRecords: 0, rolloutsWithoutProject: 0, toolCalls: 'complete', unrecognizedKinds: [],
+  });
+  assert.ok(out.coverage.method.length > 40);
+  assert.deepEqual([out.unusedContext.skillsUnknown, out.unusedContext.mcpServersUnknown], [[], []]);
+  // The lists and the count maps say the same thing: never used is a count of 0, and only that.
+  assert.deepEqual(out.unusedContext.skillsNeverInvoked, Object.keys(out.skillInvocations).filter((n) => out.skillInvocations[n] === 0));
+  assert.deepEqual(out.unusedContext.mcpServersNeverCalled, Object.keys(out.mcpCalls).filter((n) => out.mcpCalls[n] === 0));
+});
+
 test('usage counts of the main fixture', () => {
   // Bash: A's T3..T7 (5) and T9..T14 (6). Read: A's T0 and the subagent's 5. Edit: A's T2 and the
   // subagent's. Grep T1; Skill and the MCP tool at T8; the Codex command counts as exec_command.
@@ -298,6 +312,8 @@ test('every block that explains a number carries a method string', () => {
   assert.equal(typeof out.contextAtStart.method, 'string');
   assert.equal(typeof out.contextPeak.method, 'string');
   assert.equal(typeof out.unusedContext.method, 'string');
+  assert.ok(out.toolOutput.method.length > 40);
+  assert.ok(out.usageMethod.includes('once per call id'));
   for (const x of out.waste) assert.ok(x.method.length > 20, x.kind);
 });
 

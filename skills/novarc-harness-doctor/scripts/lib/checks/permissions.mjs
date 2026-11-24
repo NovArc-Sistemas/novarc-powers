@@ -1,4 +1,5 @@
 // Round 1 checks on settings: environment overrides, MCP auto-approval and permission rules.
+import { hookSource } from '../snapshot/hookcode.mjs';
 import { finding, lineOfJsonKey, lineOfJsonString, parseRule, normalizeSpec, ruleCovers, safeSnippet } from './util.mjs';
 
 const ENV_OVERRIDE_RE = /^(ANTHROPIC|OPENAI|CLAUDE|CODEX|AZURE_OPENAI|GEMINI|GOOGLE_GEMINI|GOOGLE_VERTEX|VERTEX|BEDROCK|MISTRAL|GROQ|OPENROUTER|DEEPSEEK|XAI)_[A-Z0-9_]*(BASE_URL|API_BASE|API_URL|ENDPOINT|BASE)$/i;
@@ -207,7 +208,7 @@ export const denyBaselineMissing = {
       const own = model.settings.filter((s) => !s.pseudo && s.scope === 'user' && (s.configKeys || [s.configKey]).includes(cd.configKey));
       const rules = [...own, ...projectSettings].flatMap((s) => listOf(s, 'deny'));
       const hookText = [...model.hooks.filter((h) => h.scope === 'user' && (h.configKeys || [h.configKey]).includes(cd.configKey)), ...projectHooks]
-        .filter((h) => h.event === 'PreToolUse').map((h) => `${h.command}\n${h.scriptText || ''}`).join('\n');
+        .filter((h) => h.event === 'PreToolUse').map((h) => hookSource(h).text).join('\n'); // comments are no protection
       const missing = BASELINE.filter((b) => {
         if (rules.some((r) => b.rule.test(r))) return false;
         if (b.hook && b.hook.test(hookText)) return false;

@@ -1,0 +1,9 @@
+{
+  "description": "Thresholds for comparing a harness with its last review record. See references/follow-up.md.",
+  "followUpAfterDays": 30,
+  "minDays": 7,
+  "minSessions": 10,
+  "confirmedShare": 0.7,
+  "partialShare": 0.2,
+  "noisePct": 10
+}

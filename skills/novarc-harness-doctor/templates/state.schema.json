@@ -20,7 +20,17 @@
         "title": { "type": "string", "description": "Short name shown as the board title, e.g. the user's first name or the project name. Never an e-mail." },
         "startedAt": { "type": "string", "format": "date-time" },
         "lastRun": { "type": "string", "format": "date-time" },
-        "windowDays": { "type": "integer", "minimum": 1, "maximum": 365 }
+        "windowDays": { "type": "integer", "minimum": 1, "maximum": 365 },
+        "followUpOf": {
+          "type": "object",
+          "description": "Set when this run was started as the follow-up of an earlier one (run.mjs init --follow-up). The per-harness comparison is in harnesses[].followUp.",
+          "required": ["runId"],
+          "additionalProperties": false,
+          "properties": {
+            "runId": { "type": "string" },
+            "reviewedAt": { "type": "string", "format": "date-time" }
+          }
+        }
       }
     },
     "environment": {
@@ -97,6 +107,7 @@
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "key": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Stable key of this harness across runs: the name of its folder under history/. See references/follow-up.md." },
           "kind": { "enum": ["user", "project"] },
           "name": { "type": "string", "description": "Tab label: project folder name, or the account label for a user harness." },
           "path": { "type": "string", "description": "Display path: home as ~. Never an absolute personal path." },
@@ -133,6 +144,24 @@
               "with": { "type": "string" }
             }
           },
+          "history": {
+            "type": "array",
+            "description": "Earlier reviews of this harness, oldest first, from its review records. Written by run.mjs build.",
+            "items": {
+              "type": "object",
+              "required": ["runId", "reviewedAt"],
+              "additionalProperties": false,
+              "properties": {
+                "runId": { "type": "string" },
+                "reviewedAt": { "type": "string", "format": "date-time" },
+                "score": { "type": ["number", "null"], "description": "The score that review ended with." },
+                "grade": { "type": ["string", "null"] },
+                "fixed": { "type": "integer", "minimum": 0, "description": "Items fixed in that review." },
+                "tokensPerSession": { "type": ["integer", "null"], "description": "Measured in that review's window." }
+              }
+            }
+          },
+          "followUp": { "$ref": "#/$defs/followUp" },
           "scores": { "$ref": "#/$defs/score" }
         }
       }
@@ -233,6 +262,7 @@
           "file": { "type": "string", "description": "Display path of the file the finding is about, when it has no `changes`." },
           "check": { "type": "string", "description": "Id of the harness-checks.mjs check this item was confirmed from, if any." },
           "group": { "type": "string", "description": "Id in `groups`, when the same decision covers several harnesses." },
+          "rev": { "type": "string", "pattern": "^[0-9a-f]{12}$", "description": "Revision of what this item proposes: a hash of its harness, class, proposal and changes, written by run.mjs build. A decision applies only to the revision it was made on." },
           "title": { "type": "string" },
           "finding": { "type": "string" },
           "evidence": { "type": "string", "description": "Counts, file:line, commit ids. Never secret values or transcript text." },
@@ -253,7 +283,30 @@
             "properties": {
               "tokens": { "type": "integer", "minimum": 0 },
               "basis": { "enum": ["measured", "estimated"] },
+              "metric": { "$ref": "#/$defs/metric", "description": "The measurement this saving should show up in, so a later run can check it. Omit only when none fits: the saving then counts toward tokens-per-session." },
               "how": { "type": "string", "description": "One line on where the number comes from." }
+            }
+          },
+          "previous": {
+            "type": "object",
+            "description": "Set by the reviewer when this is the same finding as an item of an earlier review of this harness.",
+            "required": ["run", "item"],
+            "additionalProperties": false,
+            "properties": {
+              "run": { "type": "string" },
+              "item": { "type": "string" }
+            }
+          },
+          "history": {
+            "type": "object",
+            "description": "What happened to this finding before, from the review records. Written by run.mjs build from `previous`.",
+            "additionalProperties": false,
+            "properties": {
+              "firstSeenAt": { "type": "string", "format": "date-time" },
+              "times": { "type": "integer", "minimum": 1, "description": "Reviews in which this finding appeared before this one." },
+              "lastStatus": { "enum": ["open", "approved", "in-progress", "fixed", "failed", "declined", "deferred", "ok", "not-applicable"] },
+              "lastDecisionAt": { "type": "string", "format": "date-time" },
+              "lastNote": { "type": "string", "description": "The note the user left with that decision." }
             }
           },
           "lesson": {
@@ -304,6 +357,7 @@
           "title": { "type": "string" },
           "round": { "$ref": "#/$defs/round" },
           "summary": { "type": "string" },
+          "rev": { "type": "string", "pattern": "^[0-9a-f]{12}$", "description": "Hash of the member items and their revisions, written by run.mjs build." },
           "items": { "type": "array", "minItems": 2, "items": { "type": "string" } }
         }
       }
@@ -376,6 +430,7 @@
         "action": { "enum": ["approve", "decline", "defer", "ask"] },
         "note": { "type": "string" },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Item ids left out of a group approval." },
+        "rev": { "type": "string", "pattern": "^[0-9a-f]{12}$", "description": "The `rev` of the item or group as the user saw it. A decision whose rev no longer matches is not applied." },
         "via": { "enum": ["board", "chat"] }
       }
     },
@@ -394,6 +449,96 @@
         "roundsCounted": { "type": "integer" },
         "roundsTotal": { "type": "integer" },
         "computedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "metric": {
+      "description": "A measurement that can be compared between two reviews. Per-session values, so two windows with different activity compare.",
+      "enum": ["tokens-per-session", "weighted-per-session", "context-at-start", "context-peak", "waste-share", "waste:retry", "waste:loop", "waste:notfound", "waste:correction", "waste:hook-block", "waste:error-end", "waste:exploration", "tool-output"]
+    },
+    "followUp": {
+      "type": "object",
+      "description": "This harness now, against its last review record: did the expected effect happen, and is what was applied still there. Written by run.mjs build. See references/follow-up.md.",
+      "required": ["of", "days", "sample", "metrics", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "of": {
+          "type": "object",
+          "required": ["runId", "reviewedAt"],
+          "additionalProperties": false,
+          "properties": {
+            "runId": { "type": "string" },
+            "reviewedAt": { "type": "string", "format": "date-time" }
+          }
+        },
+        "days": { "type": "integer", "minimum": 0, "description": "Days between that review and this measurement." },
+        "sample": {
+          "type": "object",
+          "required": ["enough"],
+          "additionalProperties": false,
+          "properties": {
+            "sessions": { "type": ["integer", "null"], "description": "Sessions since that review." },
+            "enough": { "type": "boolean", "description": "false while too few days or sessions have passed to compare." },
+            "reason": { "enum": ["too-few-days", "too-few-sessions", "not-measured"] },
+            "readyAt": { "type": "string", "format": "date-time", "description": "When enough days will have passed." }
+          }
+        },
+        "score": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "then": { "type": ["number", "null"], "description": "The score that review ended with." },
+            "expected": { "type": ["number", "null"], "description": "Its projected score: where it said the harness would land." },
+            "now": { "type": ["number", "null"], "description": "The baseline of this run: the harness as found today." }
+          }
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["metric", "before", "after", "verdict"],
+            "additionalProperties": false,
+            "properties": {
+              "metric": { "$ref": "#/$defs/metric" },
+              "unit": { "enum": ["tokens/session", "chars/session", "percent"] },
+              "before": { "type": ["number", "null"], "description": "Measured in that review." },
+              "expected": { "type": ["number", "null"], "description": "Where the fixed items said it would land; null when no fixed item named this metric." },
+              "after": { "type": ["number", "null"], "description": "Measured now, since that review." },
+              "changePct": { "type": ["number", "null"] },
+              "verdict": { "enum": ["confirmed", "partial", "improved", "no-change", "worse", "not-enough-data", "not-measured"], "description": "confirmed and partial are read against an expectation; improved, no-change and worse are the plain change." },
+              "items": { "type": "array", "items": { "type": "string" }, "description": "Ids, in that review, of the fixed items that named this metric." }
+            }
+          }
+        },
+        "items": {
+          "type": "array",
+          "description": "What that review left: each fixed item checked on disk, each declined or deferred item carried.",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "description": "Item id in that review." },
+              "title": { "type": "string" },
+              "round": { "$ref": "#/$defs/round" },
+              "status": { "enum": ["fixed", "failed", "declined", "deferred", "open", "approved", "in-progress"], "description": "How that review left it." },
+              "check": { "enum": ["in-place", "reverted", "changed", "missing", "not-checked"], "description": "For a fixed item: is its change still on disk. changed: the file holds neither the text before nor the text after the change." },
+              "paths": { "type": "array", "items": { "type": "string" }, "description": "Display paths the item changed." },
+              "saves": { "type": ["integer", "null"], "description": "Tokens it expected to save over that review's window." },
+              "now": { "type": "string", "description": "Id of the item in this run that is the same finding, when it came back." }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "expectedTokensPerSession": { "type": ["integer", "null"], "description": "Tokens per session the fixed items expected to save." },
+            "observedTokensPerSession": { "type": ["integer", "null"], "description": "Change in tokens per session actually measured (negative is a saving)." },
+            "inPlace": { "type": "integer" },
+            "reverted": { "type": "integer" },
+            "cameBack": { "type": "integer", "description": "Fixed items found again as findings in this run." }
+          }
+        }
       }
     },
     "impact": {
@@ -484,8 +629,10 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "skillsNeverInvoked": { "type": "array", "items": { "type": "string" } },
-            "mcpServersNeverCalled": { "type": "array", "items": { "type": "string" } }
+            "skillsNeverInvoked": { "type": "array", "items": { "type": "string" }, "description": "Configured skills measured as never invoked in the window." },
+            "mcpServersNeverCalled": { "type": "array", "items": { "type": "string" }, "description": "Configured MCP servers measured as never called in the window." },
+            "skillsUnknown": { "type": "array", "items": { "type": "string" }, "description": "Configured skills whose use could not be measured. Never treat as unused." },
+            "mcpServersUnknown": { "type": "array", "items": { "type": "string" }, "description": "Configured MCP servers whose use could not be measured. Never treat as unused." }
           }
         },
         "example": { "type": "boolean", "description": "true only in the template example: numbers are illustrative." }

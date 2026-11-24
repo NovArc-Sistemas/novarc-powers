@@ -12,8 +12,9 @@
 //
 // Contract when it runs from a session-start hook: print nothing when everything is fine, one
 // short line when something was repaired or has drifted, and ALWAYS exit 0. It never reads
-// credentials, sessions or history, never prints file contents or absolute home paths, and never
-// overwrites a file somebody edited by hand.
+// credentials, sessions or history, never prints file contents or absolute home paths, never
+// overwrites a file somebody edited by hand, never writes through a link or into a file that
+// gained another name, and never leaves a file truncated: a failed write changes nothing.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -155,23 +156,185 @@ export function sameFile(a, b) {
 
 export function mkdirp(dir) { fs.mkdirSync(dir, { recursive: true }); }
 
+/** Where the intact copy of a file sits while that file is being written in place. */
+export function recoveryDir(home = homeDir()) {
+  return path.join(syncDir(home), 'recovery');
+}
+
 /**
- * Write a file IN PLACE: open, truncate, write. Never temp-file-plus-rename, so a symlink or a
- * hardlink on the file survives the write. Creates the file (and its folder) when missing.
+ * Write the whole buffer at the start of an open file. TESTS ONLY: when the environment variable
+ * NOVARC_POWERS_TEST_FAULT lists `stage`, half of the bytes are written and the call then fails
+ * as a full disk would, so a failure in the middle of a write can be tested without one.
  */
-export function writeInPlace(p, data) {
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-  let fd;
-  try { fd = fs.openSync(p, 'r+'); } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-    mkdirp(path.dirname(p));
-    fd = fs.openSync(p, 'wx');
+function writeAll(fd, buf, stage) {
+  const faults = process.env.NOVARC_POWERS_TEST_FAULT;
+  if (faults && faults.split(',').includes(stage)) {
+    if (buf.length > 1) fs.writeSync(fd, buf, 0, buf.length >> 1, 0);
+    throw Object.assign(new Error('no space left on device (simulated)'), { code: 'ENOSPC' });
   }
+  let off = 0;
+  while (off < buf.length) {
+    const n = fs.writeSync(fd, buf, off, buf.length - off, off);
+    if (n <= 0) throw Object.assign(new Error('the write made no progress'), { code: 'EIO' });
+    off += n;
+  }
+}
+
+/**
+ * Put `buf` at `file` through a temp file in the same folder: written, synced, read back, then
+ * renamed over the destination. Until the rename the destination holds its old bytes; after it,
+ * the new ones. A rename replaces the name itself: it never writes into another file that the
+ * old name was linked to. `mode` carries the permission bits of the file being replaced.
+ */
+function replaceFile(file, buf, mode, stage = 'temp') {
+  const dir = path.dirname(file);
+  mkdirp(dir);
+  const tmp = `${file}.nhd-${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`;
+  let fd;
   try {
-    fs.ftruncateSync(fd, 0);
-    let off = 0;
-    while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off, off);
+    fd = fs.openSync(tmp, 'wx', mode === undefined ? 0o666 : mode);
+    writeAll(fd, buf, stage);
+    if (mode !== undefined && !IS_WIN) fs.fchmodSync(fd, mode); // the mode given to open is cut by the umask
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    if (!fs.readFileSync(tmp).equals(buf)) throw new Error('verification failed: the temp file does not hold what was written');
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already closed */ }
+    try { fs.unlinkSync(tmp); } catch { /* never created */ }
+    throw e;
+  }
+  if (!IS_WIN) {
+    // Make the rename itself durable. Best effort: not every filesystem lets a folder be synced.
+    try { const d = fs.openSync(dir, 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Write INTO a file that has other names (hardlinks): the bytes must land in that very file, or
+ * the other names would stop following it. An intact copy is put under the sync state folder
+ * first. The new bytes are then written over the old ones and the file is cut to length only
+ * afterwards, so it is never empty and a restore never needs more room than the file already
+ * has; it is synced and read back. On any failure the copy is written back the same way and the
+ * error says so. The copy is removed once the file is known to be whole; when even the restore
+ * fails it stays, and the error says where it is.
+ */
+function writeShared(file, buf, home) {
+  // Opened once, for the write and for a restore: a file that cannot be written fails here,
+  // before anything changed, and a restore never depends on opening it again.
+  const fd = fs.openSync(file, 'r+');
+  try {
+    const before = fs.readFileSync(fd);
+    const keep = path.join(recoveryDir(home), `${Date.now().toString(36)}-${process.pid}-${crypto.randomBytes(3).toString('hex')}-${path.basename(file)}`);
+    replaceFile(keep, before, 0o600, 'copy');
+    const put = (data, stage) => {
+      writeAll(fd, data, stage);
+      fs.ftruncateSync(fd, data.length);
+      fs.fsyncSync(fd);
+      if (!fs.readFileSync(file).equals(data)) throw new Error('verification failed: the file does not hold what was written');
+    };
+    try { put(buf, 'shared'); } catch (e) {
+      const why = e && (e.code || e.message);
+      try { put(before, 'restore'); } catch {
+        throw Object.assign(new Error(`the write failed (${why}) and the file could not be restored: an intact copy of what it held is at ${displayPath(keep, home)}`), { code: e && e.code, recovery: keep });
+      }
+      try { fs.unlinkSync(keep); } catch { /* best effort */ }
+      throw Object.assign(new Error(`the write failed (${why}); the file was restored to what it held`), { code: e && e.code, restored: true });
+    }
+    try { fs.unlinkSync(keep); } catch { /* best effort */ }
   } finally { fs.closeSync(fd); }
+}
+
+/**
+ * Write a file without ever leaving it truncated or half written, and without breaking a link
+ * on it. What sits at the path decides how:
+ *   nothing, or a file with one name     temp file in the same folder, sync, atomic rename
+ *   a symbolic link                      the link stays; the file it resolves to is written by
+ *                                        these same rules
+ *   a file with other names (hardlinks)  written in place, guarded by an intact copy (see
+ *                                        writeShared): a rename would cut it off from them
+ * Returns how it was written: 'created', 'replaced' or 'in-place'. On any failure it throws with
+ * the destination holding what it held before.
+ */
+export function writeKeepingLinks(p, data, { home = homeDir() } = {}) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  const l = lstatSafe(p);
+  if (!l) { replaceFile(p, buf); return 'created'; }
+  const real = l.isSymbolicLink() ? realpathSafe(p) : p;
+  if (!real) throw new Error('the path is a link to something that does not exist; nothing was written');
+  const st = fs.statSync(real);
+  if (!st.isFile()) throw new Error('the path is not a file; nothing was written');
+  if (st.nlink > 1) { writeShared(real, buf, home); return 'in-place'; }
+  // A rename needs no right on the file it replaces: one the user made read-only is left alone.
+  fs.accessSync(real, fs.constants.W_OK);
+  replaceFile(real, buf, st.mode & 0o7777);
+  return 'replaced';
+}
+
+/** The real path of the folder a file sits in, or would be created in when folders are missing. */
+function realParent(p) {
+  const rest = [];
+  for (let d = path.dirname(path.resolve(String(p))); ; d = path.dirname(d)) {
+    const r = realpathSafe(d);
+    if (r) return path.join(r, ...rest);
+    if (path.dirname(d) === d) return null;
+    rest.unshift(path.basename(d));
+  }
+}
+
+/**
+ * What a write to `p` would land on: the kind of thing at the path (`none` when nothing is
+ * there), the real path of the file and of its folder, how many names the file has, and the
+ * volume and file ids where the filesystem reports them. The ids are read as bigints and kept as
+ * strings, because a Windows file id does not fit a double. `ids: false` leaves them out, for a
+ * file its own app replaces at every save.
+ */
+export function destIdentity(p, { ids = true } = {}) {
+  const parent = realParent(p);
+  let l;
+  try { l = fs.lstatSync(p, { bigint: true }); } catch { return { type: 'none', parent }; }
+  const type = l.isSymbolicLink() ? 'symlink' : l.isFile() ? 'file' : l.isDirectory() ? 'dir' : 'other';
+  const out = { type, parent, real: realpathSafe(p) };
+  let st = l;
+  if (type === 'symlink') { try { st = fs.statSync(p, { bigint: true }); } catch { st = null; } }
+  if (st) {
+    out.nlink = Number(st.nlink);
+    if (ids && st.ino !== 0n) { out.dev = String(st.dev); out.ino = String(st.ino); }
+  }
+  return out;
+}
+
+/**
+ * Why an UNATTENDED write to `p` must not happen, as a short sentence, or null when it may.
+ * The check writes only to a plain file that has no other name (or re-creates a missing one),
+ * in the folder recorded for it, inside the account folder. So it refuses when the path became
+ * a link, gained a hardlink, or when a folder above it now leads somewhere else: the write would
+ * land on a destination nobody approved. `rec` is the identity recorded when the file was
+ * generated. A manifest written before identities were recorded has none: the path is then
+ * accepted only when nothing from the account folder down is a link.
+ *
+ * A changed file id alone is NOT a reason to refuse. Every editor or app that saves a file
+ * replaces it, and because the check writes through a rename it cannot reach into another file:
+ * a plain, single-name file in the recorded folder is safe to replace whichever inode it has.
+ */
+export function destinationProblem(rec, p, accountDir) {
+  const cur = destIdentity(p);
+  const accountReal = realpathSafe(accountDir);
+  if (!accountReal || !cur.parent) return 'its folder cannot be resolved';
+  if (cur.type === 'symlink') return rec && rec.type === 'symlink' ? 'it is a link, which only a plan and apply write through' : 'it became a link to another place';
+  if (cur.type !== 'file' && cur.type !== 'none') return 'it is not a file any more';
+  if (cur.type === 'file' && cur.nlink > 1) return 'it now shares its content with another file (a hardlink)';
+  let expected = rec && rec.parent ? rec.parent : null;
+  if (!expected) {
+    const l = lstatSafe(accountDir);
+    if (!l || l.isSymbolicLink() || !isInside(p, accountDir)) return 'its place was never recorded and cannot be confirmed (plan and apply again)';
+    expected = path.join(accountReal, path.relative(path.resolve(accountDir), path.dirname(path.resolve(String(p)))));
+  }
+  if (pathKey(cur.parent) !== pathKey(expected) || !isInside(cur.parent, accountReal)) {
+    return isInside(cur.parent, accountReal) ? 'its folder now leads somewhere else' : 'its folder now leads outside the account folder';
+  }
+  return null;
 }
 
 /** Write through a temp file and rename: for files this tool owns (manifest, journals). */
@@ -265,7 +428,7 @@ export function linkOrCopy(targetPath, linkPath, isDirectory) {
 export function linkRecord(name, kind, linkPath, targetPath, isDirectory) {
   if (isDirectory) return { name, kind, path: linkPath, target: targetPath, dir: true };
   const hash = hashFile(targetPath);
-  if (kind === 'copy') return { name, kind: 'generated', path: linkPath, target: targetPath, generator: { type: 'copy' }, sourceHash: hash, contentHash: hash };
+  if (kind === 'copy') return { name, kind: 'generated', path: linkPath, target: targetPath, generator: { type: 'copy' }, sourceHash: hash, contentHash: hash, identity: destIdentity(linkPath) };
   return { name, kind, path: linkPath, target: targetPath, contentHash: hash };
 }
 
@@ -1083,25 +1246,38 @@ function regenerate(el, home) {
   return r ? Buffer.from(r.text, 'utf8') : null;
 }
 
-function checkGenerated(el, repair, home) {
+function checkGenerated(el, repair, home, acct) {
   const want = regenerate(el, home);
   if (want === null) return { state: 'broken', note: 'its source is missing in the primary', gone: lstatSafe(el.path) ? 'copy' : 'both' };
   const wantHash = sha256(want);
-  const here = lstatSafe(el.path) ? hashFile(el.path) : null;
+  const there = !!lstatSafe(el.path);
+  const here = there ? hashFile(el.path) : null;
   if (here === wantHash) {
-    if (repair && el.contentHash !== wantHash) { el.contentHash = wantHash; el.sourceHash = wantHash; return { state: 'ok', touched: true }; }
+    if (repair && el.contentHash !== wantHash) { el.contentHash = wantHash; el.sourceHash = wantHash; }
+    // A manifest from before destinations were recorded: this one is adopted only while it is
+    // provably the generated file (a plain single-name file, a link-free path, the generated bytes).
+    if (repair && !el.identity && !destinationProblem(null, el.path, acct.pathAbs)) el.identity = destIdentity(el.path);
     return { state: 'ok' };
   }
   if (here !== null && here !== el.contentHash) return { state: 'drift', note: 'edited by hand; not overwritten', both: true };
-  const note = here === null ? 'the generated file was gone' : 'the primary changed';
-  if (!repair) return { state: here === null ? 'broken' : 'drift', note };
-  writeInPlace(el.path, want);
+  const state = here === null ? 'broken' : 'drift';
+  const note = there ? 'the primary changed' : 'the generated file was gone';
+  // Is the destination still the one that was generated? Asked before anything is written, and
+  // without --repair too, so the report never promises a repair that would be refused.
+  const problem = destinationProblem(el.identity, el.path, acct.pathAbs);
+  if (problem) return { state, note: `${problem}; not rewritten`, both: true };
+  if (there && here === null) return { state, note: 'it cannot be read; not rewritten' };
+  if (!repair) return { state, note };
+  try { writeKeepingLinks(el.path, want, { home }); } catch (e) {
+    return { state, note: `${note}; could not be rewritten (${scrub(String(e && (e.code || e.message)), home)}), so it is as it was` };
+  }
   el.contentHash = wantHash;
   el.sourceHash = wantHash;
-  return { state: here === null ? 'broken' : 'drift', note, repaired: true };
+  el.identity = destIdentity(el.path);
+  return { state, note, repaired: true };
 }
 
-function checkServers(acct, results, repair) {
+function checkServers(acct, results, repair, home) {
   const m = acct.mcp;
   if (!m) return false;
   const els = acct.elements.filter((e) => e.kind === 'managed-block');
@@ -1118,9 +1294,16 @@ function checkServers(acct, results, repair) {
   const items = reconcileServers({ source: src.servers, target: tgt.servers, sourceFormat: m.sourceFormat, targetFormat: m.format, managed, exceptions: acct.exceptions });
   // The state file of a running app is never written by an unattended check: what is behind
   // there is reported as `manual` (plan and apply with the app closed).
+  // The same holds for a config file that became a link, gained a hardlink or sits behind a
+  // redirected folder: unattended, only a plain single-name file at its recorded place is written.
   const writable = m.format === 'codex-toml';
-  const canWrite = repair && writable;
-  const behind = (name, note) => report(name, { state: 'drift', note, ...(writable ? {} : { manual: true }) });
+  let problem;
+  const blocked = () => { if (problem === undefined) problem = writable ? destinationProblem(m.identity, m.path, acct.pathAbs) : null; return problem; };
+  const canWrite = () => repair && writable && !blocked();
+  const behind = (name, note) => {
+    const why = writable ? blocked() : null;
+    report(name, { state: 'drift', note: why ? `${note}; the account file is not written here: ${why}` : note, ...(writable && !why ? {} : { manual: true }) });
+  };
   const write = [];
   const remove = [];
   const pending = [];
@@ -1133,17 +1316,22 @@ function checkServers(acct, results, repair) {
       if (it.exact) write.push({ name: it.name, def: it.want });
     } else if (it.status === 'missing' || it.status === 'stale') {
       const note = it.status === 'stale' ? 'the primary changed' : mine ? 'the definition was gone' : 'new in the primary';
-      if (canWrite) { write.push({ name: it.name, def: it.want }); pending.push({ name: it.name, note }); } else behind(it.name, note);
+      if (canWrite()) { write.push({ name: it.name, def: it.want }); pending.push({ name: it.name, note }); } else behind(it.name, note);
     } else if (it.status === 'gone') {
       const note = it.note || 'no longer in the primary';
-      if (it.absent) { if (repair) drop(it.name); } else if (canWrite) { remove.push(it.name); pending.push({ name: it.name, note, removed: true }); } else behind(it.name, note);
+      if (it.absent) { if (repair) drop(it.name); } else if (canWrite()) { remove.push(it.name); pending.push({ name: it.name, note, removed: true }); } else behind(it.name, note);
     } else if (it.status === 'edited' || it.status === 'gone-edited') report(it.name, { state: 'drift', note: 'edited by hand; not overwritten', both: true });
     else if (it.status === 'blocked' && mine) report(it.name, { state: 'drift', note: it.note });
   }
-  if (!pending.length) return dirty;
+  if (!pending.length) {
+    // A manifest from before destinations were recorded: adopt this one while it is provably safe.
+    if (repair && writable && els.length && !m.identity && tgt.exists && !blocked()) { m.identity = destIdentity(m.path, { ids: false }); dirty = true; }
+    return dirty;
+  }
   try {
     const next = rewriteCodexServers(tgt.text, { remove, write });
-    writeInPlace(m.path, next);
+    writeKeepingLinks(m.path, next, { home });
+    m.identity = destIdentity(m.path, { ids: false });
     const after = scanCodexServers(next).servers;
     for (const p of pending) {
       drop(p.name);
@@ -1152,7 +1340,8 @@ function checkServers(acct, results, repair) {
     }
     return true;
   } catch (e) {
-    for (const p of pending) report(p.name, { state: 'drift', note: `could not be repaired (${scrub(String(e && e.message))})` });
+    // A failed write changes nothing: the account file holds what it held.
+    for (const p of pending) report(p.name, { state: 'drift', note: `could not be repaired (${scrub(String(e && e.message), home)})` });
     return dirty;
   }
 }
@@ -1239,9 +1428,10 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
         dirty = true;
       }
       let r;
-      const before = `${el.kind}|${el.contentHash || ''}`;
+      const mark = () => `${el.kind}|${el.contentHash || ''}|${el.identity ? JSON.stringify(el.identity) : ''}`;
+      const before = mark();
       try {
-        r = el.kind === 'generated' ? checkGenerated(el, repair, home) : checkLink(el, repair);
+        r = el.kind === 'generated' ? checkGenerated(el, repair, home, acct) : checkLink(el, repair);
         if (repair && el.kind !== 'generated' && !el.dir && (r.state === 'ok' || r.repaired)) {
           const h = hashFile(el.target); // the content last seen through the link
           if (h) el.contentHash = h;
@@ -1256,11 +1446,11 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
       } catch (e) {
         r = { state: 'broken', note: `could not be checked (${scrub(String(e && (e.code || e.message)))})` };
       }
-      if (before !== `${el.kind}|${el.contentHash || ''}`) dirty = true;
+      if (before !== mark()) dirty = true;
       results.push({ account: acct.id, name: el.name, path: el.path, target: el.target, ...r });
     }
     if (dropped.size) acct.elements = acct.elements.filter((e) => !dropped.has(e));
-    try { if (checkServers(acct, results, repair)) dirty = true; } catch (e) {
+    try { if (checkServers(acct, results, repair, home)) dirty = true; } catch (e) {
       results.push({ account: acct.id, name: 'mcp servers', state: 'broken', note: `could not be checked (${scrub(String(e && (e.code || e.message)))})` });
     }
     try { if (checkAdditions(acct, results, repair, home)) dirty = true; } catch { /* additions are best effort */ }

@@ -3,9 +3,14 @@
 // What a hook's output and exit status do comes from the Claude Code hooks reference
 // (https://code.claude.com/docs/en/hooks, read on 2026-11-23). The sentence each rule relies on is
 // quoted next to it; re-read the page before changing one. Whether a hook can block is never
-// decided here: hookBlocking in snapshot/elements.mjs is the one implementation of that.
+// decided here: hookBlocking in snapshot/elements.mjs is the one implementation of that, and its
+// answer has three values. A check may say "this hook does not block" only on `false` and "this
+// hook blocks" only on `true`; `null` is "could not tell" and supports neither.
+// What a hook says is read from its source without the comments (hookSource in
+// snapshot/hookcode.mjs): a comment that quotes a decision or names a slow command is no evidence.
 import { parseJsonSafe } from '../common.mjs';
 import { hookBlocking } from '../snapshot/elements.mjs';
+import { hookSource } from '../snapshot/hookcode.mjs';
 import { finding, lineOfJsonString, safeSnippet } from './util.mjs';
 
 // `name: value` as JSON, jq, JavaScript or Python write it, quotes escaped or not. The guard in
@@ -36,7 +41,8 @@ const STDERR_RE = />&\s*2\b|\/dev\/stderr|console\.error\(|process\.stderr|sys\.
 const REFUSAL_RE = /(?<!non[- ])\b(?:block(?:ed|ing|s)?|den(?:y|ied|ies|ying)|forbid(?:den|s)?|refus(?:e|ed|es|ing)|reject(?:ed|s|ing)?|disallow(?:ed|s)?|prohibit(?:ed|s)?|not\s+(?:allowed|permitted))\b/i;
 const policyName = (base) => /(?:^|[^a-z])(?:block|deny|guard|forbid)/.test(base.toLowerCase()) || /[a-z](?:Block|Deny|Guard|Forbid)/.test(base);
 
-const hookText = (h) => `${h.command || ''}\n${h.scriptText || ''}`;
+/** The command line and the script it runs, comments blanked out. Line numbers stay those of the source. */
+const hookText = (h) => hookSource(h).text;
 const where = (h) => ({ ...h, line: h.command ? lineOfJsonString(h.text, h.command) : null });
 const label = (h, model) => `${h.event}${h.matcher ? ` [${safeSnippet(h.matcher, model.projectRoot, 40)}]` : ''}: ${safeSnippet(h.command, model.projectRoot, 120)}${h.scriptDisplay ? ` (script ${h.scriptDisplay})` : ''}`;
 // "Async hooks can't block or control Claude's behavior: response fields like `decision`,
@@ -174,9 +180,10 @@ export const hookPolicyExit1 = {
       // The contract quoted above is Claude Code's; a Codex hooks.json is not judged by it.
       if (raw.agent === 'codex' || raw.type !== 'command' || !raw.command) continue;
       const h = withBlockingFields(raw);
-      // false: everything the hook runs was read and nothing in it blocks (no exit 2 that
+      // false: everything the hook runs was read and nothing in its code blocks (no exit 2 that
       // survives, no JSON decision, no onFailure "block"). true: it blocks already. null: part
-      // of it could not be read, so nothing is claimed.
+      // of it could not be read, or its code does not settle it (a status or a decision computed
+      // at run time, `exit 2` only inside a message), so nothing is claimed.
       if (hookBlocking(h) !== false) continue;
       // Asked of hookBlocking instead of copying its tables: would this registration block if
       // its script exited 2 (an event exit 2 blocks on, a foreground hook, a command that keeps

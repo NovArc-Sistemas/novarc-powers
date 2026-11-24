@@ -101,6 +101,8 @@ function fmtTokens(n) {
 }
 
 function fmtPct(part, whole) {
+  // A share of something that was not measured is not 0%.
+  if (countOf(part) === null || countOf(whole) === null) return '-';
   if (!whole) return '0';
   var p = part / whole * 100;
   return (p < 10 ? Math.floor(p * 10 + 1e-7) / 10 : Math.floor(p + 1e-7)).toLocaleString(LOCALE, { maximumFractionDigits: 1 });
@@ -117,6 +119,29 @@ function fmtDate(iso, withTime) {
   var d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso || '');
   try { return withTime ? d.toLocaleString(LOCALE, { dateStyle: 'medium', timeStyle: 'short' }) : d.toLocaleDateString(LOCALE, { dateStyle: 'medium' }); } catch (e) { return d.toISOString().slice(0, withTime ? 16 : 10).replace('T', ' '); }
+}
+
+/** The page's formatters, in the shape the wording helpers of the first fragment take (followUpLine, historyLine). */
+var FMT = { date: function (iso) { return fmtDate(iso); }, plural: pl, fill: tx, label: lbl };
+
+/** A number with at most one decimal, the way the language writes it. */
+function fmtNum1(n) { return (Math.round(n * 10) / 10).toLocaleString(LOCALE, { maximumFractionDigits: 1 }); }
+
+function signOf(n) { return n > 0 ? '+' : n < 0 ? '-' : ''; }
+
+/** A change in percent with its sign ("-17%", "+38.7%"), or "-" when it cannot be told. */
+function fmtSignedPct(pct) { return countOf(pct) === null ? '-' : signOf(pct) + fmtNum1(Math.abs(pct)) + '%'; }
+
+/** A change in tokens with its sign, in the compact form of fmtTokens. */
+function fmtSignedTokens(n) { return countOf(n) === null ? '-' : signOf(n) + fmtTokens(Math.abs(n)); }
+
+/**
+ * A value of a comparable metric in its unit: the compact number of the Impact tab for tokens and
+ * characters per session, a percentage for a share. Null when it was not measured.
+ */
+function fmtMetric(v, unit) {
+  if (countOf(v) === null) return null;
+  return unit === 'percent' ? fmtNum1(v) + '%' : fmtTokens(v);
 }
 
 // --- indexes --------------------------------------------------------------------------------
@@ -160,7 +185,7 @@ function anchorOf(fileId) {
   return f ? (ANCH.files[fileId] = Anchors.anchorFile(f, [])) : null;
 }
 
-// --- routes ---------------------------------------------------------------------------------
+// --- routes (parseRoute, which reads them back, is in the first fragment) --------------------
 
 function enc(s) { return encodeURIComponent(String(s)); }
 var R = {
@@ -173,23 +198,6 @@ var R = {
   decide: function (target) { return '#/decide' + (target ? '/' + enc(target) : ''); },
   item: function (itemId) { var i = ITEM[itemId]; return i ? R.diagnosis(i.harness, i.id) : '#/overview'; },
 };
-
-function parseRoute(hash) {
-  var raw = String(hash || '').replace(/^#\/?/, '');
-  var q = {};
-  var qi = raw.indexOf('?');
-  if (qi >= 0) {
-    raw.slice(qi + 1).split('&').forEach(function (kv) {
-      var p = kv.split('=');
-      try { q[decodeURIComponent(p[0])] = decodeURIComponent(p.slice(1).join('=')); } catch (e) { /* ignore a broken pair */ }
-    });
-    raw = raw.slice(0, qi);
-  }
-  var seg = raw.split('/').filter(Boolean).map(function (s) { try { return decodeURIComponent(s); } catch (e) { return s; } });
-  if (seg[0] === 'h' && seg[1]) return { page: 'harness', harness: seg[1], sub: seg[2] || 'explorer', arg: seg.slice(3).join('/') || null, q: q };
-  if (seg[0] === 'decide') return { page: 'decide', arg: seg.slice(1).join('/') || null, q: q };
-  return { page: 'overview', q: q };
-}
 
 // --- store: decisions made on this page, laid over the state ------------------------------------
 

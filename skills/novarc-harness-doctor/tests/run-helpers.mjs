@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpDir, rmrf, write, homeEnv, SCRIPTS } from './helpers.mjs';
+import { itemRev } from '../scripts/lib/run/rev.mjs';
 
 export const RUN = path.join(SCRIPTS, 'run.mjs');
 export const SERVE = path.join(SCRIPTS, 'serve-board.mjs');
@@ -34,6 +35,8 @@ print({ checks: [], defenses: [], skipped: [] });
 `,
   'session-impact.mjs': `${STUB_HEAD}
 const user = flag('scope') === 'user';
+// STUB_IMPACT names a JSON file: { "<project folder name>" | "user" | "*": { fields that replace the ones below } }.
+const over = process.env.STUB_IMPACT ? JSON.parse(fs.readFileSync(process.env.STUB_IMPACT, 'utf8')) : {};
 print({
   generatedAt: '2026-01-01T00:00:00.000Z', windowDays: Number(flag('days') || 30), scope: user ? 'user' : 'project',
   from: '2025-12-02T00:00:00.000Z', to: '2026-01-01T00:00:00.000Z',
@@ -47,6 +50,7 @@ print({
   ],
   unusedContext: { skillsNeverInvoked: ['alpha'], mcpServersNeverCalled: [], skillsConfigured: 2, method: 'stub' },
   durationMs: 1,
+  ...(over[user ? 'user' : path.basename(flag('cwd') || '')] || over['*'] || {}),
 });
 `,
   'probe-clis.mjs': `${STUB_HEAD}
@@ -109,7 +113,9 @@ if (process.env.STUB_SCORES) {
   const text = JSON.stringify(state, null, 2) + '\\n';
   if (text !== fs.readFileSync(statePath, 'utf8')) fs.writeFileSync(statePath, text);
 }
-const html = '<!doctype html><title>board</title><p>channel ' + flag('channel') + ', items ' + state.items.length + ', statuses ' + state.items.map((i) => i.id + ':' + i.status).join(' ') + '</p>';
+// With STUB_RENDER_DUMP the page carries the whole state, as the real board does.
+const dump = process.env.STUB_RENDER_DUMP ? '<script type="application/json">' + JSON.stringify(state) + '</script>' : '';
+const html = '<!doctype html><title>board</title><p>channel ' + flag('channel') + ', items ' + state.items.length + ', statuses ' + state.items.map((i) => i.id + ':' + i.status).join(' ') + '</p>' + dump;
 fs.writeFileSync(path.join(path.dirname(statePath), 'board.html'), html);
 fs.writeFileSync(path.join(path.dirname(statePath), 'board.md'), '# board\\n');
 print({ language: state.language, scores, warnings: process.env.STUB_RENDER_WARN ? [{ item: 'ACME-101', change: 0, problem: 'before text not found in the file' }] : [], bytes: html.length });
@@ -131,7 +137,7 @@ export function sandbox(t, { accounts = 2, projects = ['acme-shop', 'novarc-powe
     overrides[`NOVARC_HD_SCRIPT_${name.replace(/\.mjs$/, '').replace(/-/g, '_').toUpperCase()}`] = path.join(stubDir, name);
   }
   const env = homeEnv(home, { NOVARC_POWERS_HOME: home, STUB_LOG: stubLog, ...overrides });
-  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'STUB_FAIL', 'STUB_HANG', 'STUB_GARBAGE', 'STUB_SCORES', 'STUB_RENDER_WARN', 'STUB_LINKED']) delete env[k];
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'STUB_FAIL', 'STUB_HANG', 'STUB_GARBAGE', 'STUB_SCORES', 'STUB_RENDER_WARN', 'STUB_RENDER_DUMP', 'STUB_LINKED', 'STUB_OWNER', 'STUB_IMPACT', 'NOVARC_HD_NOW', 'NOVARC_HD_TEST_RECORDS_GATE']) delete env[k];
 
   const pool = [
     { id: 'claude-1', provider: 'claude-code', label: 'Claude Code · account 1', identity: 'so…@example.com', path: '~/.claude', dir: '.claude', isDefault: true, host: null, linksInto: null },
@@ -224,6 +230,132 @@ export function securityFindings(extra = {}) {
     fileRoles: { 'facme-shop-1': 'The rules every session starts with.' },
     ...extra,
   };
+}
+
+/** Environment that sets the clock of the run library (NOVARC_HD_NOW) for one command. */
+export function clock(iso) {
+  return { NOVARC_HD_NOW: iso };
+}
+
+/** The history folder of a sandbox: where it is, and readers for what `close` writes there. */
+export function historyOf(sb) {
+  const dir = path.join(sb.home, '.novarc-powers', 'novarc-harness-doctor', 'history');
+  const json = (...parts) => JSON.parse(fs.readFileSync(path.join(dir, ...parts), 'utf8'));
+  return {
+    dir,
+    keys: () => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => /-[0-9a-f]{8}$/.test(n)).sort() : []),
+    index: () => json('index.json'),
+    record: (key, runId) => json(key, `${runId}.json`),
+    md: (key, runId) => fs.readFileSync(path.join(dir, key, `${runId}.md`), 'utf8'),
+    files: (key) => fs.readdirSync(path.join(dir, key)).sort(),
+  };
+}
+
+/**
+ * What the impact probe measured: 20 sessions in 30 days. Per session that is 100000 tokens,
+ * 20000 weighted, 50000 at the start, 120000 at the peak, 5000 lost to retries (5% of the weighted
+ * total) and 40000 characters of shell output. `extra` replaces fields.
+ */
+export function measured(extra = {}) {
+  return {
+    windowDays: 30, from: '2025-12-11T10:00:00.000Z', to: '2026-01-10T10:00:00.000Z', sessions: 20, activeDays: 12,
+    totalTokens: 2000000, weightedTotal: 400000,
+    contextAtStart: { perSessionMedian: 50000, sessionsMeasured: 20 },
+    contextPeak: { median: 120000, sessionsMeasured: 20 },
+    waste: [{ kind: 'retry', episodes: 4, sessions: 3, tokens: 100000, weighted: 20000, basis: 'measured' }],
+    unusedContext: { skillsNeverInvoked: ['alpha'], mcpServersNeverCalled: [] },
+    toolOutput: { shellResultChars: 800000 },
+    coverage: { claude: { read: true, toolCalls: 'complete' }, codex: { read: false, toolCalls: 'not-read' } },
+    ...extra,
+  };
+}
+
+/** Write the impact probe's output for a harness of the current run (probes/<id>/impact.json). */
+export function writeImpact(sb, harnessId, impact) {
+  const file = sb.file('probes', harnessId, 'impact.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(impact));
+}
+
+/** The moments of `firstReview`, all on 2026-01-10 (UTC). */
+export const FIRST = {
+  started: '2026-01-10T10:00:00.000Z',
+  decided: '2026-01-10T11:00:00.000Z',
+  applied: '2026-01-10T11:30:00.000Z',
+  fixed: '2026-01-10T11:31:00.000Z',
+  closed: '2026-01-10T12:00:00.000Z',
+};
+
+/** The findings of `firstReview`: four items of acme-shop in round 1. */
+export function firstFindings() {
+  return {
+    rounds: [{ harness: 'acme-shop', round: 1, status: 'done' }],
+    items: [
+      item('ACME-101', 'acme-shop', 1, { saves: { tokens: 200000, basis: 'measured', metric: 'context-at-start', how: 'Loaded in every session.' } }),
+      item('ACME-102', 'acme-shop', 1, { class: 'additive', severity: 'low', changes: [{ path: './AGENTS.md', lang: 'markdown', before: '', after: 'A new rule.\n', why: 'Adds the rule.' }] }),
+      item('ACME-103', 'acme-shop', 1, { severity: 'high', changes: undefined, file: './settings.json' }),
+      item('ACME-104', 'acme-shop', 1, { changes: undefined, file: './README.md' }),
+    ],
+  };
+}
+
+/**
+ * One whole review of the project acme-shop, at fixed moments (FIRST): measured as `measured()`,
+ * ACME-101 approved ("yes, do it"), applied to ./CLAUDE.md and fixed; ACME-102 declined ("not
+ * now"); ACME-103 deferred; ACME-104 left open; then closed, unless `close: false`. `initArgs` are
+ * more options for `init`.
+ * Returns `{ runId, dir, key, file, findings }`: `key` is the harness key, `file` the CLAUDE.md
+ * that was changed from "line one" to "line one, improved".
+ */
+export function firstReview(sb, { close = true, initArgs = [] } = {}) {
+  const ok = (r, what) => { if (r.code !== 0) throw new Error(`${what} failed: ${r.stdout}${r.stderr}`); return r; };
+  const selection = path.join(sb.home, 'selection.json');
+  fs.writeFileSync(selection, JSON.stringify(sb.selection));
+  const init = ok(sb.run(['init', '--select', selection, ...initArgs], clock(FIRST.started)), 'init');
+  sb.runId = init.json.runId;
+  sb.dir = init.json.dir;
+  writeImpact(sb, 'acme-shop', measured());
+  const findings = firstFindings();
+  ok(sb.complete('review:security', findings), 'complete');
+  const decisions = path.join(sb.home, 'first-decisions.json');
+  fs.writeFileSync(decisions, JSON.stringify([
+    { id: 'first-101', at: FIRST.decided, target: 'ACME-101', action: 'approve', note: 'yes, do it', rev: itemRev(findings.items[0]) },
+    { id: 'first-102', at: FIRST.decided, target: 'ACME-102', action: 'decline', note: 'not now', rev: itemRev(findings.items[1]) },
+    { id: 'first-103', at: FIRST.decided, target: 'ACME-103', action: 'defer', rev: itemRev(findings.items[2]) },
+  ]));
+  ok(sb.run(['decisions', '--ingest', decisions], clock(FIRST.decided)), 'decisions');
+  const file = path.join(sb.home, 'dev', 'acme-shop', 'CLAUDE.md');
+  fs.writeFileSync(file, '# Rules\nline one\nline two\n');
+  ok(sb.run(['mark', '--item', 'ACME-101', '--status', 'in-progress'], clock(FIRST.decided)), 'mark in-progress');
+  const backup = sb.file('backups', 'first', 'CLAUDE.md');
+  fs.mkdirSync(path.dirname(backup), { recursive: true });
+  fs.copyFileSync(file, backup);
+  fs.writeFileSync(file, '# Rules\nline one, improved\nline two\n');
+  ok(sb.run(['record', '--item', 'ACME-101', '--path', file, '--backup', backup], clock(FIRST.applied)), 'record');
+  ok(sb.run(['mark', '--item', 'ACME-101', '--status', 'fixed', '--verified', 'Read the file back.'], clock(FIRST.fixed)), 'mark fixed');
+  if (close) ok(sb.run(['close'], clock(FIRST.closed)), 'close');
+  return { runId: sb.runId, dir: sb.dir, key: init.json.harnesses.find((h) => h.id === 'acme-shop').harnessKey, file, findings };
+}
+
+/** The `rev` of an item or group in the last built state.json: what the board showed. */
+export function builtRev(sb, id) {
+  const state = sb.read('state.json');
+  const hit = [...state.items, ...state.groups].find((x) => x.id === id);
+  return hit ? hit.rev : undefined;
+}
+
+/** Files under `dir` (recursively) whose bytes contain the literal `needle`, relative to `dir`. */
+export function filesContaining(dir, needle) {
+  const hits = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && fs.readFileSync(p).includes(needle)) hits.push(path.relative(dir, p).split(path.sep).join('/'));
+    }
+  };
+  walk(dir);
+  return hits.sort();
 }
 
 /**

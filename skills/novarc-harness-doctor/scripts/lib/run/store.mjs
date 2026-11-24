@@ -18,7 +18,27 @@ export class UsageError extends Error {
 const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
 export function sleepSync(ms) { Atomics.wait(SLEEP_CELL, 0, 0, Math.max(1, Math.floor(ms))); }
 
-export function nowIso() { return new Date().toISOString(); }
+/** What a command prints when its answer is text for a person instead of JSON (`run.mjs history`). */
+export class Plain {
+  constructor(text) { this.text = text; }
+}
+
+/**
+ * The clock of the run library, in epoch milliseconds. NOVARC_HD_NOW (an RFC 3339 date-time, or
+ * epoch milliseconds) replaces it, so a test can close a review on one day and start its
+ * follow-up a month later. The lock code below keeps the real clock: a lock is about processes,
+ * not about the review.
+ */
+export function nowMs() {
+  const raw = process.env.NOVARC_HD_NOW;
+  if (raw === undefined || !raw.trim()) return Date.now();
+  const v = raw.trim();
+  const ms = /^\d{1,16}$/.test(v) ? Number(v) : Date.parse(v);
+  if (!Number.isFinite(ms)) throw new UsageError('NOVARC_HD_NOW must be an RFC 3339 date-time or epoch milliseconds');
+  return ms;
+}
+
+export function nowIso() { return new Date(nowMs()).toISOString(); }
 
 export function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 /** sha256 of a file's bytes, or null when it does not exist. */
@@ -120,7 +140,8 @@ function breakIfStale(lockPath, staleMs) {
 /**
  * Run `fn` while holding the lock file `lockPath` (exclusive create). Waits with jittered retries
  * up to `timeoutMs`; a lock older than `staleMs` belongs to a dead process and is broken.
- * `fn` must be synchronous and short.
+ * `fn` must be synchronous and short. A holder that cannot be short gets `{ touch }` as its
+ * argument and calls `touch()` before each slow step: it tells the others the lock is alive.
  */
 export function withLock(lockPath, fn, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? envNumber('NOVARC_HD_LOCK_TIMEOUT_MS', 20000);
@@ -141,7 +162,16 @@ export function withLock(lockPath, fn, opts = {}) {
     if (Date.now() - started > timeoutMs) throw new RunError('the run directory is busy (another command holds its lock); try again');
     sleepSync(6 + Math.random() * 24);
   }
-  try { return fn(); } finally {
+  const lock = {
+    touch() {
+      try {
+        if (fs.readFileSync(lockPath, 'utf8') !== token) return;
+        const t = new Date();
+        fs.utimesSync(lockPath, t, t);
+      } catch { /* gone: nothing to keep alive */ }
+    },
+  };
+  try { return fn(lock); } finally {
     // Release only our own lock: if it was broken as stale, the file now belongs to someone else.
     try { if (fs.readFileSync(lockPath, 'utf8') === token) fs.unlinkSync(lockPath); } catch { /* already gone */ }
   }

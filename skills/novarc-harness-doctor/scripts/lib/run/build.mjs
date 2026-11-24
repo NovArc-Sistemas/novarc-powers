@@ -5,19 +5,32 @@
 // What a probe wrote is pruned to the schema entry by entry, and an entry that still does not fit
 // is dropped with a warning, so one odd value never costs the user the whole board. What a
 // reviewer wrote was validated by `complete` and is taken as it is.
+//
+// Two barriers run over the finished state, whatever its parts came from: absolute home paths
+// become `~`, and credentials are masked (secrets.mjs). Each one reports where it acted.
+//
+// A harness that was reviewed before (it has a review record, references/follow-up.md) also gets
+// its history and the comparison with its last review. That part reads the record and, to check
+// that what was applied is still there, the harness files themselves, read-only; only verdicts
+// are written. A harness without a record gets nothing from it.
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { RunError, UsageError, readJson, readJsonl, readText, writeJsonAtomic, writeTextAtomic, withLock, toJsonText } from './store.mjs';
 import { scriptPath } from './paths.mjs';
 import { loadStateSchema, skillVersion, validate, prune, sub, def, sanitizeList, isDateTime, SCHEMA_VERSION } from './schema.mjs';
 import { homeMatchers, scrubDeep } from './scrub.mjs';
-import { loadFindings, loadItems, loadStatus, resolveGroups, inputsFingerprint } from './model.mjs';
+import { loadFindings, loadItems, loadStatus, resolveGroups, withGroupRevs, inputsFingerprint } from './model.mjs';
+import { maskDeep } from './secrets.mjs';
 import { ROUNDS, roundApplies } from './units.mjs';
 import { ELEMENT_RULES } from './findings.mjs';
 import { AGENTS, CHANNELS } from './init.mjs';
 import { logText } from './text.mjs';
+import { harnessKeyOf, earlierRecords, lastRecordOf, invalidRecords, itemHistory, harnessHistory, followUpFor } from './followup.mjs';
+import { scoreHarness } from '../scoring.mjs';
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** At most this many "credential masked" warnings name their pointer; the rest is counted. */
+const MAX_MASK_WARNINGS = 25;
 
 function readProbe(paths, harnessId, name) {
   try { const v = readJson(`${paths.probeDir(harnessId)}/${name}`); return isObject(v) ? v : null; } catch { return null; }
@@ -56,7 +69,7 @@ function buildHarness(h, ctx, root, findings, itemIds, prevScores, warnings) {
   const hSchema = sub(root, 'harnesses', '[]');
   const snap = readProbe(paths, h.id, 'snapshot.json');
   const source = `probes/${h.id}/snapshot.json`;
-  const out = { id: h.id, kind: h.kind, name: h.name, path: h.path };
+  const out = { id: h.id, key: harnessKeyOf(h), kind: h.kind, name: h.name, path: h.path };
   if (h.provider) out.provider = h.provider;
   if (h.account) out.account = h.account;
   if (h.inherits) out.inherits = h.inherits;
@@ -115,7 +128,7 @@ function buildHarness(h, ctx, root, findings, itemIds, prevScores, warnings) {
   // `computedAt` survive a rebuild; on a first build seed `previous` from the earlier run.
   if (isObject(prevScores[h.id])) out.scores = prevScores[h.id];
   else if (run.previousScores && typeof run.previousScores[h.id] === 'number') out.scores = { previous: run.previousScores[h.id] };
-  return { entry: out, snap, source };
+  return { entry: out, snap, source, rawImpact };
 }
 
 function buildAccounts(ctx, root, warnings) {
@@ -160,7 +173,10 @@ function buildAccounts(ctx, root, warnings) {
   return out;
 }
 
-/** Assemble the state from the run directory. Pure apart from reading files. */
+/**
+ * Assemble the state from the run directory. Pure apart from reading files: the run directory,
+ * the review records of its harnesses and, for the on-disk check of a follow-up, harness files.
+ */
 export function assembleState(ctx, root, groups) {
   const { paths, run } = ctx;
   const warnings = [];
@@ -186,9 +202,11 @@ export function assembleState(ctx, root, groups) {
   const fileIds = new Set();
   const fileSchema = sub(root, 'files', '[]');
   const layerSchema = sub(root, 'layers', '[]');
+  const rawImpactOf = new Map();
   for (const h of run.harnesses) {
-    const { entry, snap, source } = buildHarness(h, ctx, root, findings, itemIds, prevScores, warnings);
+    const { entry, snap, source, rawImpact } = buildHarness(h, ctx, root, findings, itemIds, prevScores, warnings);
     harnesses.push(entry);
+    rawImpactOf.set(h.id, rawImpact);
     if (!snap) continue;
     const parent = h.inherits ? run.harnesses.find((x) => x.id === h.inherits) : null;
     for (const f of sanitizeList((snap.files || []).map((x) => (isObject(x) ? { ...x, harness: h.id } : x)), fileSchema, root, `${source} files`, warnings)) {
@@ -290,6 +308,34 @@ export function assembleState(ctx, root, groups) {
     });
   }
 
+  // Earlier reviews. A finding the reviewer linked to an earlier one with `previous` gets what
+  // happened to it then; a harness that has a review record gets its history and the comparison
+  // with its last review. A harness without a record gets none of this.
+  for (const item of items) {
+    if (!isObject(item.previous)) continue;
+    const found = itemHistory(run, run.harnesses.find((h) => h.id === item.harness), item.previous);
+    if (!found) {
+      warnings.push({ source: 'findings', problem: `item ${item.id}: \`previous\` points at a run or item that no review record of this harness holds; its history is left out` });
+      continue;
+    }
+    item.history = found.history;
+    // Declined before and handed back as it was: the note the user left then still says why.
+    const decidedNow = status.items[item.id] && status.items[item.id].status;
+    if (item.status === 'declined' && !decidedNow && item.decision === undefined && found.history.lastNote) item.decision = found.history.lastNote;
+  }
+  run.harnesses.forEach((h, n) => {
+    const entry = harnesses[n];
+    for (const name of invalidRecords(entry.key)) warnings.push({ source: `history/${entry.key}/${name}`, problem: 'not a valid review record; ignored' });
+    const earlier = earlierRecords(run, h);
+    if (!earlier.length) return;
+    const { scores, ...rest } = entry;
+    const followUp = followUpFor({
+      record: lastRecordOf(run, h).record, run, h, hs: entry, raw: rawImpactOf.get(h.id), items,
+      scoreNow: scoreHarness({ rounds, items }, h.id).baseline,
+    });
+    harnesses[n] = { ...rest, history: harnessHistory(earlier), followUp, ...(scores !== undefined ? { scores } : {}) };
+  });
+
   const decisionSchema = def(root, 'decision');
   const decisions = status.decisions
     .filter((d) => d.result === 'applied')
@@ -297,7 +343,7 @@ export function assembleState(ctx, root, groups) {
     .sort((a, b) => String(a.d.at).localeCompare(String(b.d.at)) || a.i - b.i)
     .map(({ d }) => {
       // Whatever the schema's decision carries (older copies have no `runId`) and nothing else.
-      const out = prune({ id: d.id, at: d.at, runId: d.runId, target: d.target, action: d.action, note: d.note, exclude: d.exclude, via: d.via }, decisionSchema, root);
+      const out = prune({ id: d.id, at: d.at, runId: d.runId, target: d.target, action: d.action, note: d.note, exclude: d.exclude, rev: d.rev, via: d.via }, decisionSchema, root);
       for (const k of Object.keys(out)) if (out[k] === undefined || out[k] === '' || (Array.isArray(out[k]) && !out[k].length)) delete out[k];
       if (out.via !== 'board' && out.via !== 'chat') out.via = 'board';
       return out;
@@ -328,18 +374,49 @@ export function assembleState(ctx, root, groups) {
       startedAt: run.createdAt,
       ...(events.length ? { lastRun: events.reduce((m, e) => (e.at > m ? e.at : m), events[0].at) } : {}),
       windowDays: run.windowDays,
+      ...(isObject(run.followUpOf) && typeof run.followUpOf.runId === 'string'
+        ? { followUpOf: { runId: run.followUpOf.runId, ...(isDateTime(run.followUpOf.reviewedAt) ? { reviewedAt: run.followUpOf.reviewedAt } : {}) } }
+        : {}),
     },
     environment: { agent: AGENTS.includes(env.agent) ? env.agent : 'other', os: env.os || 'linux', channel: CHANNELS.includes(env.channel) ? env.channel : 'file' },
   };
   const accounts = buildAccounts(ctx, root, warnings);
   if (accounts) state.accounts = accounts;
-  Object.assign(state, { harnesses, rounds, layers, files, inventory, items, groups, defenses, leads, decisions, log });
+  // Each item already carries its `rev`; a group's rev follows from its members'.
+  Object.assign(state, { harnesses, rounds, layers, files, inventory, items, groups: withGroupRevs(groups, items), defenses, leads, decisions, log });
 
   // Last line of defence: no absolute home path leaves this machine through the board.
   const hits = [];
   const clean = scrubDeep(state, homeMatchers(), hits);
   if (hits.length) warnings.push({ source: 'state', problem: `absolute home path replaced by ~ in ${hits.length} place(s), first at ${hits[0]}` });
-  return { state: clean, warnings };
+
+  // And no credential. Findings and notes are refused at the door and snapshots are masked when
+  // they are taken, so anything found here came by another path: it is masked, and the board is
+  // still built, with a warning that says where.
+  const masked = [];
+  const safe = maskDeep(clean, masked);
+  for (const at of masked.slice(0, MAX_MASK_WARNINGS)) warnings.push({ source: 'state', problem: `credential masked at ${at}` });
+  if (masked.length > MAX_MASK_WARNINGS) warnings.push({ source: 'state', problem: `credential masked in ${masked.length - MAX_MASK_WARNINGS} more place(s)` });
+  return { state: safe, warnings };
+}
+
+/**
+ * The state as `build` would write it now, checked against the schema, without writing it: what
+ * a review record is made from. With `assign` (the default) group ids are assigned on the way,
+ * which must happen under the run mutex; with `assign: false` nothing is written and a group
+ * that has no id yet is left out, so the caller assigns them first.
+ */
+export function assembleCurrent(ctx, { assign = true } = {}) {
+  const loaded = loadStateSchema();
+  if (!loaded) throw new RunError('templates/state.schema.json (schemaVersion 2) not found: the skill folder is incomplete');
+  const { paths, run } = ctx;
+  const findings = loadFindings(paths, run);
+  const { items } = loadItems(paths, run, findings);
+  const groups = resolveGroups(paths, run, findings, new Set(items.map((i) => i.id)), { assign });
+  const { state, warnings } = assembleState(ctx, loaded.schema, groups);
+  const errors = validate(state, loaded.schema);
+  if (errors.length) throw new RunError('the merged state does not match the schema', { errors: errors.slice(0, 50), mergeWarnings: warnings });
+  return { state, warnings };
 }
 
 function persistEnvironment(ctx, args) {

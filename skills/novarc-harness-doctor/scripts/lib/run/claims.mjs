@@ -6,12 +6,16 @@
 // the old one, so two processes can never both take over the same stale claim.
 import fs from 'node:fs';
 import path from 'node:path';
-import { RunError, UsageError, readJson, writeJsonAtomic, writeTextAtomic, withLock, nowIso, isTransient } from './store.mjs';
+import { RunError, UsageError, readJson, writeJsonAtomic, writeTextAtomic, withLock, nowIso, nowMs, isTransient } from './store.mjs';
 import { SKILL_DIR } from './paths.mjs';
 import { loadStateSchema } from './schema.mjs';
 import { loadFindings, loadItems, loadStatus, loadUnits, appendLog } from './model.mjs';
 import { readClaim, claimable, queueSnapshot, roundApplies, ROUND_FILES, DEFAULT_TTL_MINUTES, ACCOUNTS_ID_BLOCK } from './units.mjs';
 import { validateFindings, findingsTemplate } from './findings.mjs';
+import { itemRev, DECISION_STATUSES } from './rev.mjs';
+import { hasCredential } from './secrets.mjs';
+import { harnessKeyOf, lastRecordOf, previousItem } from './followup.mjs';
+import { refreshRecords } from './history.mjs';
 
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 
@@ -19,10 +23,12 @@ export function requireSession(args) {
   if (typeof args.session !== 'string' || !SESSION_RE.test(args.session)) {
     throw new UsageError('--session takes a short label (letters, digits, . _ : @ -), e.g. --session claude-main');
   }
+  // The label is written to the claim, the queue, the findings and the log.
+  if (hasCredential(args.session)) throw new UsageError('--session takes a short label, not a credential');
   return args.session;
 }
 
-function view(ctx, now = Date.now()) {
+function view(ctx, now = nowMs()) {
   const { items } = loadItems(ctx.paths, ctx.run);
   return loadUnits(ctx.paths, ctx.run, items, now);
 }
@@ -97,6 +103,11 @@ export function unitBrief(ctx, unit, session, extra = {}) {
   const harnesses = unit.harnesses.map((id) => ctx.run.harnesses.find((h) => h.id === id)).filter(Boolean).map((h) => {
     const out = { id: h.id, key: h.key, kind: h.kind, name: h.name, path: h.path, pathAbs: h.pathAbs, probesDir: ctx.paths.probeDir(h.id) };
     if (h.inherits) out.inherits = h.inherits;
+    out.harnessKey = harnessKeyOf(h);
+    // The record of the last review of this harness (references/follow-up.md): a reviewer reads
+    // its items before proposing anything, and links what was seen before with `previous`.
+    const last = unit.kind === 'apply' ? null : lastRecordOf(ctx.run, h);
+    if (last) out.lastRecord = { runId: last.record.runId, reviewedAt: last.record.reviewedAt, file: last.file };
     return out;
   });
   let roundFiles = unit.rounds.map((r) => ROUND_FILES[r]);
@@ -121,7 +132,9 @@ export function unitBrief(ctx, unit, session, extra = {}) {
     findingsTemplate: unit.kind === 'apply' ? null : findingsTemplate(unit, ctx.run, session),
     ...extra,
   };
-  if (unit.kind === 'apply') { brief.items = unit.approved; brief.inProgress = unit.inProgress; }
+  // `revs`: the revision of each item the user approved. Pass it to `mark --rev` so that what is
+  // applied is the proposal that was read, not one that replaced it in between.
+  if (unit.kind === 'apply') { brief.items = unit.approved; brief.inProgress = unit.inProgress; brief.revs = unit.revs; }
   if (unit.kind === 'accounts' && fs.existsSync(ctx.paths.probeDir('accounts'))) brief.accountsProbeDir = ctx.paths.probeDir('accounts');
   return brief;
 }
@@ -221,10 +234,44 @@ export function complete(ctx, { unitId, session, findingsPath }) {
   const clash = res.normalized.items.filter((i) => taken.has(i.id)).map((i) => i.id);
   if (clash.length) throw new RunError('findings rejected: item ids already used by another unit', { errors: clash.map((id) => `/items: id ${id} is already used by another unit`) });
 
-  return withLock(ctx.paths.mutex, () => {
+  // `previous` names the same finding in an earlier review of that harness. One that points at
+  // nothing is told to the reviewer and kept; a `declined` that the user never declined is refused.
+  const notDeclined = [];
+  res.normalized.items.forEach((i, n) => {
+    if (i.previous === undefined) return;
+    const before = previousItem(ctx.run, ctx.run.harnesses.find((h) => h.id === i.harness), i.previous);
+    if (i.status === 'declined' && (!before || before.item.status !== 'declined')) notDeclined.push(`/items/${n}/status: declined is only for a finding the user declined in an earlier review, and \`previous\` does not point at one`);
+    else if (!before) res.warnings.push(`/items/${n}/previous: no review record of this harness holds this run and item`);
+  });
+  if (notDeclined.length) throw new RunError(`findings rejected: ${notDeclined.length} problem(s)`, { errors: notDeclined, warnings: res.warnings });
+
+  // New findings change what a review record says: a run that already left records gets them again.
+  return refreshRecords(ctx, withLock(ctx.paths.mutex, () => {
     const held = readClaim(ctx.paths, unitId);
     if (heldByOther(held)) throw new RunError(`unit ${unitId} is claimed by ${held.session}`);
     const replaced = fs.existsSync(ctx.paths.findingsFile(unitId));
+    // The revision each item had in the file this one replaces.
+    const revBefore = new Map();
+    if (replaced) {
+      let old = null;
+      try { old = readJson(ctx.paths.findingsFile(unitId)); } catch { old = null; }
+      for (const i of old && Array.isArray(old.items) ? old.items : []) if (i && typeof i.id === 'string') revBefore.set(i.id, itemRev(i));
+    }
+    // An item that is being applied, or was applied, is the record of what was done to the
+    // harness: the board shows its changes as applied. Its proposal cannot be swapped under it
+    // (its wording can). A fix that failed is different: it needs a new approval anyway.
+    const status = loadStatus(ctx.paths);
+    const frozen = [];
+    res.normalized.items.forEach((i, n) => {
+      const o = status.items[i.id];
+      if (!o || (o.status !== 'in-progress' && o.status !== 'fixed')) return;
+      const appliedRev = typeof o.rev === 'string' ? o.rev : revBefore.get(i.id);
+      if (appliedRev === undefined || appliedRev === itemRev(i)) return;
+      frozen.push(o.status === 'fixed'
+        ? `/items/${n}: ${i.id} is fixed with another proposal; keep the item as it was applied, or undo it first (run.mjs undo --item ${i.id})`
+        : `/items/${n}: ${i.id} is being applied with another proposal; keep the item as it is until it is marked fixed or failed`);
+    });
+    if (frozen.length) throw new RunError(`findings rejected: ${frozen.length} problem(s)`, { errors: frozen, warnings: res.warnings });
     writeJsonAtomic(ctx.paths.findingsFile(unitId), res.normalized);
     // Done is written before the claim goes away, so a racing `claim` that wins the freed lock
     // sees a finished unit and backs off.
@@ -244,16 +291,35 @@ export function complete(ctx, { unitId, session, findingsPath }) {
       bySeverity[i.severity] = (bySeverity[i.severity] || 0) + 1;
     }
     // Statuses decided before a re-complete stay in status.json; say which ones lost their item.
-    const status = loadStatus(ctx.paths);
-    const { items: all } = loadItems(ctx.paths, ctx.run);
+    const { items: all, outdated } = loadItems(ctx.paths, ctx.run, undefined, status);
     const known = new Set(all.map((i) => i.id));
     const orphaned = Object.keys(status.items).filter((id) => !known.has(id));
+
+    // A decision is a yes or a no to one revision. An item of this unit that came back as another
+    // revision goes back to open: the user decides again, looking at the new proposal. The old
+    // decision stays in decisions.jsonl; what happened is logged.
+    const mine = new Set(res.normalized.items.map((i) => i.id));
+    const invalidated = [];
+    for (const [id, was] of outdated) {
+      const o = status.items[id];
+      if (!mine.has(id) || !o || !DECISION_STATUSES.includes(o.status)) continue;
+      o.invalidated = { status: was.status, ...(was.decidedRev ? { rev: was.decidedRev } : {}), at: completedAt };
+      o.status = 'open';
+      delete o.rev;
+      delete o.decision;
+      o.updatedAt = completedAt;
+      const entry = { item: id, was: was.status, decidedRev: was.decidedRev, currentRev: was.currentRev };
+      invalidated.push(entry);
+      appendLog(ctx.paths, { event: 'decision-invalidated', harness: all.find((i) => i.id === id).harness, ...entry });
+    }
+    if (invalidated.length) writeJsonAtomic(ctx.paths.status, status);
     return {
       ok: true, runId: ctx.paths.runId, unit: unitId, session, replaced,
       stored: `findings/${path.basename(ctx.paths.findingsFile(unitId))}`,
       counts: { items: res.normalized.items.length, byHarness, bySeverity, inventory: res.normalized.inventory.length, groups: res.normalized.groups.length },
       warnings: res.warnings,
+      ...(invalidated.length ? { invalidated } : {}),
       ...(orphaned.length ? { orphanedStatuses: orphaned } : {}),
     };
-  });
+  }));
 }

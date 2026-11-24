@@ -6,7 +6,7 @@ import {
   IS_WIN, home, isDir, isFile, readdirSafe, realpathSafe, readTextSafe, parseJsonSafe,
   displayPath, normalizeInputPath, git, SKIP_DIRS,
 } from '../common.mjs';
-import { claudeConfigDirs, codexDirs, agentsDirs } from '../locations.mjs';
+import { userLocations } from '../locations.mjs';
 import { parseImports, scanCodexToml } from '../../discover.mjs';
 import { shellTokens } from './util.mjs';
 
@@ -127,13 +127,19 @@ export function resolveRef(raw, fromFile) {
   return path.resolve(path.dirname(fromFile), raw);
 }
 
-export function collect({ scope, cwd }) {
+/**
+ * `account` (`{ provider, configDir }`) narrows the user scope to one account: only that config
+ * dir is read, so no file, setting or finding of another account reaches the model. Without it
+ * every account found on the machine is read, as before.
+ */
+export function collect({ scope, cwd, account = null }) {
   const wantUser = scope === 'user' || scope === 'both';
   const wantProject = scope === 'project' || scope === 'both';
   const projectRoot = wantProject ? cwd : null;
   const h = home();
+  const loc = userLocations(account);
   const model = {
-    scope, projectRoot, home: h,
+    scope, projectRoot, home: h, account,
     docs: [], rootInstructions: [], settings: [], hooks: [], mcp: [], marketplaces: [],
     codexConfigs: [], skills: [], claudeDirs: [], packageProject: null, catalog: null,
     gitHookTexts: [], fileExists: (p) => isFile(p) || isDir(p), resolveRef,
@@ -233,7 +239,7 @@ export function collect({ scope, cwd }) {
   };
 
   // ------------------------------------------------------------------ user scope
-  for (const d of claudeConfigDirs()) {
+  for (const d of loc.claude) {
     const dir = d.path;
     const configKey = `claude:${keyOf(d.realpath)}`;
     model.claudeDirs.push({ configKey, display: displayPath(dir) });
@@ -322,7 +328,7 @@ export function collect({ scope, cwd }) {
   }
 
   if (wantUser) {
-    for (const d of codexDirs()) {
+    for (const d of loc.codex) {
       const dir = d.path;
       const configKey = `codex:${keyOf(d.realpath)}`;
       const ctx = { scope: 'user', baseRoot: dir, pluginRoots: [path.join(dir, 'plugins')] };
@@ -343,7 +349,7 @@ export function collect({ scope, cwd }) {
         addDoc(s.file, { scope: 'user', origin, agent: 'codex', configKey, kind: 'skill' });
       }
     }
-    for (const d of agentsDirs()) {
+    for (const d of loc.agents) {
       for (const s of skillDirs(path.join(d.path, 'skills'))) {
         model.skills.push({ name: s.name, real: realOf(s.file), display: disp(s.file, 'user'), set: 'codex', origin: 'active', scope: 'user' });
         addDoc(s.file, { scope: 'user', origin: 'active', agent: 'codex', configKey: 'codex', kind: 'skill' });

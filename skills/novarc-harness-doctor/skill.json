@@ -11,6 +11,6 @@
   "requires": ["node>=20"],
   "workspace": {
     "shared": ["reports/"],
-    "local": ["runs/", "sync/", "latest.json"]
+    "local": ["runs/", "history/", "sync/", "latest.json"]
   }
 }

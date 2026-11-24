@@ -11,7 +11,7 @@ import path from 'node:path';
 import {
   IS_WIN, homeDir, displayPath, pathKey, isInside, isFile, isDir, lstatSafe, statSafe, realpathSafe, readdirSafe,
   readText, parseJson, hashFile, sha256, canon, linkStatus, collectImports, generateInstructions,
-  readServers, reconcileServers, GENERATED_PREFIX, MCP_PREFIX, SKILL_PREFIX,
+  readServers, reconcileServers, destinationProblem, GENERATED_PREFIX, MCP_PREFIX, SKILL_PREFIX,
 } from '../../sync-check.mjs';
 import { PROVIDERS, isNeverTop, mcpFile, accountLabel } from './detect.mjs';
 import { compareTrees, sameContent, signature } from './fsops.mjs';
@@ -282,8 +282,13 @@ function diffReplicated(primary, account, ctx, notes, warnings) {
       const gbase = { ...base, want, here, text: gen.text, inlineImports: !!ps.importSyntax, sourceDisplay: displayPath(source, ctx.home) };
       if (!lstatSafe(S)) out.push({ ...gbase, state: 'missing' });
       else if (here === want) out.push({ ...gbase, state: 'generated' });
-      else if (el && el.kind === 'generated' && here !== null && here === el.contentHash) out.push({ ...gbase, state: 'generated', stale: true, note: t('instruction.outOfDate') });
-      else {
+      else if (el && el.kind === 'generated' && here !== null && here === el.contentHash) {
+        // Out of date and never edited: regenerated without asking, but only while the path is
+        // still the plain file that was generated. Once it is a link, or shares its content
+        // with another file, rewriting it would reach a place nobody was shown: a conflict.
+        if (destinationProblem(el.identity, S, account.pathAbs)) out.push({ ...gbase, state: 'divergent', note: t('instruction.moved') });
+        else out.push({ ...gbase, state: 'generated', stale: true, note: t('instruction.outOfDate') });
+      } else {
         const head = (readText(S, 1024 * 1024) || '').slice(0, 200);
         out.push({ ...gbase, state: 'divergent', note: t(head.startsWith(GENERATED_PREFIX) ? 'instruction.generatedEdited' : 'instruction.own') });
       }
@@ -392,11 +397,33 @@ export function computeDiff({ accounts, primaryId, manifest = null, selected = n
   return result;
 }
 
-/** A signature of an element's current state, so a stale plan is noticed before it is applied. */
+/** The signature of one MCP server: how it compares, what would be written, what is there. */
+export function serverSignature(status, want, cur) {
+  return sha256(canon([status, want || null, cur || null]));
+}
+
+/** The signature of a generated instruction file: the bytes to write, and the bytes there now. */
+export function instructionSignature(want, here) {
+  return `${want || '-'}|${here || '-'}`;
+}
+
+/**
+ * A signature of an element's current state, so a stale plan is noticed before it is applied.
+ * For a file or a folder it covers both sides, content included: see `signature`.
+ */
 export function elementSignature(e) {
-  if (e.type === 'mcp') return sha256(canon([e.status, e.want || null, e.cur || null]));
-  if (e.type === 'instruction') return `${e.want || '-'}|${e.here || '-'}`;
+  if (e.type === 'mcp') return serverSignature(e.status, e.want, e.cur);
+  if (e.type === 'instruction') return instructionSignature(e.want, e.here);
   if (e.type === 'info' || e.state === 'linked') return e.state;
+  return `${signature(e.P)}|${signature(e.S)}`;
+}
+
+/**
+ * The same signature of a file or folder element, read from the disk NOW: what `apply` compares
+ * with the plan right before it writes. An element the plan saw as linked must still be.
+ */
+export function liveSignature(e) {
+  if (e.state === 'linked' && linkStatus(e.S, e.P).state === 'ok') return e.state;
   return `${signature(e.P)}|${signature(e.S)}`;
 }
 

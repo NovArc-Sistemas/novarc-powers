@@ -29,6 +29,7 @@
         ],
         "local": [
           "runs/",
+          "history/",
           "sync/",
           "latest.json"
         ]

@@ -51,6 +51,10 @@ board.html board.md rendered from state.json
 `~/.novarc-powers/novarc-harness-doctor/latest.json`. In file names a unit id has `:` and `#`
 replaced by `.` (`review.security.2.lock`), because `:` is not allowed on Windows.
 
+Beside `runs/`, `history/` keeps one review record per harness and run
+(`history/<harnessKey>/<runId>.json` and `.md`, plus `history/index.json`), written when a run
+closes. It is what a later review compares against: `references/follow-up.md`.
+
 ## Item ids
 
 `<KEY>-<round><nn>`: harness key, dash, the round number followed by a two-digit counter.
@@ -137,13 +141,32 @@ Conflict options are `keep-as-exception` (the default), `adopt-into-primary` and
 account this very session runs on.
 
 `apply` executes a plan: backup first, then link or generate, then verify. It rebuilds the plan
-from disk and refuses when the accounts no longer match the plan file. It writes
-`~/.novarc-powers/novarc-harness-doctor/sync/manifest.json` (what is managed, with hashes) and
-keeps what it replaced under `sync/backups/<stamp>/`; `undo --stamp` puts that back. `check` verifies every
-managed link and generated file against the manifest and prints what drifted; `--repair` restores
-what is safe (a broken link, a generated file older than its source) and never overwrites a file
-the user edited. `install-check` registers `check --repair` to run at session start in the
-primary account (a gate: only with the user's yes).
+from disk and refuses when the accounts no longer match the plan file. A plan signature covers
+the content behind a link, not only where the link points, and each step checks its element
+again right before writing: a step whose element changed after the plan ends as
+`{ "result": "failed", "stale": true, "error": "... plan again" }` with nothing written for it,
+the other steps still run, and the exit code is 1. It writes
+`~/.novarc-powers/novarc-harness-doctor/sync/manifest.json` (what is managed, with hashes and,
+for generated files, the `identity` of the destination) and keeps what it replaced under
+`sync/backups/<stamp>/`.
+
+`undo --stamp` puts that back, one step at a time. Its output has `restored`, `pending` and
+`alreadyUndone`; `ok` and the exit code follow `pending`. A step that could not be undone (its
+file was edited since: see `conflicts`) stays pending, and running the same `undo` again retries
+only the pending steps.
+
+`check` verifies every managed link and generated file against the manifest and prints what
+drifted; `--repair` restores what is safe (a broken link, a generated file older than its
+source) and never overwrites a file the user edited. A repair writes a generated file only when
+it is still a plain file with a single name, in the folder recorded for it, inside the account
+folder. A destination that became a link, gained a second name (hardlink) or whose folder now
+leads elsewhere is reported with `decide: true` (Codex MCP block: `manual: true`) and a note, and
+is not written. Writes never truncate first: a file with one name is replaced through a temporary
+file and a rename; a file shared through a hardlink is copied to `sync/recovery/` first, written
+in place, read back, and restored from the copy if anything fails.
+
+`install-check` registers `check --repair` to run at session start in the primary account (a
+gate: only with the user's yes).
 
 ### `snapshot-harness.mjs`
 
@@ -154,71 +177,122 @@ node snapshot-harness.mjs --kind user --config-dir <abs> --provider <p> --id <ha
 
 Output: `{ "harness": {…}, "files": [...], "elements": {…}, "layers": [...] }`, each shaped exactly
 as in the state schema (`harnesses[]` entry without scores, `files[]`, `$defs.elements`,
-`layers[]`). File content is masked with the secret scanner and capped: 256 KB per file, 3 MB per
+`layers[]`). File content is masked and capped. Masking is by key first: every string under a
+key named like a secret (password, token, secret, credentials, api key and the like), in JSON,
+TOML, YAML, `KEY=value` lines and command flags, whatever its length, descendants included;
+then by known token shapes. A masked value keeps its first four characters and its length
+(`abcd…29`), or only the length when it is short (`…7`). Caps: 256 KB per file, 3 MB per
 harness; over budget, lower-priority files keep their metadata and get `"omitted": "budget"`.
 Priority: instruction files and their imports, settings, hook registrations and the scripts they
 run, git hooks and CI workflows, MCP config, agent / command / rule files, skill `SKILL.md`
 files, then docs (metadata only unless small). File ids are `f<harnessId-hash>-<n>`, stable for
-the same path across runs. `--clis <probe-clis.json>` fills `elements.clis`; `--name <label>`
+the same path across runs. `--lang pt|en` words the layer names and notes and the notes of hooks,
+plugins and MCP servers in the run language (machine fields never change); `run.mjs probe` passes
+it. `--clis <probe-clis.json>` fills `elements.clis`; `--name <label>`
 overrides the harness name; `--budget <bytes>` and `--file-cap <bytes>` change the caps (tests).
 The account's `.claude.json` never becomes a file: its MCP servers appear as elements only.
 
 ### `session-impact.mjs`, `impact-estimates.mjs`
 
 `session-impact.mjs --cwd <abs> [--days 30]` (one project) or `--scope user [--config-dirs <a,b>]`
-(every session of those accounts). Its header documents each measure; its output fills
+(every session of those accounts). Naming accounts also narrows what counts as configured:
+`~/.claude.json` is read only when the default `~/.claude` is among the dirs named, and
+`~/.agents/skills` only when no account is named. Its header documents each measure; its output fills
 `harnesses[].impact`. Besides raw tokens it gives the **relative cost** in input-token
 equivalents (`weightedTotal`, `weightedByKind`, `waste[].weighted`, `contextAtStart.weightedTotal`)
 using the price ratios in `references/catalog/pricing-weights.json` (`--weights <file>` to
 override); when a call's model has no confirmed ratio the weighted view is left out, with a
-note. `skillInvocations` and `mcpCalls` count uses per name.
+note.
+
+Every aggregate (tokens, context, waste, tool calls, MCP calls, skill invocations, shell output)
+comes from the same counted events: inside the window, and counted once when a session was
+copied into a second file. Codex tool calls are read from every rollout shape (`response_item`
+call items, `exec_command_end` / `mcp_tool_call_end` events, `item_completed` items) and counted
+once per call id.
+
+**A count that was not measured is `null`, never 0.**
+
+| Field | Meaning |
+|---|---|
+| `skillInvocations`, `mcpCalls` | Uses per configured name: a number, or `null` when absence could not be established |
+| `unusedContext.skillsNeverInvoked`, `.mcpServersNeverCalled` | Names measured as 0 uses |
+| `unusedContext.skillsUnknown`, `.mcpServersUnknown` | Names whose count is `null`. Never propose removing one of these as "unused" |
+| `coverage.<source>.toolCalls` | `complete`, `partial` (some lines unparsable: `null` only for names those lines mention), `unknown` (a file unreadable or a call record in an unread shape: `null` for every name that source could have used), `not-read` |
+| `notes` | Says in words what was not fully read |
 
 `impact-estimates.mjs --impact <impact.json> [--clis <clis.json>] [--snapshot <snapshot.json>]
 [--discover <discover.json>]` prints `{ "estimates": [ { "label", "tool", "tokens", "weighted",
-"source" } ], "unmeasured": [...] }` using the factors in `references/catalog/estimates.json`.
-Estimates are never added into measured totals.
+"source" } ], "unmeasured": [...], "unknownUsage": { "skills": [...], "mcpServers": [...] },
+"skipped": [...] }` using the factors in `references/catalog/estimates.json`. Estimates are never
+added into measured totals, and an "unused" estimate is built only on a measured zero.
 
 ### `run.mjs`
 
 ```text
-node run.mjs init    --select <selection.json> [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <name>]
+node run.mjs init    --select <selection.json> | --follow-up <runId|latest>  [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <name>]
 node run.mjs list
+node run.mjs history [--harness <key|path>] [--json] | history --write [--run <id>]
 node run.mjs status  [--run <id>]
 node run.mjs probe   [--run <id>] [--harness <id>|accounts] [--timeout <s>] [--concurrency <n>]
 node run.mjs claim   [--run <id>] [--unit <unitId>] --session <label> [--ttl <minutes>]
 node run.mjs release [--run <id>] --unit <unitId> --session <label>
 node run.mjs complete [--run <id>] --unit <unitId> --session <label> --findings <file>
-node run.mjs build   [--run <id>] [--channel artifact|server|file] [--files all|changed] [--no-render]
-node run.mjs decide  [--run <id>] --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--answered]
-node run.mjs decisions [--run <id>] [--ingest <file.json>]
-node run.mjs mark    [--run <id>] --item <id> --status in-progress|fixed|failed [--verified <t>] [--not-verified <t>] [--auto]
+node run.mjs build   [--run <id>] [--channel artifact|server|file] [--files all|changed] [--no-render] [--agent <name>]
+node run.mjs decide  [--run <id>] --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--rev <rev>] [--answered]
+node run.mjs decisions [--run <id>] [--ingest <file.json|directory>]
+node run.mjs mark    [--run <id>] --item <id> --status in-progress|fixed|failed [--rev <rev>] [--verified <t>] [--not-verified <t>] [--auto]
 node run.mjs record  [--run <id>] --item <id> --path <abs> (--backup <abs> [--masked] | --new)
 node run.mjs undo    [--run <id>] (--item <id> | --all) [--dry-run] --yes
 node run.mjs next    [--run <id>]
 node run.mjs close   [--run <id>]
+node run.mjs --help | <command> --help
 ```
+
+`--help` and `-h` print the usage of the script or of one command and run nothing. An option a
+command does not know is an error (exit 2), so a mistyped flag is never silently ignored.
 
 - `init` reads a selection `{ "accounts": [objects from `accounts.mjs list`], "primary": id|null,
   "projects": [objects from `find-projects.mjs`, or bare absolute paths] }`, assigns harness ids
   and keys, writes `run.json` and `queue.json`, prints `{ runId, dir, harnesses }`. `run.json`
-  keeps absolute paths; nothing absolute reaches `state.json`.
+  keeps absolute paths; nothing absolute reaches `state.json`. Each harness also gets its
+  `harnessKey` (stable across runs) and, when it was reviewed before, `lastRecord` and its own
+  `windowDays`; the output then has `harnesses[].followUp { runId, reviewedAt, days,
+  windowDays }`. `--follow-up <runId|latest>` takes the selection, mode and language from that
+  run instead of `--select`, reports folders that no longer exist under `dropped`, and sets
+  `followUpOf`. `unrecordedRuns` names earlier runs that have no review record yet
+  (`history --write --run <id>` writes them).
 - `probe` runs `discover`, `harness-checks`, `session-impact`, `snapshot-harness`, `probe-clis`
   and `impact-estimates` for each harness, and `accounts.mjs diff` when there is a primary,
   storing each result under `probes/`. A probe that fails is recorded and does not stop the
   others; the command still exits 0 and reports `failed: n`.
 - `claim` takes the next pending unit atomically (exclusive create of the lock file) and prints
-  its brief: the harnesses, the rounds, the round files to read, the probe files, and the id
+  its brief: the harnesses (each with `lastRecord.file`, the absolute path of its last review
+  record, when there is one), the rounds, the round files to read, the probe files, and the id
   range. A claim older than its `ttlMinutes` (default 90) can be taken over.
-- `complete` validates the findings file and stores it; `release` gives a unit back.
+- `complete` validates the findings file and stores it; `release` gives a unit back. It refuses
+  a file that holds a credential, naming where (`/items/0/evidence: credential (github-token)`)
+  and never the value. When an item the user already decided comes back as another revision,
+  that decision no longer holds: the item is `open` again and the output lists it under
+  `invalidated: [{ item, was, decidedRev, currentRev }]`. An item that is being applied or is
+  fixed cannot change its proposal.
 - `build` merges `run.json`, probes, findings, `status.json` and decisions into `state.json`,
-  assigns group ids, then runs `render-board.mjs`. It is idempotent.
-- `decide` records a decision made in chat; `decisions` ingests new lines of `decisions.jsonl`
-  (or a JSON array exported from the Artifact database) into `status.json` and prints what
-  changed: `{ "new": [decision...], "approvedByHarness": { "<harness>": [itemIds] }, "questions": [...] }`.
+  assigns group ids, writes the revision (`rev`) of every item and group, then runs
+  `render-board.mjs`. It is idempotent. As a last barrier it masks any credential still in the
+  state and reports it in `mergeWarnings` (`credential masked at <pointer>`); the board still
+  builds. For a harness with a review record it also writes `history` and `followUp`
+  (`references/follow-up.md`).
+- `decide` records a decision made in chat; `decisions` ingests new lines of `decisions.jsonl`,
+  a JSON array exported from the Artifact database, or a directory with one JSON document per
+  file, into `status.json` and prints what changed:
+  `{ "new": [decision...], "approvedByHarness": { "<harness>": [itemIds] }, "questions": [...],
+  "stale": [...], "rejected": [...] }`. `stale` lists decisions made on a revision that is no
+  longer the current one (`{ target, action, decidedRev, currentRev, reason, reopened? }`):
+  nothing was applied for them, and the user has to decide again on the current board.
 - `decide --answered` clears a question the user asked from the board once it was answered in
   chat.
 - `mark` and `record` are what an executor calls after each change. `mark` only moves along
-  approved → in-progress → fixed | failed; `fixed` needs `--verified` or `--not-verified`;
+  approved → in-progress → fixed | failed, and only while the approved revision is still the
+  current one (pass `--rev` from the brief's `revs` to make that explicit); `fixed` needs `--verified` or `--not-verified`;
   `--auto` (doctor mode, classes `reversible` and `additive` only) takes an open item straight
   to in-progress. `record` hashes the file before (from the backup) and after and appends to
   `ledger.json`; `--new` records a file the run created, `--masked` a backup whose secrets were
@@ -226,9 +300,16 @@ node run.mjs close   [--run <id>]
 - `undo` restores backups for an item or the whole run, in reverse order, only where the file
   still has the hash the run left; anything edited since is a conflict and is left alone. A
   masked backup is never restored (it would overwrite the real secret); the item is reported.
-- `close` marks the run closed; the local page stops. `list` shows the runs on this machine.
+- `close` writes the review record of every harness (`references/follow-up.md`), then marks the
+  run closed; the local page stops. Output: `{ runId, closed, closedAt, already?, historyDir,
+  records: [{ harness, harnessKey, file, md, items, fixed, written }] }`. It exits 1 and leaves
+  the run open when a record does not fit its schema. `history --json` prints
+  `{ historyDir, at, harnesses: [{ key, kind, provider, name, path, reviews, followUpAfter,
+  due }], due, unrecordedRuns }`. `list` shows the runs on this machine; `history` shows what
+  was reviewed before, per harness, and which follow-ups are due.
 - `next` prints what should happen next: pending units, undecided items, approved items waiting
-  per harness, questions waiting for an answer.
+  per harness, questions waiting for an answer, and `decideAgain`: items whose proposal changed
+  after the user decided.
 
 ### `render-board.mjs`
 
@@ -242,6 +323,16 @@ Validates the state, computes scores per harness (`references/scoring.md`), writ
 change touches (the others keep their metadata), for a board small enough to publish as an
 Artifact; the state file on disk is not changed.
 
+The channel decides the shape of `board.html`:
+
+| Channel | `board.html` is |
+|---|---|
+| `server`, `file` | A standalone document (doctype, head, body) |
+| `artifact` | A page fragment for the Artifact publisher, which adds its own document around it: `<title>` first, then styles, content and inline scripts, with no doctype, `html`, `head` or `body` tag. The embedded data is printed one entry per line so the publishing agent can read and patch it. Do not open this file from disk or serve it: build again with `--channel server` for the local page |
+
+The board remembers the open route per run in the browser's storage and reopens it after a
+reload when the URL has no hash; it works the same without storage.
+
 ### `serve-board.mjs`
 
 `node serve-board.mjs --run <id> [--port 0]`
@@ -253,7 +344,7 @@ Serves the run's board on `127.0.0.1` only and prints `{ "url": "http://127.0.0.
 | `GET /?t=` | `board.html` |
 | `GET /api/state?t=&v=<version>` | `{ "version", "changed": bool }`; the board reloads when it changed |
 | `GET /api/decisions?t=` | decisions recorded so far |
-| `POST /api/decisions?t=` | appends one decision to `decisions.jsonl` |
+| `POST /api/decisions?t=` | appends one decision (with its optional `rev`) to `decisions.jsonl` |
 
 Every route needs the token; the server serves no other file, sets no CORS headers, refuses a
 `Host` that is not loopback (403), rejects bodies over 16 KB (413) and invalid decisions (400),
@@ -283,26 +374,54 @@ One decision, wherever it travels:
 
 ```json
 { "id": "<uuid>", "at": "<ISO>", "runId": "<runId>", "target": "ACME-104",
-  "action": "approve", "note": "optional text", "exclude": [], "via": "board" }
+  "action": "approve", "note": "optional text", "exclude": [], "rev": "0a1b2c3d4e5f", "via": "board" }
 ```
 
 `target` is an item id, a group id, or `accounts.primary` (with the chosen account id in `note`).
 
+**A decision is about one revision.** `rev` is the revision of the item or group the user was
+looking at. The board sends it; a decision typed in chat takes the current one; a decision that
+arrives without one is bound to the revision in the last built board. A decision whose `rev` is
+not the current revision is not applied (it comes back under `stale`).
+
+- Item `rev`: the first 12 hex characters of a SHA-256 over the canonical JSON (sorted keys, no
+  whitespace, absent fields as `null`) of what would be applied: `harness`, `class`,
+  `proposal`, `file`, and for each change `file`, `path`, `before`, `after`, `insertAfter`.
+  Wording (title, lesson, each change's `why`), severity and status are not part of it.
+- Group `rev`: the same hash over its members' `itemId:rev`, sorted.
+- `state.json` holds the authoritative values; never compute them by hand.
+
+A note that holds a credential is refused in every channel.
+
 | Channel | Board side | Session side |
 |---|---|---|
-| `artifact` (claude.ai Artifact with the `db` capability) | `db.collection("decisions").doc(<target>).set(decision)` | List the `decisions` collection, save it as a JSON array, `run.mjs decisions --ingest <file>` |
+| `artifact` (claude.ai Artifact with the `db` capability) | `db.collection("decisions").doc(<target>).set(decision)` | List the `decisions` collection, save it as a JSON array or as one file per document in a folder, `run.mjs decisions --ingest <file or folder>` |
 | `server` (`serve-board.mjs`) | `POST /api/decisions` | `run.mjs decisions` |
-| `file` (board opened from disk) | Copies `run.mjs decide ...` text for the user to paste in chat | The agent runs what the user pasted |
+| `file` (board opened from disk) | Copies `run.mjs decide ... --rev <rev>` text for the user to paste in chat | The agent runs what the user pasted |
 
 Effect on an item: `approve` → `approved`; `decline` → `declined`; `defer` → `deferred`; `ask` →
 stays `open` with `question` set. A group decision applies to every item of the group not listed
 in `exclude`.
+
+## Discovery and checks for one account
+
+`discover.mjs`, `harness-checks.mjs` and `probe-clis.mjs` take `--provider <p> --config-dir <abs>`
+(both or neither) to read one account only; `run.mjs probe` passes them for every user harness,
+so the probes of one account hold nothing of another. Without them the scripts read every
+account on the machine, as before. With them the output has
+`account: { provider, path, supported }`; `supported: false` means the skill has no reader for
+that provider's config, and `harness-checks.mjs` then lists every check under `skipped` instead
+of printing an empty result that would read as a pass. `probe-clis.mjs --tools-from <clis.json>` reuses
+what an earlier output found installed on the machine and recomputes only the account part, so
+the machine is probed once per run.
 
 ## Environment variables
 
 | Variable | Used for |
 |---|---|
 | `NOVARC_POWERS_HOME` | Replaces the home directory for everything the scripts write (tests) |
+| `NOVARC_HD_NOW` | Replaces the run library's clock: RFC 3339 or epoch milliseconds (tests) |
+| `NOVARC_POWERS_TEST_FAULT` | Makes one write of the account sync fail at a named stage (tests) |
 | `NOVARC_HD_SCRIPT_<NAME>` | Path of a replacement for one probe or the renderer (tests) |
 | `NOVARC_HD_PROBE_TIMEOUT_MS` | Timeout of each probe |
 | `NOVARC_HD_LOCK_TIMEOUT_MS`, `NOVARC_HD_LOCK_STALE_MS` | Waiting for, and breaking, the run's write lock |

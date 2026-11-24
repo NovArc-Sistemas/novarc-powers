@@ -124,8 +124,21 @@ function metaBlock(label, child) {
   return el('div', null, el('span', { cls: 'lbl', text: label }), typeof child === 'string' ? el('p', { text: child }) : el('p', null, child));
 }
 
+function lowerFirst(text) { var s = String(text); return s.charAt(0).toLowerCase() + s.slice(1); }
+
+/** The label of a comparable metric (`$defs.metric` in the state schema). */
+function metricLabel(name) { return lbl(T.fu.metric, name); }
+
 function savesText(saves) {
-  return pl(T.dg.saves, windowDays(), { tokens: fmtTokens(saves.tokens), basis: lbl(T.basis, saves.basis) }) + (saves.how ? ' · ' + saves.how : '');
+  return pl(T.dg.saves, windowDays(), { tokens: fmtTokens(saves.tokens), basis: lbl(T.basis, saves.basis) }) + (saves.how ? ' · ' + saves.how : '')
+    // The measurement the saving should show up in: what the next review will compare.
+    + (saves.metric ? ' · ' + tx(T.fu.checkedIn, { metric: lowerFirst(metricLabel(saves.metric)) }) : '');
+}
+
+/** One line on what happened to this finding in earlier reviews; null when the records say nothing. */
+function historyNote(item) {
+  var hist = itemHistory(item);
+  return hist ? el('p', { cls: 'chist', text: historyLine(hist, T, FMT) }) : null;
 }
 
 /**
@@ -150,6 +163,7 @@ function caseCard(item, opts) {
   card.appendChild(head);
   card.appendChild(el('h3', { cls: 'ctitle', id: 'case-t-' + item.id, text: item.title }));
   card.appendChild(el('p', { cls: 'cfind' }, item.finding, item.evidence ? [' ', el('span', { cls: 'evid', text: item.evidence })] : null));
+  append(card, [historyNote(item)]);
   if (slim) {
     card.appendChild(el('p', { cls: 'muted', text: item.opinion }));
     return card;

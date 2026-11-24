@@ -42,12 +42,16 @@ Two ways. Offer both in one sentence each and let the user choose:
    finding, score and measurement, with the text of the files that have changes; files without
    changes are listed without their text. That text (secrets masked) goes to claude.ai, so say
    so and publish only on a yes. Publish `<run>/board.html` with the Artifact tool and the
-   capabilities `{ "db": {}, "user": {} }`. Your Artifact tooling may require you to read a file
-   before publishing it; if the board is too large for that, stay with the local page.
+   capabilities `{ "db": {}, "user": {} }`. The file built for this channel is a page fragment
+   (no doctype, `html`, `head` or `body`: the publisher adds them), with its data one entry per
+   line; it is not meant to be opened from disk or served. To go back to the local page, build
+   again with `--channel server`. Your Artifact tooling may require you to read a file before
+   publishing it; if the board is too large for that, stay with the local page.
    Republish the same file after every `run.mjs build`; the page reloads itself.
    **Reading decisions**: list the `decisions` collection of the artifact's database (the
    `ArtifactData` tool, action `list`), save the documents as a JSON array in
-   `<run>/decisions-export.json`, then `run.mjs decisions --ingest <run>/decisions-export.json`.
+   `<run>/decisions-export.json` (or one JSON file per document in a folder), then
+   `run.mjs decisions --ingest <that file or folder>`.
    Do this when the user says they decided, and before each apply step.
 
 If neither is possible, `run.mjs build --channel file` and give the path of `<run>/board.html`;

@@ -66,6 +66,7 @@ const en = {
     noSource: 'the primary has no instruction file to generate it from',
     outOfDate: 'out of date: the primary changed',
     generatedEdited: 'a generated file that was then edited by hand',
+    moved: 'a generated file that is now a link, shares its content with another file, or sits behind a redirected folder',
     own: 'written for this account',
   },
   mcp: {
@@ -229,6 +230,7 @@ const pt = {
     noSource: 'a conta principal não tem arquivo de instruções para gerá-lo',
     outOfDate: 'desatualizado: a conta principal mudou',
     generatedEdited: 'um arquivo gerado que depois foi editado à mão',
+    moved: 'um arquivo gerado que agora é um link, divide o conteúdo com outro arquivo ou está atrás de uma pasta redirecionada',
     own: 'escrito para esta conta',
   },
   mcp: {

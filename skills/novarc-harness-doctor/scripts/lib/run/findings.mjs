@@ -1,16 +1,22 @@
 // Validation of a findings file (references/contracts.md, "Findings file"): what a reviewer hands
 // to `run.mjs complete`. The file is rejected as a whole, with JSON pointers, so that nothing a
 // reviewer wrote reaches the state half-checked. Messages never quote a value from the file.
+//
+// A findings file never holds a credential. Text quoted from a harness file is copied from the
+// snapshot, which is already masked; a file that carries a credential anywhere is rejected with
+// the JSON pointers of the offending strings and nothing else.
 import { validate, sub, def, isDateTime } from './schema.mjs';
 import { homeMatchers, findHomePaths, findLongStrings } from './scrub.mjs';
+import { findCredentials, credentialErrors } from './secrets.mjs';
 import { roundApplies, ACCOUNTS_ID_BLOCK, ROUNDS } from './units.mjs';
+import { nowMs } from './store.mjs';
 
 export const MAX_STRING_BYTES = 200 * 1024;
 export const REVIEWER_STATUSES = ['open', 'ok', 'not-applicable'];
 const TOP_KEYS = ['unit', 'session', 'completedAt', 'rounds', 'items', 'inventory', 'defenses', 'leads', 'layers', 'groups', 'elements', 'fileRoles'];
 const LISTS = ['rounds', 'items', 'inventory', 'defenses', 'leads', 'layers', 'groups'];
 /** Item fields only the run writes; a reviewer's value is dropped with a warning. */
-const RUN_ONLY_ITEM_FIELDS = ['decision', 'question', 'verified', 'notVerified', 'backup', 'updatedAt', 'group'];
+const RUN_ONLY_ITEM_FIELDS = ['decision', 'question', 'verified', 'notVerified', 'backup', 'updatedAt', 'group', 'rev', 'history'];
 /** Used when the state schema cannot be loaded. */
 const ITEM_REQUIRED = ['id', 'harness', 'round', 'severity', 'class', 'title', 'finding', 'proposal', 'opinion'];
 
@@ -37,11 +43,16 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
  * Check `data` as the findings of `unit`. Returns `{ errors, warnings, normalized }`; `normalized`
  * is what gets stored (defaults applied, run-only fields removed) and is null when there are errors.
  */
-export function validateFindings(data, { unit, run, session, schemaRoot, now = new Date() }) {
+export function validateFindings(data, { unit, run, session, schemaRoot, now = new Date(nowMs()) }) {
   const errors = [];
   const warnings = [];
   if (!isObject(data)) return { errors: ['/: the findings file must be a JSON object'], warnings, normalized: null };
   if (unit.kind === 'apply') return { errors: ['/: an apply unit takes no findings file'], warnings, normalized: null };
+
+  // First, and alone: the checks below name property names in their messages, and no message
+  // may carry a secret.
+  const credentials = findCredentials(data);
+  if (credentials.length) return { errors: credentialErrors(credentials), warnings, normalized: null };
 
   for (const at of findLongStrings(data, MAX_STRING_BYTES)) errors.push(`${at}: string longer than 200 KB`);
   for (const at of findHomePaths(data, homeMatchers())) errors.push(`${at}: absolute home path (write ~ for home and ./ for the project root)`);
@@ -99,7 +110,11 @@ export function validateFindings(data, { unit, run, session, schemaRoot, now = n
     }
     if (itemSchema) checkShape(item, itemSchema, at);
     else for (const f of ITEM_REQUIRED) if (item[f] === undefined) errors.push(`${at}: missing required "${f}"`);
-    if (!REVIEWER_STATUSES.includes(item.status)) errors.push(`${at}/status: a reviewer may only set ${REVIEWER_STATUSES.join(', ')}`);
+    // `declined` is the user's word. It comes back from a reviewer only as an earlier decision,
+    // with `previous` naming the item the user declined (`complete` checks it against the record).
+    if (!REVIEWER_STATUSES.includes(item.status) && !(item.status === 'declined' && isObject(item.previous))) {
+      errors.push(`${at}/status: a reviewer may only set ${REVIEWER_STATUSES.join(', ')} (and declined, with \`previous\`, for a finding the user declined in an earlier review)`);
+    }
     if (ownsHarness(item.harness, at) && typeof item.id === 'string') {
       const h = harnesses.get(item.harness);
       const m = /^([A-Z][A-Z0-9]*)-([0-9])([0-9]{2})$/.exec(item.id);
@@ -144,6 +159,7 @@ export function validateFindings(data, { unit, run, session, schemaRoot, now = n
     if (!isObject(raw)) { errors.push(`${at}: expected object`); return raw; }
     const g = { ...raw };
     if ('id' in g) { delete g.id; warnings.push(`${at}/id: assigned by build, ignored`); }
+    if ('rev' in g) { delete g.rev; warnings.push(`${at}/rev: computed by build, ignored`); }
     if (groupSchema) validate(g, { ...groupSchema, required: (groupSchema.required || []).filter((k) => k !== 'id') }, schemaRoot, at, errors);
     else if (typeof g.title !== 'string' || !Array.isArray(g.items)) errors.push(`${at}: needs title, round and items`);
     if (Array.isArray(g.items)) {

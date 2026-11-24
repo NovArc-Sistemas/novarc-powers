@@ -3,9 +3,11 @@
 // through here, so they agree on what an item's status is even when `state.json` is stale.
 import fs from 'node:fs';
 import path from 'node:path';
-import { RunError, UsageError, readJson, readText, writeJsonAtomic, appendJsonLine, sha256, nowIso } from './store.mjs';
+import { RunError, UsageError, readJson, readText, writeJsonAtomic, appendJsonLine, sha256, nowIso, nowMs } from './store.mjs';
 import { runPaths, latestRunId, RUN_ID_RE } from './paths.mjs';
 import { staticUnits, unitsView } from './units.mjs';
+import { itemRev, groupRev, DECISION_STATUSES } from './rev.mjs';
+import { earlierRecords, previousItem } from './followup.mjs';
 
 /** `--run <id>`, else the latest run. */
 export function resolveRunId(args) {
@@ -53,24 +55,45 @@ const OVERLAY_FIELDS = ['status', 'decision', 'question', 'verified', 'notVerifi
 
 /**
  * Every item of the run with its effective status: the reviewer's item (status `open` unless it
- * says `ok` or `not-applicable`) with the status overlay on top. Sorted by harness, round, number.
- * `duplicates` lists ids that appeared in more than one findings file (the first one wins).
+ * says `ok` or `not-applicable`) with the status overlay on top, and its `rev` (rev.mjs). Sorted
+ * by harness, round, number. `duplicates` lists ids that appeared in more than one findings file
+ * (the first one wins).
+ *
+ * A decision belongs to the revision it was made on. An item whose stored decision (approved,
+ * declined, deferred) carries another rev than the item has now, or none, is `open` here, so
+ * nothing downstream (the apply units, `mark`, `next`, the board) can act on a yes that was given
+ * to another proposal. `outdated` maps each item whose last decision was made on another revision
+ * to `{ status, decidedRev, currentRev }`, until the user decides again.
  */
 export function loadItems(paths, run, findings = loadFindings(paths, run), status = loadStatus(paths)) {
   const order = new Map(run.harnesses.map((h, i) => [h.id, i]));
   const seen = new Map();
   const duplicates = [];
+  const outdated = new Map();
   for (const { unit, data } of findings) {
     for (const raw of Array.isArray(data.items) ? data.items : []) {
       if (!raw || typeof raw.id !== 'string' || !order.has(raw.harness)) continue;
       if (seen.has(raw.id)) { duplicates.push(raw.id); continue; }
-      const item = { ...raw, status: raw.status || 'open' };
+      const rev = itemRev(raw);
+      const item = { ...raw, status: raw.status || 'open', rev };
       delete item.group; // assigned by build from the groups
+      // A reviewer hands a finding back as `declined` only when the user declined it in an
+      // earlier review (`previous` names it). Without that record it is a finding like any other.
+      if (raw.status === 'declined') {
+        const before = previousItem(run, run.harnesses.find((h) => h.id === raw.harness), raw.previous);
+        if (!before || before.item.status !== 'declined') item.status = 'open';
+      }
       const o = status.items[raw.id];
       if (o) {
+        const unbound = DECISION_STATUSES.includes(o.status) && o.rev !== rev;
         for (const f of OVERLAY_FIELDS) {
+          if (unbound && (f === 'status' || f === 'decision')) continue;
           if (o[f] === null) delete item[f];
           else if (o[f] !== undefined) item[f] = o[f];
+        }
+        if (unbound) outdated.set(raw.id, { status: o.status, decidedRev: typeof o.rev === 'string' ? o.rev : null, currentRev: rev });
+        else if (item.status === 'open' && o.invalidated && DECISION_STATUSES.includes(o.invalidated.status)) {
+          outdated.set(raw.id, { status: o.invalidated.status, decidedRev: typeof o.invalidated.rev === 'string' ? o.invalidated.rev : null, currentRev: rev });
         }
         if (Array.isArray(item.changes) && o.applied === true) item.changes = item.changes.map((c) => ({ ...c, applied: true }));
       }
@@ -78,7 +101,13 @@ export function loadItems(paths, run, findings = loadFindings(paths, run), statu
     }
   }
   const items = [...seen.values()].map((x) => x.item).sort((a, b) => (order.get(a.harness) - order.get(b.harness)) || (a.round - b.round) || (itemNumber(a.id) - itemNumber(b.id)) || a.id.localeCompare(b.id));
-  return { items, duplicates, unitOf: new Map([...seen.entries()].map(([id, x]) => [id, x.unit])) };
+  return { items, duplicates, outdated, unitOf: new Map([...seen.entries()].map(([id, x]) => [id, x.unit])) };
+}
+
+/** `groups` with the `rev` of each one (rev.mjs), from the items as they are now. */
+export function withGroupRevs(groups, items) {
+  const revOf = new Map(items.map((i) => [i.id, i.rev]));
+  return groups.map((g) => ({ ...g, rev: groupRev(g.items, revOf) }));
 }
 
 function groupKey(itemIds) { return sha256([...itemIds].sort().join('\n')).slice(0, 20); }
@@ -122,7 +151,7 @@ export function resolveGroups(paths, run, findings, knownItemIds, { assign = fal
 }
 
 /** Units with their effective status (see units.mjs). */
-export function loadUnits(paths, run, items, now = Date.now()) {
+export function loadUnits(paths, run, items, now = nowMs()) {
   return unitsView(paths, run, readJson(paths.queue), items, now);
 }
 
@@ -147,5 +176,7 @@ export function inputsFingerprint(paths, run) {
   parts.push(`status ${content(paths.status)}`, `log ${content(paths.log)}`);
   for (const h of run.harnesses) for (const name of ['snapshot.json', 'impact.json', 'estimates.json']) parts.push(`probe ${h.id}/${name} ${stat(path.join(paths.probeDir(h.id), name))}`);
   parts.push(`probe accounts/diff.json ${stat(path.join(paths.probeDir('accounts'), 'diff.json'))}`);
+  // The review records a follow-up is compared with (never this run's own).
+  for (const h of run.harnesses) for (const e of earlierRecords(run, h)) parts.push(`record ${e.record.harnessKey}/${e.name} ${stat(e.file)}`);
   return sha256(parts.join('\n'));
 }

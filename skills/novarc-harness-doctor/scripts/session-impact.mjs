@@ -10,6 +10,18 @@
 // by command head. Aggregates only: it never prints message text, command lines beyond the
 // 2-token head, tool output, file paths from inside a transcript, or absolute home paths.
 //
+// One definition of a counted event feeds every number. A model call counts when its own
+// timestamp falls in the window and it is not a replayed copy of a call already seen in an
+// earlier file. A Claude tool call, the skill it names and the output it produced count with the
+// model call that issued them. A Codex tool call counts once per call id, whichever shapes the
+// rollout wrote it in, by the time of its first record, and its output counts with it. Token
+// totals, tool and skill counts, the unused lists and the shell output all come from those events.
+//
+// "Not read" is never printed as zero. `coverage` says, per source, whether its tool calls could
+// be read. A configured skill or MCP server that shows no use gets 0 only when that absence was
+// measured, and `null` (plus an entry in `unusedContext.skillsUnknown` / `mcpServersUnknown`)
+// when it could not be established.
+//
 // Raw token totals are dominated by cache reads, which cost a fraction of an input token. So every
 // total also comes in input-token equivalents (`weightedTotal`, `weightedByKind`, `weighted` on
 // each waste kind, `contextAtStart.weightedTotal` and `carriedWeighted`), using the list-price ratios in
@@ -22,6 +34,11 @@
 // `unusedContext`, so one account can be measured alone: `--scope user --config-dirs <dir> --sources
 // claude` for a Claude account, `--scope user --sources codex` for Codex. `--codex-dirs` names the
 // Codex home(s) to read instead of the default discovery, the way `--config-dirs` does for Claude.
+//
+// Naming accounts with `--config-dirs` or `--codex-dirs` also narrows what counts as configured to
+// those accounts: `~/.claude.json` (the state file of the default `~/.claude`) is read only when
+// `~/.claude` is one of the config dirs named, and the skills of `~/.agents` are left out. With
+// neither flag every account on the machine is read, `~/.claude.json` and `~/.agents` included.
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -33,7 +50,7 @@ import { scanCodexToml } from './discover.mjs';
 import {
   SHELL_TOOLS, EDIT_TOOLS, EXPLORE_TOOLS, NOT_FOUND_RE, SAFE_NAME, safeName, resultText, isHumanText, isCorrection,
   hookBlockText, hookBlockAttachment, skillsReadIn, normalizeMcpName, eachJsonLine, listClaudeTranscripts, listJsonl, pool,
-  commandHead, codexCommandString, matchesProjectDir, matchesProjectCwd,
+  commandHead, matchesProjectDir, matchesProjectCwd, codexCallReader, codexCallName, codexCallLine,
 } from './lib/transcripts.mjs';
 
 export const DEFAULT_WEIGHTS_FILE = fileURLToPath(new URL('../references/catalog/pricing-weights.json', import.meta.url));
@@ -65,9 +82,11 @@ const METHODS = {
   correction: 'A real user message (not a tool result, command wrapper or compaction summary) shorter than 280 characters that matches pt/en correction markers; tokens are the model turns between the previous user message and the correction (top-level threads only).',
   'error-end': 'A top-level session whose last tool result is an error; tokens are its last 3 turns.',
   exploration: 'Turns that only issued Read/Grep/Glob/LS-type calls after a real user message and before the first Edit/Write/MultiEdit/NotebookEdit that follows it (segments with no edit are not counted; top-level Claude threads only).',
-  unusedContext: 'Skills are folders with a SKILL.md in the scope\'s skills dirs that were never invoked in the window (Skill tool, slash command, skill attribution or a read of their SKILL.md); MCP servers are names configured in the scope\'s settings, .mcp.json, ~/.claude.json and Codex config.toml whose tools (mcp__<name>__*) were never called.',
+  unusedContext: 'Skills are folders with a SKILL.md in the scope\'s skills dirs whose skillInvocations count for the window is 0 (no Skill tool call, slash command, skill attribution or read of their SKILL.md among the counted events); MCP servers are names configured in the scope\'s settings, .mcp.json, ~/.claude.json and Codex config.toml whose mcpCalls count is 0. A name whose absence from the counts could not be established is listed under skillsUnknown or mcpServersUnknown instead and never here: see coverage. When --config-dirs or --codex-dirs names the accounts to read, only what those accounts hold is listed: ~/.claude.json counts only when ~/.claude is one of the config dirs named, and the skills of ~/.agents are left out.',
   carried: 'Derived from measured values, not measured itself. For each top-level session measured above: the context of its first model call, counted once for every later model call of that session in the window (turns counts the first call too), and capped on each later call at what that call really sent (input + cacheWrite + cacheRead), so a compaction that shrank the context never adds more than was sent. The assumption is that the starting context stays loaded for the whole session. carriedWeighted prices each of those re-reads at the cache-read ratio of the model of the later call (of the session\'s first call when the later call names no model), because later calls read the starting context from the prompt cache.',
-  usage: 'Counts for the window. toolCalls: tool calls by tool name, from model calls whose own timestamp falls in the window and that are not replayed copies; Codex completed commands count as exec_command and its MCP calls as mcp__<server>__<tool>, by event time. mcpCalls: the mcp__<server>__* calls summed per server, under the name this scope configures the server with when there is one, otherwise the name as it appears in the tool name. skillInvocations: per session, Skill tool calls plus slash commands the user typed (every command under its own name, built-in ones included); a session where a skill only shows up as skill attribution or as a read of its SKILL.md counts once. A skill named plugin:skill is listed under that name and again under its bare name, so these values must not be summed. Skills and servers the scope configures are listed with 0 when nothing was counted for them in the window.',
+  usage: 'Counts for the window, from the same counted events as the token totals. toolCalls: tool calls by tool name. A Claude tool call counts with the model call that issued it: when that call\'s own timestamp falls in the window and it is not a replayed copy. A Codex tool call counts once per call id, whichever record shapes carry it (a response_item function, custom tool or local shell call; an exec_command_end or mcp_tool_call_end event; a completed CommandExecution or McpToolCall item), when the time of its first record falls in the window; it is listed under the tool name the rollout records, as exec_command when only the completed command is recorded, and as mcp__<server>__<tool> when it is an MCP call. mcpCalls: the mcp__<server>__* calls summed per server, under the name this scope configures the server with when there is one, otherwise the name as it appears in the tool name. skillInvocations: per session, Skill tool calls plus slash commands the user typed (every command under its own name, built-in ones included; a typed command counts by its own timestamp, once per entry id); a session where a skill only shows up as skill attribution or as a read of its SKILL.md counts once. A skill named plugin:skill is listed under that name and again under its bare name, so these values must not be summed. Skills and servers the scope configures are listed even when nothing was counted for them: with 0 when that absence was measured, with null when it could not be established (see coverage).',
+  toolOutput: 'Characters of shell tool results (Claude Bash/PowerShell results, Codex command output) grouped by the 2-token command head. A result counts with the call it answers, so only the results of counted calls are in: calls in the window that are not replayed copies. Approximate tokens are chars / 4. Outputs too large for the transcript are stored elsewhere and only their preview is counted.',
+  coverage: 'Whether the tool calls of each source could be read. complete: every transcript file was read and every line that can hold a call was parsed. partial: some lines could not be parsed; they were searched for the name of each configured skill and MCP server, and a name they mention is reported as unknown (null) instead of 0. unknown: a transcript file could not be read, a record that looks like a tool call has a shape that is not read, or (project scope) a rollout with tool calls records no working directory; every skill or MCP server that source could have used and that shows no use is reported as unknown. not-read: the source was left out with --sources. A count above 0 is what was read, so under partial or unknown it is a lower bound.',
   dedupe: 'A turn belongs to at most one waste kind, claimed in priority order retry > loop > notfound > hook-block > correction > error-end > exploration; an episode whose in-window turns were all claimed by a higher kind is not counted.',
   weighted: 'Input-token equivalents: the tokens of each model call are multiplied by the list price of their kind divided by the base input price of the same model (cache writes by their lifetime, cache reads, output), with the ratios picked by the model id the transcript names; a call over a model\'s long-context threshold uses the higher prices of that tier against the same base. The unit compares token kinds inside one model\'s price list: it is not money, it does not compare models whose base prices differ, and a subscription is not billed per token. Each figure is rounded on its own, so parts can differ from their total by a few units.',
 };
@@ -110,13 +129,13 @@ async function parseClaudeFile(entry, ctx) {
     const msg = o.message && typeof o.message === 'object' ? o.message : null;
     const content = msg ? msg.content : undefined;
     if (o.type === 'assistant' && msg) {
-      if (typeof o.attributionSkill === 'string') ctx.usedSkills.add(o.attributionSkill);
       const id = typeof msg.id === 'string' && msg.id ? msg.id : (typeof o.uuid === 'string' ? o.uuid : null);
       let idx = id !== null ? th.byId.get(id) : undefined;
       if (idx === undefined) {
         idx = th.turns.length;
-        // tools / skills / reads / attr feed the usage counts only (toolCalls, skillInvocations, mcpCalls).
-        th.turns.push({ id, ts: parseTs(o.timestamp), input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cw1h: 0, model: null, calls: [], tools: [], skills: [], reads: [], attr: null });
+        // tools / skills / reads / attr / res feed the usage counts only (toolCalls, skillInvocations,
+        // mcpCalls, toolOutput). They hang on the turn, so they are counted exactly when the turn is.
+        th.turns.push({ id, ts: parseTs(o.timestamp), input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cw1h: 0, model: null, calls: [], tools: [], skills: [], reads: [], attr: null, res: [] });
         if (id !== null) th.byId.set(id, idx);
       }
       const t = th.turns[idx];
@@ -140,16 +159,12 @@ async function parseClaudeFile(entry, ctx) {
           t.tools.push(c.name);
           if (call.shell && typeof input.command === 'string') {
             call.head = commandHead(input.command);
-            for (const s of skillsReadIn(input.command)) { ctx.usedSkills.add(s); t.reads.push(s); }
+            for (const s of skillsReadIn(input.command)) t.reads.push(s);
           }
-          if (c.name === 'Read' && typeof input.file_path === 'string') for (const s of skillsReadIn(input.file_path)) { ctx.usedSkills.add(s); t.reads.push(s); }
+          if (c.name === 'Read' && typeof input.file_path === 'string') for (const s of skillsReadIn(input.file_path)) t.reads.push(s);
           if (c.name === 'Skill') {
             const sk = input.skill || input.name || input.command;
-            if (typeof sk === 'string') { const name = sk.trim().replace(/^\//, ''); ctx.usedSkills.add(name); if (name) t.skills.push(name); }
-          }
-          if (c.name.startsWith('mcp__')) {
-            const end = c.name.indexOf('__', 5);
-            if (end > 5) ctx.usedMcp.add(c.name.slice(5, end));
+            if (typeof sk === 'string') { const name = sk.trim().replace(/^\//, ''); if (name) t.skills.push(name); }
           }
           t.calls.push(call);
           th.events.push(call);
@@ -166,15 +181,8 @@ async function parseClaudeFile(entry, ctx) {
           const text = resultText(c.content);
           const isErr = c.is_error === true;
           th.events.push({ k: 'result', call, isErr, notFound: isErr && NOT_FOUND_RE.test(text), hook: isErr && hookBlockText(text) });
-          if (call && call.shell) {
-            const ts = parseTs(o.timestamp);
-            if (ts === null || (ts >= ctx.from && ts <= ctx.to)) {
-              const h = call.head || '<unknown>';
-              const row = ctx.byHead[h] || (ctx.byHead[h] = { calls: 0, chars: 0 });
-              row.calls++;
-              row.chars += text.length;
-            }
-          }
+          // A shell result counts with the call it answers, so it is kept on that call's turn.
+          if (call && call.shell) th.turns[call.turn].res.push(call.head || '<unknown>', text.length);
         }
       }
       if (!sawResult && o.isMeta !== true && o.isCompactSummary !== true && !o.toolUseResult) {
@@ -184,7 +192,7 @@ async function parseClaudeFile(entry, ctx) {
         for (const t of texts) {
           if (typeof t !== 'string') continue;
           const cmd = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/.exec(t);
-          if (cmd) { ctx.usedSkills.add(cmd[1]); th.slash.push([parseTs(o.timestamp), typeof o.uuid === 'string' ? o.uuid : null, cmd[1]]); continue; }
+          if (cmd) { th.slash.push([parseTs(o.timestamp), typeof o.uuid === 'string' ? o.uuid : null, cmd[1]]); continue; }
           if (!isHumanText(t)) continue;
           human = true;
           if (isCorrection(t)) correction = true;
@@ -196,7 +204,7 @@ async function parseClaudeFile(entry, ctx) {
     } else if (o.type === 'system' && /hook/i.test(String(o.subtype || '')) && o.preventedContinuation === true) {
       th.events.push({ k: 'hook', turn: th.turns.length - 1 });
     }
-  }, { want: claudeWant, onUnparsable: () => { ctx.unparsable++; } });
+  }, { want: claudeWant, onUnparsable: ctx.lost });
   const out = [main];
   if (side !== main && (side.turns.length || side.events.length)) out.push(side);
   return out;
@@ -204,21 +212,21 @@ async function parseClaudeFile(entry, ctx) {
 
 // ---------------------------------------------------------------- Codex
 
-function codexWant(head) {
-  return head.includes('"token_count"') || head.includes('"item_completed"') || head.includes('"session_meta"') || head.includes('"turn_context"') || head.includes('"user_message"');
+function codexWant(reader) {
+  return (head) => head.includes('"token_count"') || head.includes('"item_completed"') || head.includes('"session_meta"') || head.includes('"turn_context"') || head.includes('"user_message"') || codexCallLine(head, reader);
 }
 
 async function parseCodexFile(file, ctx) {
   const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(file);
   const th = newThread('codex', m ? m[1] : path.basename(file, '.jsonl'), false, file);
   let prev = null;
-  let pending = []; // calls recorded since the last token_count belong to the next model call
+  let pending = []; // shell calls first seen since the last token_count belong to the next model call
   const evUsers = [];
   const itemUsers = [];
-  const headRows = []; // shell output rows, kept until the cwd filter is known
-  const used = { skills: [], mcp: [] };
-  const use = { tools: {}, reads: {} }; // usage counts of events whose own time falls in the window
-  const inWindow = (ts) => ts !== null && ts >= ctx.from && ts <= ctx.to;
+  // One entry per call id, whichever shapes the rollout wrote the call in (lib/transcripts.mjs).
+  const reader = codexCallReader();
+  const callEvents = new Map(); // call -> its event in th.events
+  const resultEvents = new Map(); // call -> the event of its outcome
   let sawUsage = false;
   let curModel = null; // the model named by the latest turn_context; used for price weights only
   const flush = (idx) => { for (const e of pending) e.turn = idx; pending = []; };
@@ -227,6 +235,27 @@ async function parseCodexFile(file, ctx) {
     if (!p) return;
     if ((o.type === 'session_meta' || o.type === 'turn_context') && typeof p.cwd === 'string' && th.cwd === null) th.cwd = p.cwd;
     if (o.type === 'turn_context' && typeof p.model === 'string' && p.model) curModel = p.model;
+    const hit = reader.read(o);
+    if (hit) {
+      // Waste episodes are about commands, so only a shell call becomes an event of the thread.
+      // Its details are filled in once the file is read: a later record of the same call can
+      // still bring its command or a firmer outcome.
+      if (hit.call.shell) {
+        let ev = callEvents.get(hit.call);
+        if (!ev) {
+          ev = { k: 'call', turn: null, name: '', hash: '', head: null, shell: true, explore: false, edit: false };
+          callEvents.set(hit.call, ev);
+          th.events.push(ev);
+          pending.push(ev);
+        }
+        if (hit.completed) {
+          const r = { k: 'result', call: ev, isErr: false, notFound: false, hook: false };
+          resultEvents.set(hit.call, r);
+          th.events.push(r);
+        }
+      }
+      return;
+    }
     if (o.type !== 'event_msg') return;
     if (p.type === 'token_count' && p.info && p.info.total_token_usage && typeof p.info.total_token_usage === 'object') {
       sawUsage = true;
@@ -237,49 +266,50 @@ async function parseCodexFile(file, ctx) {
       prev = cur;
       if (d.input + d.output === 0) return; // repeated event, no new model call
       const idx = th.turns.length;
-      th.turns.push({ id: null, ts: parseTs(o.timestamp), input: Math.max(0, d.input - d.cached - d.cw), cacheWrite: d.cw, cacheRead: d.cached, output: d.output, cw1h: 0, model: curModel, calls: pending.filter((e) => e.k === 'call') });
+      th.turns.push({ id: null, ts: parseTs(o.timestamp), input: Math.max(0, d.input - d.cached - d.cw), cacheWrite: d.cw, cacheRead: d.cached, output: d.output, cw1h: 0, model: curModel, calls: pending.slice() });
       flush(idx);
     } else if (p.type === 'user_message' && typeof p.message === 'string') {
       evUsers.push({ at: th.turns.length, pos: th.events.length, text: p.message });
-    } else if (p.type === 'item_completed' && p.item && typeof p.item === 'object') {
-      const item = p.item;
-      if (item.type === 'CommandExecution') {
-        const cmd = codexCommandString(item.command);
-        const call = { k: 'call', turn: null, name: 'exec_command', hash: inputHash(cmd), head: commandHead(cmd), shell: true, explore: false, edit: false };
-        used.skills.push(...skillsReadIn(cmd));
-        const failed = (typeof item.exit_code === 'number' && item.exit_code !== 0) || item.status === 'failed';
-        const text = `${typeof item.stderr === 'string' ? item.stderr : ''}\n${typeof item.aggregated_output === 'string' ? item.aggregated_output : ''}`;
-        th.events.push(call, { k: 'result', call, isErr: failed, notFound: failed && NOT_FOUND_RE.test(text), hook: failed && hookBlockText(text) });
-        pending.push(call);
-        const ts = parseTs(o.timestamp);
-        if (ts === null || (ts >= ctx.from && ts <= ctx.to)) headRows.push([call.head || '<unknown>', typeof item.aggregated_output === 'string' ? item.aggregated_output.length : 0]);
-        if (inWindow(ts)) {
-          bump(use.tools, 'exec_command');
-          for (const s of skillsReadIn(cmd)) bump(use.reads, s);
-        }
-      } else if (item.type === 'McpToolCall' && typeof item.server === 'string') {
-        used.mcp.push(normalizeMcpName(item.server));
-        // Named the way Claude Code names an MCP tool, so both agents count under one key shape.
-        if (inWindow(parseTs(o.timestamp))) bump(use.tools, `mcp__${normalizeMcpName(item.server)}__${typeof item.tool === 'string' && SAFE_NAME.test(item.tool) ? item.tool : 'unnamed'}`);
-      } else if (item.type === 'UserMessage' && Array.isArray(item.content)) {
-        const text = item.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
-        itemUsers.push({ at: th.turns.length, pos: th.events.length, text });
-      }
+    } else if (p.type === 'item_completed' && p.item && typeof p.item === 'object' && p.item.type === 'UserMessage' && Array.isArray(p.item.content)) {
+      const text = p.item.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
+      itemUsers.push({ at: th.turns.length, pos: th.events.length, text });
     }
-  }, { want: codexWant, onUnparsable: () => { ctx.unparsable++; } });
+  }, { want: codexWant(reader), onUnparsable: ctx.lost });
   if (pending.length) {
     const last = th.turns.length - 1;
-    if (last >= 0) for (const e of pending) if (e.k === 'call') th.turns[last].calls.push(e);
+    if (last >= 0) th.turns[last].calls.push(...pending);
     flush(last);
+  }
+  let unread = 0;
+  for (const [call, ev] of callEvents) {
+    ev.name = codexCallName(call);
+    ev.head = commandHead(call.command);
+    // A command that could not be read never looks identical to another one.
+    ev.hash = call.command === null ? `?${unread++}` : inputHash(call.command);
+  }
+  for (const [call, r] of resultEvents) {
+    r.isErr = call.failed;
+    r.notFound = call.failed && NOT_FOUND_RE.test(call.text);
+    r.hook = call.failed && hookBlockText(call.text);
   }
   // One user turn is recorded in several places; use one source only.
   const users = evUsers.length ? evUsers : itemUsers;
   const ins = users.filter((u) => isHumanText(u.text)).map((u) => ({ pos: u.pos, ev: { k: 'user', at: u.at, correction: isCorrection(u.text) } }));
   for (let i = ins.length - 1; i >= 0; i--) th.events.splice(ins[i].pos, 0, ins[i].ev);
+  // The counted calls of this rollout: one per call, by the time of its first record. Tool names,
+  // skill reads and shell output all come from this one list.
+  const use = { tools: {}, reads: {}, heads: [] };
+  for (const call of reader.calls) {
+    if (call.ts === null || call.ts < ctx.from || call.ts > ctx.to) continue;
+    bump(use.tools, codexCallName(call));
+    if (!call.shell) continue;
+    for (const sk of skillsReadIn(call.command)) bump(use.reads, sk);
+    if (call.done) use.heads.push([commandHead(call.command) || '<unknown>', call.outChars]);
+  }
   th.noUsage = !sawUsage;
-  th.headRows = headRows;
-  th.used = used;
   th.codexUse = use;
+  th.callCount = reader.calls.length;
+  th.unrecognized = [...reader.unrecognized];
   return [th];
 }
 
@@ -391,43 +421,62 @@ function samePath(a, b) { return IS_WIN ? a.toLowerCase() === b.toLowerCase() : 
 /**
  * Skills and MCP servers configured for the scope. What belongs to one agent only (its config dir,
  * a project's .claude/ and .mcp.json) is listed only when that agent's transcripts are read;
- * the shared .agents/skills folder always is.
+ * a project's own .agents/skills folder always is. `origin` says, per name, which sources'
+ * sessions can use it: a count of 0 is a measured zero only when those sources were read in full.
+ *
+ * `named` says whether `--config-dirs` / `--codex-dirs` named the accounts to read. A named
+ * account holds nothing of another one:
+ *   - `~/.claude.json` is the state file of the default account (`~/.claude`), kept outside its
+ *     config dir. It is read when no Claude account was named, or when `~/.claude` is one of the
+ *     dirs named; any other Claude config dir brings only what lives inside it.
+ *   - `~/.agents` is a harness of its own: its skills are listed only when no account was named.
  */
-function configuredContext({ scope, projectRoot, claudeDirs, codexHomes, want }) {
-  const skills = new Set();
-  const mcp = new Set();
+function configuredContext({ scope, projectRoot, claudeDirs, codexHomes, want, named }) {
+  const origin = { skills: new Map(), mcp: new Map() };
+  const add = (kind, name, sources) => {
+    const set = origin[kind].get(name) || new Set();
+    for (const s of sources) set.add(s);
+    origin[kind].set(name, set);
+  };
+  const CLAUDE = ['claude'];
+  const CODEX = ['codex'];
+  const either = [...want]; // .agents/skills is read by whichever agent runs
   const claude = want.has('claude');
-  const userClaudeJson = claude ? readJsonSafe(path.join(home(), '.claude.json')) : { ok: false };
+  const defaultDir = path.join(home(), '.claude');
+  const sameDir = (a, b) => samePath(realpathSafe(a) || a, realpathSafe(b) || b);
+  const defaultAccount = claude && (!named.claude || claudeDirs.some((d) => sameDir(d.path, defaultDir)));
+  const userClaudeJson = defaultAccount ? readJsonSafe(path.join(home(), '.claude.json')) : { ok: false };
+  const sharedDirs = named.claude || named.codex ? [] : agentsDirs();
   if (scope === 'user') {
     for (const d of claude ? claudeDirs : []) {
-      for (const s of skillNamesIn(path.join(d.path, 'skills'))) skills.add(s);
+      for (const s of skillNamesIn(path.join(d.path, 'skills'))) add('skills', s, CLAUDE);
       for (const f of ['settings.json', 'settings.local.json', '.claude.json']) {
         const r = readJsonSafe(path.join(d.path, f));
-        if (r.ok && r.value) for (const n of mcpNames(r.value.mcpServers)) mcp.add(n);
+        if (r.ok && r.value) for (const n of mcpNames(r.value.mcpServers)) add('mcp', n, CLAUDE);
       }
     }
-    for (const d of agentsDirs()) for (const s of skillNamesIn(path.join(d.path, 'skills'))) skills.add(s);
+    for (const d of sharedDirs) for (const s of skillNamesIn(path.join(d.path, 'skills'))) add('skills', s, either);
     for (const d of codexHomes) {
-      for (const s of skillNamesIn(path.join(d.path, 'skills'))) skills.add(s);
+      for (const s of skillNamesIn(path.join(d.path, 'skills'))) add('skills', s, CODEX);
       const toml = readTextSafe(path.join(d.path, 'config.toml'));
-      if (toml !== null) for (const s of scanCodexToml(toml).mcpServers) mcp.add(s.name);
+      if (toml !== null) for (const s of scanCodexToml(toml).mcpServers) add('mcp', s.name, CODEX);
     }
-    if (userClaudeJson.ok && userClaudeJson.value) for (const n of mcpNames(userClaudeJson.value.mcpServers)) mcp.add(n);
+    if (userClaudeJson.ok && userClaudeJson.value) for (const n of mcpNames(userClaudeJson.value.mcpServers)) add('mcp', n, CLAUDE);
   } else {
-    for (const s of skillNamesIn(path.join(projectRoot, '.agents', 'skills'))) skills.add(s);
+    for (const s of skillNamesIn(path.join(projectRoot, '.agents', 'skills'))) add('skills', s, either);
     if (claude) {
-      for (const s of skillNamesIn(path.join(projectRoot, '.claude', 'skills'))) skills.add(s);
+      for (const s of skillNamesIn(path.join(projectRoot, '.claude', 'skills'))) add('skills', s, CLAUDE);
       const mj = readJsonSafe(path.join(projectRoot, '.mcp.json'));
-      if (mj.ok && mj.value) for (const n of mcpNames(mj.value.mcpServers)) mcp.add(n);
+      if (mj.ok && mj.value) for (const n of mcpNames(mj.value.mcpServers)) add('mcp', n, CLAUDE);
       for (const f of ['settings.json', 'settings.local.json']) {
         const r = readJsonSafe(path.join(projectRoot, '.claude', f));
-        if (r.ok && r.value) for (const n of mcpNames(r.value.mcpServers)) mcp.add(n);
+        if (r.ok && r.value) for (const n of mcpNames(r.value.mcpServers)) add('mcp', n, CLAUDE);
       }
       const v = userClaudeJson.ok && userClaudeJson.value ? userClaudeJson.value.projects : null;
-      if (v && typeof v === 'object') for (const [k, p] of Object.entries(v)) if (p && samePath(normalizeInputPath(k), projectRoot)) for (const n of mcpNames(p.mcpServers)) mcp.add(n);
+      if (v && typeof v === 'object') for (const [k, p] of Object.entries(v)) if (p && samePath(normalizeInputPath(k), projectRoot)) for (const n of mcpNames(p.mcpServers)) add('mcp', n, CLAUDE);
     }
   }
-  return { skills: [...skills].sort(), mcp: [...mcp].filter((n) => SAFE_NAME.test(n)).sort() };
+  return { skills: [...origin.skills.keys()].sort(), mcp: [...origin.mcp.keys()].filter((n) => SAFE_NAME.test(n)).sort(), origin };
 }
 
 // ---------------------------------------------------------------- price weights
@@ -551,12 +600,21 @@ function scrubOutput(v, homeDir) {
 // ---------------------------------------------------------------- parsing jobs
 
 /**
- * Parse one transcript file into compact threads (turn usage + waste episode turn lists) and
- * what it says about skills, MCP servers and shell output. The result is plain data, so it can
- * cross a worker boundary.
+ * Parse one transcript file into compact threads (turn usage, waste episode turn lists, and per
+ * turn the tool calls, skills and shell results it carries). `watch` names the configured skills
+ * and MCP servers: a line that cannot be parsed is searched for them, so a name it mentions is
+ * never reported as unused. The result is plain data, so it can cross a worker boundary.
  */
-async function parseJob(job, from, to) {
-  const ctx = { from, to, unparsable: 0, usedSkills: new Set(), usedMcp: new Set(), byHead: {} };
+async function parseJob(job, from, to, watch) {
+  const mentioned = { skills: new Set(), mcp: new Set() };
+  const ctx = {
+    from, to, unparsable: 0,
+    lost(text) {
+      ctx.unparsable++;
+      for (const n of watch.skills) if (text.includes(n)) mentioned.skills.add(n);
+      for (const [n, norm] of watch.mcp) if (text.includes(n) || text.includes(norm)) mentioned.mcp.add(n);
+    },
+  };
   let threads = [];
   let failed = 0;
   try {
@@ -581,7 +639,7 @@ async function parseJob(job, from, to) {
       };
       return {
         source: th.source, sessionId: th.sessionId, sidechain: th.sidechain, order: th.order, cwd: th.cwd,
-        noUsage: !!th.noUsage, headRows: th.headRows || [], used: th.used || { skills: [], mcp: [] },
+        noUsage: !!th.noUsage, callCount: th.callCount || 0, unrecognized: th.unrecognized || [],
         eps: episodesOf(th),
         turns: th.turns.map((t) => {
           const o = { id: t.id, ts: t.ts, input: t.input, cacheWrite: t.cacheWrite, cacheRead: t.cacheRead, output: t.output, cw1h: t.cw1h || 0, m: modelIndex(t.model) };
@@ -589,6 +647,8 @@ async function parseJob(job, from, to) {
           if (t.skills && t.skills.length) o.sk = t.skills.map(nameOf);
           if (t.reads && t.reads.length) o.rd = t.reads.map(nameOf);
           if (typeof t.attr === 'string') o.at = nameOf(t.attr);
+          // Shell results as flat pairs: command head (an index into names), characters.
+          if (t.res && t.res.length) o.rs = t.res.map((x, i) => (i % 2 === 0 ? nameOf(x) : x));
           return o;
         }),
         models,
@@ -598,17 +658,17 @@ async function parseJob(job, from, to) {
       };
     });
   } catch { failed = 1; threads = []; }
-  return { threads, failed, unparsable: ctx.unparsable, usedSkills: [...ctx.usedSkills], usedMcp: [...ctx.usedMcp], byHead: ctx.byHead };
+  return { threads, failed, unparsable: ctx.unparsable, mentioned: { skills: [...mentioned.skills], mcp: [...mentioned.mcp] } };
 }
 
 /** Parse all jobs, CPU-parallel in worker threads when there are many files. */
-async function runJobs(jobs, from, to, { workers, onDone }) {
+async function runJobs(jobs, from, to, watch, { workers, onDone }) {
   if (workers > 0 && jobs.length > 0) {
     try {
       const results = new Array(jobs.length);
       let next = 0;
       await Promise.all(Array.from({ length: workers }, () => new Promise((resolve, reject) => {
-        const w = new Worker(new URL(import.meta.url), { workerData: { sessionImpactWorker: true, from, to } });
+        const w = new Worker(new URL(import.meta.url), { workerData: { sessionImpactWorker: true, from, to, watch } });
         const feed = () => {
           if (next >= jobs.length) { w.terminate().then(() => resolve()); return; }
           const i = next++;
@@ -623,20 +683,30 @@ async function runJobs(jobs, from, to, { workers, onDone }) {
       warn('worker threads unavailable; parsing on one thread');
     }
   }
-  return pool(jobs, 8, async (job) => { const r = await parseJob(job, from, to); onDone(); return r; });
+  return pool(jobs, 8, async (job) => { const r = await parseJob(job, from, to, watch); onDone(); return r; });
 }
 
 if (!isMainThread && workerData && workerData.sessionImpactWorker) {
   parentPort.on('message', async ({ i, job }) => {
-    parentPort.postMessage({ i, res: await parseJob(job, workerData.from, workerData.to) });
+    parentPort.postMessage({ i, res: await parseJob(job, workerData.from, workerData.to, workerData.watch) });
   });
 }
 
 // ---------------------------------------------------------------- collect
 
+/**
+ * How well the tool calls of one source were read, from its coverage counts: `not-read`,
+ * `complete`, `partial` (lines lost: a name they mention is unknown) or `unknown` (files, call
+ * shapes or rollouts lost: every name that shows no use is unknown). See METHODS.coverage.
+ */
+export function toolCallCoverage(c) {
+  if (!c.read) return 'not-read';
+  if (c.filesFailed > 0 || c.unrecognizedCallRecords > 0 || c.rolloutsWithoutProject > 0) return 'unknown';
+  return c.unparsableLines > 0 ? 'partial' : 'complete';
+}
+
 export async function collect({ projectRoot, configDirs = null, days = 30, scope = 'project', progress = false, workers = null, now = Date.now(), weightsFile = null, sources = null, codexHomeDirs = null }) {
   const from = now - days * DAY;
-  const ctx = { from, to: now, unparsable: 0, usedSkills: new Set(), usedMcp: new Set(), byHead: {} };
 
   // Which transcripts are read: both agents unless `sources` names one.
   const want = new Set(sources && sources.length ? SOURCES.filter((x) => sources.includes(x)) : SOURCES);
@@ -664,39 +734,59 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
   const codexFiles = [];
   for (const d of codexHomes) codexFiles.push(...listJsonl(path.join(d.path, 'sessions'), 4, from));
 
+  // What the scope configures. Known before the files are read, so that a line that cannot be
+  // parsed can still be searched for these names.
+  const named = { claude: !!(configDirs && configDirs.length), codex: !!(codexHomeDirs && codexHomeDirs.length) };
+  const conf = configuredContext({ scope, projectRoot, claudeDirs, codexHomes, want, named });
+  const watch = { skills: conf.skills, mcp: conf.mcp.map((n) => [n, normalizeMcpName(n)]) };
+
   const jobs = [...claudeFiles.map((f) => ({ source: 'claude', f })), ...codexFiles.map((f) => ({ source: 'codex', f }))];
   let done = 0;
   const nWorkers = workers === null ? Math.max(0, Math.min(8, os.cpus().length - 1)) : workers;
-  const parsed = await runJobs(jobs, from, now, {
+  const parsed = await runJobs(jobs, from, now, watch, {
     workers: workers !== null ? workers : (jobs.length >= 32 ? nWorkers : 0),
     onDone: () => { done++; if (progress && (done % 250 === 0 || done === jobs.length)) warn(`progress: ${done}/${jobs.length} files`); },
   });
-  let failedFiles = 0;
-  for (const r of parsed) {
-    failedFiles += r.failed;
-  }
-  if (failedFiles) warn(`${failedFiles} transcript file(s) could not be read; skipped`);
-  const mergeHeads = (rows) => { for (const [h, r] of Object.entries(rows)) { const row = ctx.byHead[h] || (ctx.byHead[h] = { calls: 0, chars: 0 }); row.calls += r.calls; row.chars += r.chars; } };
+
+  // Coverage: what was read of each source, and what was not. It decides below whether a count
+  // of 0 is a measured zero.
+  const cover = Object.fromEntries(SOURCES.map((s) => [s, { read: want.has(s), files: 0, filesFailed: 0, unparsableLines: 0 }]));
+  Object.assign(cover.codex, { unrecognizedCallRecords: 0, rolloutsWithoutProject: 0 });
+  const oddKinds = new Map();
+  const mentioned = { skills: new Set(), mcp: new Set() };
   const threads = [];
-  for (const r of parsed) {
+  parsed.forEach((r, i) => {
+    const c = cover[jobs[i].source];
+    if (r.failed) c.filesFailed++;
     // Project scope: a Codex rollout belongs to the project by its recorded cwd.
     const keep = r.threads.filter((t) => t.source !== 'codex' || scope === 'user' || matchesProjectCwd(t.cwd, projectRoot));
-    if (!keep.length && r.threads.length) continue;
-    threads.push(...keep);
-    ctx.unparsable += r.unparsable;
-    for (const s of r.usedSkills) ctx.usedSkills.add(s);
-    for (const s of r.usedMcp) ctx.usedMcp.add(s);
-    mergeHeads(r.byHead);
-    for (const t of keep) {
-      if (t.source !== 'codex') continue;
-      for (const [h, c] of t.headRows) { const row = ctx.byHead[h] || (ctx.byHead[h] = { calls: 0, chars: 0 }); row.calls++; row.chars += c; }
-      for (const s of t.used.skills) ctx.usedSkills.add(s);
-      for (const s of t.used.mcp) ctx.usedMcp.add(s);
+    if (!keep.length && r.threads.length) {
+      // A rollout that records no cwd cannot be given to any project: its calls may be this one's.
+      if (r.threads.some((t) => t.source === 'codex' && t.cwd === null && t.callCount > 0)) c.rolloutsWithoutProject++;
+      return;
     }
-  }
+    if (!r.failed) c.files++;
+    c.unparsableLines += r.unparsable;
+    threads.push(...keep);
+    for (const s of r.mentioned.skills) mentioned.skills.add(s);
+    for (const s of r.mentioned.mcp) mentioned.mcp.add(s);
+    for (const t of keep) {
+      for (const [kind, n] of t.unrecognized) {
+        cover.codex.unrecognizedCallRecords += n;
+        oddKinds.set(kind, (oddKinds.get(kind) || 0) + n);
+      }
+    }
+  });
+  const failedFiles = cover.claude.filesFailed + cover.codex.filesFailed;
+  if (failedFiles) warn(`${failedFiles} transcript file(s) could not be read; skipped`);
+  for (const s of SOURCES) cover[s].toolCalls = toolCallCoverage(cover[s]);
+  /** A source whose tool calls were not all read: nothing can be said about what it did not show. */
+  const blind = (s) => cover[s].toolCalls === 'unknown';
   threads.sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
 
-  // Claude message ids are unique per model call: an id seen in an earlier file is a replayed copy.
+  // THE definition of a counted model call, used by every number below: its own timestamp falls
+  // in the window and it is not a replayed copy. Claude message ids are unique per model call, so
+  // an id seen in an earlier file is a copy.
   const seenIds = new Set();
   let duplicateTurns = 0;
   let duplicateTokens = 0;
@@ -710,7 +800,8 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
           if (t.win) { duplicateTurns++; duplicateTokens += turnTokens(t); }
         } else seenIds.add(t.id);
       }
-      t.eff = t.win && !t.dup ? turnTokens(t) : 0;
+      t.counted = t.win && !t.dup;
+      t.eff = t.counted ? turnTokens(t) : 0;
     }
   }
 
@@ -773,21 +864,21 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
     if (!sessions.has(k)) sessions.set(k, { source: th.source, id: th.sessionId, tokens: 0, wasteTokens: 0, active: false, peak: 0 });
     const s = sessions.get(k);
     for (const t of th.turns) {
-      if (!t.win || t.dup) continue;
+      if (!t.counted) continue;
       s.active = true;
       s.tokens += t.eff;
       byKind.input += t.input; byKind.cacheWrite += t.cacheWrite; byKind.cacheRead += t.cacheRead; byKind.output += t.output;
       activeDays.add(new Date(t.ts).toISOString().slice(0, 10));
       if (!th.sidechain) s.peak = Math.max(s.peak, contextOf(t));
     }
-    if (!th.sidechain && th.turns.length && th.turns[0].win && !th.turns[0].dup) {
+    if (!th.sidechain && th.turns.length && th.turns[0].counted) {
       const firstContext = contextOf(th.turns[0]);
       starts.push(firstContext);
       startsWeighted += th.turns[0].wCtx;
       startTurns++;
       for (let i = 1; i < th.turns.length; i++) {
         const t = th.turns[i];
-        if (!t.win || t.dup) continue;
+        if (!t.counted) continue;
         startTurns++;
         const again = Math.min(firstContext, contextOf(t)); // never more than this call really sent
         carried += again;
@@ -805,7 +896,7 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
         let weightedTokens = 0;
         for (const i of ep.turns) {
           const t = th.turns[i];
-          if (!t || !t.win || t.dup) continue;
+          if (!t || !t.counted) continue;
           if (owner[i] !== null && owner[i] !== kind) continue;
           kept = true;
           if (owner[i] === null) { owner[i] = kind; tokens += t.eff; weightedTokens += t.wAll; }
@@ -825,13 +916,28 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
   const active = [...sessions.values()].filter((s) => s.active);
   starts.sort((a, b) => a - b);
   const peaks = active.filter((s) => s.peak > 0).map((s) => s.peak).sort((a, b) => a - b);
-  const conf = configuredContext({ scope, projectRoot, claudeDirs, codexHomes, want });
-  const usedMcpNorm = new Set([...ctx.usedMcp].map(normalizeMcpName));
-  const shellChars = Object.values(ctx.byHead).reduce((a, r) => a + r.chars, 0);
-  const usage = usageCounts(threads, from, now, conf);
+
+  // Everything that is not a token total comes from the same counted events. A configured name
+  // with nothing counted gets 0 when its absence was measured and null when it was not: a line
+  // that could not be parsed names it, or a source that could have used it was not read in full.
+  const unknownZero = (kind, name) => mentioned[kind].has(name) || [...conf.origin[kind].get(name)].some(blind);
+  const usage = usageCounts(threads, from, now, conf, unknownZero);
+  const { skillInvocations, mcpCalls } = usage;
+  const unknownNames = [...conf.skills.filter((n) => skillInvocations[n] === null), ...conf.mcp.filter((n) => mcpCalls[n] === null)];
+  const shellChars = [...usage.heads.values()].reduce((a, r) => a + r.chars, 0);
 
   const notes = codexFiles.length && codexNoUsage && !active.some((s) => s.source === 'codex') ? ['codex: no usage data'] : [];
   if (want.size < SOURCES.length) notes.push(`transcript sources read: ${[...want].join(', ')}`);
+  for (const s of SOURCES) {
+    const c = cover[s];
+    if (c.toolCalls !== 'unknown') continue;
+    const why = [];
+    if (c.filesFailed) why.push(`${c.filesFailed} transcript file(s) could not be read`);
+    if (c.unrecognizedCallRecords) why.push(`${c.unrecognizedCallRecords} record(s) that look like a tool call have a shape that is not read`);
+    if (c.rolloutsWithoutProject) why.push(`${c.rolloutsWithoutProject} rollout(s) with tool calls record no working directory`);
+    notes.push(`${s}: tool calls not fully read (${why.join('; ')}); a skill or MCP server it could have used and that shows no use is reported as unknown, not as unused`);
+  }
+  if (unknownNames.some((n) => mentioned.skills.has(n) || mentioned.mcp.has(n))) notes.push('lines that could not be parsed name a configured skill or MCP server that shows no use; it is reported as unknown, not as unused');
   if (!W.ok) notes.push(`weighted totals omitted: ${W.reason}`);
   else if (unpricedTurns) {
     const which = [...unpriced].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([label, n]) => `${label} (${n})`).join(', ');
@@ -847,7 +953,13 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
     sources: { claude: active.filter((s) => s.source === 'claude').length, codex: active.filter((s) => s.source === 'codex').length },
     sessions: active.length,
     activeDays: activeDays.size,
-    unparsableLines: ctx.unparsable,
+    unparsableLines: cover.claude.unparsableLines + cover.codex.unparsableLines,
+    coverage: {
+      claude: cover.claude,
+      // The kinds are type names taken from the rollouts: schema identifiers, masked like any other name.
+      codex: { ...cover.codex, unrecognizedKinds: [...oddKinds].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, 5).map(([kind]) => safeKey(kind)) },
+      method: METHODS.coverage,
+    },
     totalTokens: byKind.input + byKind.cacheWrite + byKind.cacheRead + byKind.output,
     byKind,
     ...(weighted ? {
@@ -876,21 +988,24 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
     }),
     wasteMethod: METHODS.dedupe,
     unusedContext: {
-      skillsNeverInvoked: conf.skills.filter((n) => !ctx.usedSkills.has(n)),
-      mcpServersNeverCalled: conf.mcp.filter((n) => !usedMcpNorm.has(normalizeMcpName(n))),
+      // Measured zeros only. A name whose absence could not be established is in the Unknown lists.
+      skillsNeverInvoked: conf.skills.filter((n) => skillInvocations[n] === 0),
+      mcpServersNeverCalled: conf.mcp.filter((n) => mcpCalls[n] === 0),
+      skillsUnknown: conf.skills.filter((n) => skillInvocations[n] === null),
+      mcpServersUnknown: conf.mcp.filter((n) => mcpCalls[n] === null),
       skillsConfigured: conf.skills.length,
       mcpServersConfigured: conf.mcp.length,
       method: METHODS.unusedContext,
     },
-    skillInvocations: usage.skillInvocations,
-    mcpCalls: usage.mcpCalls,
+    skillInvocations,
+    mcpCalls,
     toolCalls: usage.toolCalls,
     usageMethod: METHODS.usage,
     toolOutput: {
       shellResultChars: shellChars,
       shellResultTokensApprox: approxTokens(shellChars),
-      byHead: Object.entries(ctx.byHead).sort((a, b) => b[1].chars - a[1].chars || a[0].localeCompare(b[0])).slice(0, 25).map(([head, r]) => ({ head, calls: r.calls, chars: r.chars })),
-      method: 'Characters of shell tool results (Claude Bash/PowerShell, Codex command output) grouped by the 2-token command head, in the window; approximate tokens are chars / 4. Outputs too large for the transcript are stored elsewhere and only their preview is counted.',
+      byHead: [...usage.heads].sort((a, b) => b[1].chars - a[1].chars || a[0].localeCompare(b[0])).slice(0, 25).map(([head, r]) => ({ head, calls: r.calls, chars: r.chars })),
+      method: METHODS.toolOutput,
     },
     topSessions: active.sort((a, b) => b.tokens - a.tokens || a.id.localeCompare(b.id)).slice(0, 10).map((s) => ({ id: s.id, source: s.source, tokens: s.tokens, wasteTokens: s.wasteTokens })),
     notes,
@@ -901,12 +1016,29 @@ export async function collect({ projectRoot, configDirs = null, days = 30, scope
 }
 
 /**
- * Tool calls, skill invocations and MCP calls of the window, as `{ name: count }` maps. Claude
- * calls count when their model call falls in the window and is not a replayed copy; Codex events
- * were already filtered by their own time when the file was parsed.
+ * Every count that is not a token total, in one pass over the same counted events as the token
+ * totals: tool calls, MCP calls and skill invocations as `{ name: count }` maps, and shell output
+ * by command head. What hangs on a Claude turn (its tool calls, the skills it names, the results
+ * that answer its calls) counts exactly when the turn does; Codex calls were filtered by their own
+ * time, once per call id, when the rollout was parsed. `unknownZero(kind, name)` says whether a
+ * configured name with nothing counted is unknown (null) rather than a measured 0.
  */
-function usageCounts(threads, from, to, conf) {
+function usageCounts(threads, from, to, conf, unknownZero) {
   const toolCalls = {};
+  const servers = new Map(); // MCP server, as it appears in the tool name -> calls
+  const heads = new Map(); // command head -> { calls, chars }
+  const tool = (name, n = 1) => {
+    bump(toolCalls, safeKey(name), n);
+    if (typeof name !== 'string' || !name.startsWith('mcp__')) return;
+    const end = name.indexOf('__', 5);
+    if (end > 5) servers.set(name.slice(5, end), (servers.get(name.slice(5, end)) || 0) + n);
+  };
+  const output = (head, chars) => {
+    const row = heads.get(head) || { calls: 0, chars: 0 };
+    row.calls++;
+    row.chars += chars;
+    heads.set(head, row);
+  };
   const bareOf = (name) => name.slice(name.lastIndexOf(':') + 1);
   // Per session: explicit invocations (Skill tool, slash command) by name, and the skills that
   // only left a trace (attribution, a read of their SKILL.md), one name per bare skill name.
@@ -928,11 +1060,12 @@ function usageCounts(threads, from, to, conf) {
     const s = sessionOf(th);
     const names = th.names || [];
     for (const t of th.turns) {
-      if (!t.win || t.dup) continue;
-      if (t.tc) for (const i of t.tc) bump(toolCalls, safeKey(names[i]));
+      if (!t.counted) continue;
+      if (t.tc) for (const i of t.tc) tool(names[i]);
       if (t.sk) for (const i of t.sk) call(s, names[i]);
       if (t.rd) for (const i of t.rd) trace(s, names[i]);
       if (t.at !== undefined) trace(s, names[t.at]);
+      if (t.rs) for (let i = 0; i < t.rs.length; i += 2) output(names[t.rs[i]], t.rs[i + 1]);
     }
     for (const [ts, uuid, i] of th.slash || []) {
       if (ts === null || ts < from || ts > to) continue;
@@ -940,8 +1073,9 @@ function usageCounts(threads, from, to, conf) {
       call(s, names[i]);
     }
     if (th.codexUse) {
-      for (const [name, n] of Object.entries(th.codexUse.tools)) bump(toolCalls, safeKey(name), n);
+      for (const [name, n] of Object.entries(th.codexUse.tools)) tool(name, n);
       for (const name of Object.keys(th.codexUse.reads)) trace(s, name);
+      for (const [head, chars] of th.codexUse.heads) output(head, chars);
     }
   }
   const skillInvocations = {};
@@ -955,19 +1089,20 @@ function usageCounts(threads, from, to, conf) {
     for (const [name, n] of s.calls) { add(name, n); called.add(bareOf(name)); }
     for (const [bare, name] of s.traces) if (!called.has(bare)) add(name, 1);
   }
-  // MCP calls per server, under the configured name when this scope configures the server.
-  const configured = new Map(conf.mcp.map((n) => [normalizeMcpName(n), n]));
+  // MCP calls per server, under the configured name when this scope configures the server. Two
+  // configured names that give the same tool prefix cannot be told apart: both get the calls.
+  const configured = new Map();
+  for (const n of conf.mcp) configured.set(normalizeMcpName(n), [...(configured.get(normalizeMcpName(n)) || []), n]);
   const mcpCalls = {};
-  for (const [name, n] of Object.entries(toolCalls)) {
-    if (!name.startsWith('mcp__')) continue;
-    const end = name.indexOf('__', 5);
-    if (end > 5) bump(mcpCalls, configured.get(name.slice(5, end)) || name.slice(5, end), n);
-  }
-  // What the scope configures is listed even when nothing was counted, so a lookup gets a 0.
-  for (const n of conf.skills) if (!(n in skillInvocations)) skillInvocations[n] = 0;
-  for (const n of conf.mcp) if (!(n in mcpCalls)) mcpCalls[n] = 0;
-  const sortDesc = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
-  return { toolCalls: sortDesc(toolCalls), skillInvocations: sortDesc(skillInvocations), mcpCalls: sortDesc(mcpCalls) };
+  for (const [server, n] of servers) for (const name of configured.get(server) || [safeKey(server)]) bump(mcpCalls, name, n);
+  // What the scope configures is listed even when nothing was counted: 0 when that absence was
+  // measured, null when it could not be established. A missing key is never a zero.
+  for (const n of conf.skills) if (!Object.hasOwn(skillInvocations, n)) skillInvocations[n] = unknownZero('skills', n) ? null : 0;
+  for (const n of conf.mcp) if (!Object.hasOwn(mcpCalls, n)) mcpCalls[n] = unknownZero('mcp', n) ? null : 0;
+  // Most used first; names with an unknown count go last.
+  const rank = (v) => (v === null ? -1 : v);
+  const sortDesc = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => rank(b[1]) - rank(a[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+  return { toolCalls: sortDesc(toolCalls), skillInvocations: sortDesc(skillInvocations), mcpCalls: sortDesc(mcpCalls), heads };
 }
 
 /** Which ratios produced the weighted figures: one entry per model family that had tokens in the window. */

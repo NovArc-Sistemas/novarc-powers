@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { tmpDir, rmrf, runScript, write } from './helpers.mjs';
-import { estimate, loadFactors, snapshotFacts, DEFAULT_CATALOG } from '../scripts/impact-estimates.mjs';
+import { estimate, loadFactors, snapshotFacts, settledUnused, DEFAULT_CATALOG } from '../scripts/impact-estimates.mjs';
 
 const SRC = 'https://example.com/claim';
 const RTK_BASIS = 'Synthetic claim sentence for the filter.';
@@ -98,6 +98,8 @@ test('all three estimates, with their arithmetic', () => {
     { id: 'unused-mcp-servers', label: 'MCP server never called', tool: 'other.srv', source: MCP_BASIS },
   ]);
   assert.deepEqual(r.json.skipped, []);
+  // The measurement left nothing unknown.
+  assert.deepEqual(r.json.unknownUsage, { skills: [], mcpServers: [] });
   assert.deepEqual(r.json.catalog, { source: 'catalog.json', verifiedAt: '2026-01-01' });
   assert.equal(typeof r.json.method, 'string');
 });
@@ -203,6 +205,82 @@ test('skill descriptions: nothing to estimate without sizes, sessions or idle sk
   assert.equal(skills(IMPACT, snap).detail.skills.find((s) => s.name === 'idle-skill').descriptionChars, 402);
 });
 
+// ------------------------------------------------------------------------------------------
+// Usage that was not measured
+// ------------------------------------------------------------------------------------------
+
+test('a name whose use was not measured gets no estimate and no "never called" row', () => {
+  const f = factorsOf();
+  // rtk is installed and the project has a graph, so only the skill estimate can be made.
+  const est = (impact) => estimate({ impact, clis: CLIS(true), snapshot: SNAPSHOT(), discover: DISCOVER(true), factors: f });
+  const tokens = (res) => res.estimates.map((e) => [e.id, e.tokens]);
+
+  // session-impact.mjs could not establish whether big-skill and other.srv were used: it lists
+  // them as unknown and gives them a null count.
+  const partial = est({
+    ...IMPACT,
+    skillInvocations: { 'used-skill': 3, 'idle-skill': 0, 'no-size-skill': 0, 'big-skill': null },
+    mcpCalls: { 'idle-srv': 0, 'other.srv': null },
+    unusedContext: { skillsNeverInvoked: ['idle-skill', 'no-size-skill'], skillsUnknown: ['big-skill'], mcpServersNeverCalled: ['idle-srv'], mcpServersUnknown: ['other.srv'] },
+  });
+  // idle-skill alone: 402 chars / 4 = 101 tokens x 4 sessions = 404. big-skill's 1536 are not added.
+  assert.deepEqual(tokens(partial), [['unused-skill-descriptions', 404]]);
+  assert.deepEqual(partial.detail.skills.map((s) => s.name), ['idle-skill']);
+  assert.deepEqual(partial.unmeasured.map((u) => u.tool), ['idle-srv']);
+  assert.deepEqual(partial.unknownUsage, { skills: ['big-skill'], mcpServers: ['other.srv'] });
+
+  // The count map alone is enough: a name listed as never used whose count is null was not
+  // measured, and one whose count is above 0 was used.
+  const mixed = est({
+    ...IMPACT,
+    skillInvocations: { 'idle-skill': null, 'big-skill': 2, 'no-size-skill': 0 },
+    mcpCalls: { 'idle-srv': 5, 'other.srv': null },
+  });
+  assert.deepEqual(tokens(mixed), []);
+  assert.deepEqual(mixed.detail.skillsWithoutSize, ['no-size-skill']);
+  assert.deepEqual(mixed.unmeasured, []);
+  assert.deepEqual(mixed.unknownUsage, { skills: ['idle-skill'], mcpServers: ['other.srv'] });
+
+  // Nothing was measured as unused: no estimate, no row, and the reason says why.
+  const none = est({
+    ...IMPACT,
+    unusedContext: { skillsNeverInvoked: [], skillsUnknown: ['idle-skill', 'big-skill'], mcpServersNeverCalled: [], mcpServersUnknown: ['idle-srv'] },
+  });
+  assert.deepEqual(tokens(none), []);
+  assert.deepEqual(none.unmeasured, []);
+  assert.deepEqual(none.unknownUsage, { skills: ['big-skill', 'idle-skill'], mcpServers: ['idle-srv'] });
+  assert.deepEqual(none.skipped.filter((s) => s.estimate.startsWith('unused-')), [
+    { estimate: 'unused-skill-descriptions', reason: 'whether 2 configured skill(s) were invoked could not be measured, and no other skill was measured as never invoked' },
+    { estimate: 'unused-mcp-servers', reason: 'whether 1 configured MCP server(s) were called could not be measured' },
+  ]);
+
+  // An impact file without count maps or unknown lists is read as before.
+  assert.deepEqual(tokens(est(IMPACT)), [['unused-skill-descriptions', 1940]]);
+  assert.deepEqual(est(IMPACT).unknownUsage, { skills: [], mcpServers: [] });
+});
+
+test('which names are settled as unused', () => {
+  // a: listed and counted 0. b: listed as unknown too. c: listed, count null. d: listed, but used
+  // twice. e: only in the count map, with null.
+  assert.deepEqual(settledUnused(['a', 'b', 'c', 'd'], ['b'], { a: 0, c: null, d: 2, e: null, f: 7 }), { never: ['a'], unknown: ['b', 'c', 'e'] });
+  assert.deepEqual(settledUnused(['a', 'b'], undefined, undefined), { never: ['a', 'b'], unknown: [] });
+  assert.deepEqual(settledUnused(undefined, ['x'], null), { never: [], unknown: ['x'] });
+  assert.deepEqual(settledUnused(['a', 7, null], [9], []), { never: ['a'], unknown: [] });
+});
+
+test('shell output that could not be measured is not reported as none', () => {
+  const f = factorsOf();
+  const reason = (impact) => estimate({ impact, clis: CLIS(false), snapshot: SNAPSHOT(), discover: DISCOVER(), factors: f }).skipped.find((s) => s.estimate === 'rtk-output').reason;
+  const empty = { ...IMPACT, toolOutput: { shellResultChars: 0, shellResultTokensApprox: 0 } };
+  assert.equal(reason(empty), 'no shell output was measured in the window');
+  assert.equal(reason({ ...empty, coverage: { claude: { toolCalls: 'complete' }, codex: { toolCalls: 'complete' }, method: 'x' } }), 'no shell output was measured in the window');
+  assert.equal(reason({ ...empty, coverage: { claude: { toolCalls: 'complete' }, codex: { toolCalls: 'unknown' }, method: 'x' } }), 'shell output could not be measured: the tool calls of codex were not fully read');
+  assert.equal(reason({ ...empty, coverage: { claude: { toolCalls: 'unknown' }, codex: { toolCalls: 'unknown' } } }), 'shell output could not be measured: the tool calls of claude and codex were not fully read');
+  // What was measured is still estimated: it is a lower bound of the output.
+  const some = estimate({ impact: { ...IMPACT, coverage: { codex: { toolCalls: 'unknown' } } }, clis: CLIS(false), snapshot: SNAPSHOT(), discover: DISCOVER(), factors: f });
+  assert.equal(some.estimates.find((e) => e.id === 'rtk-output').tokens, 30);
+});
+
 test('a factor that does not say where it comes from is not used', () => {
   const strip = (id, patch) => ({ ...CATALOG, estimates: CATALOG.estimates.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
   const tools = (catalog) => estimate({ impact: IMPACT, clis: CLIS(false), snapshot: SNAPSHOT(), discover: DISCOVER(), factors: factorsOf(catalog) }).estimates.map((e) => e.tool || null);
@@ -231,7 +309,10 @@ test('names that are not plain names are masked, and no path is printed', () => 
   const MARKER = 'ZQXMARK7731';
   const impact = put('impact-odd.json', {
     ...IMPACT,
-    unusedContext: { skillsNeverInvoked: [`bad name ${MARKER}`, 'idle-skill'], mcpServersNeverCalled: [`srv ${MARKER}`] },
+    unusedContext: {
+      skillsNeverInvoked: [`bad name ${MARKER}`, 'idle-skill'], mcpServersNeverCalled: [`srv ${MARKER}`],
+      skillsUnknown: [`unknown skill ${MARKER}`], mcpServersUnknown: [`unknown srv ${MARKER}`],
+    },
     toolOutput: { shellResultTokensApprox: 149, byHead: [{ head: `secret ${MARKER}`, calls: 1, chars: 4 }] },
   });
   const r = run(['--impact', impact, '--clis', files.clisNo, '--snapshot', files.snapshot, '--discover', files.discover, '--catalog', files.catalog]);
@@ -240,6 +321,7 @@ test('names that are not plain names are masked, and no path is printed', () => 
   assert.ok(!r.stdout.includes(dir) && !r.stdout.includes(dir.replace(/\\/g, '/')), 'input path leaked');
   assert.deepEqual(r.json.detail.skillsWithoutSize, ['<other>']);
   assert.deepEqual(r.json.unmeasured.map((u) => u.tool), ['<other>']);
+  assert.deepEqual(r.json.unknownUsage, { skills: ['<other>'], mcpServers: ['<other>'] });
 });
 
 test('the shipped catalog is sourced and dated, and its sentences reach the output', () => {

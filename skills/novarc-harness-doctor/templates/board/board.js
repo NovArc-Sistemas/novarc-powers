@@ -5,13 +5,17 @@
 //   #/overview   #/h/<harnessId>[/explorer]   #/h/<harnessId>/diagnosis[?item=<id>]   #/h/<harnessId>/impact
 //   #/h/<harnessId>/file/<fileId>[?at=<itemId>.<change>]   #/h/<harnessId>/view/<name>
 //   #/decide   #/decide/<target>   #/decide/summary
+// The route the page is on is remembered per run and reopened when the URL names none: a reload
+// inside a frame (a board published as an Artifact) loses the hash.
 
 var MAX_TABS = 6;
 var $nav = document.getElementById('nav');
 var $view = document.getElementById('view');
 var $tray = document.getElementById('tray');
-var route = parseRoute(window.location.hash);
-var currentHash = window.location.hash;
+var routeStore = safeStore(function () { return window.localStorage; });
+var START_HASH = routeToRestore(window.location.hash, routeStore.get(routeKey(RUN_ID)), knownRoutes()) || window.location.hash;
+var route = parseRoute(START_HASH);
+var currentHash = START_HASH;
 var channelKind = 'detecting';
 var wantFocus = null;
 var pendingRedraw = false;
@@ -204,10 +208,27 @@ function reveal(node, block) {
   return true;
 }
 
+/** What a remembered route may point at in this state (routeExists, in the first fragment). */
+function knownRoutes() {
+  var known = { harnesses: {}, files: {}, views: {}, targets: {} };
+  for (var hid in HARNESS) known.harnesses[hid] = true;
+  for (var fid in FILE) known.files[fid] = FILE[fid].harness;
+  for (var name in VIEWS) known.views[name] = true;
+  QUEUE.forEach(function (e) { known.targets[e.id] = true; });
+  return known;
+}
+
+/** Keeps the route for the next load. Storage may be missing or refuse: nothing depends on it. */
+function rememberRoute(hash) {
+  var h = String(hash || '').slice(0, 2) === '#/' ? String(hash) : R.overview();
+  if (h.length <= ROUTE_MAX) routeStore.set(routeKey(RUN_ID), h);
+}
+
 function onRoute(hash, initial) {
   var prev = route;
   route = parseRoute(hash);
   currentHash = hash;
+  rememberRoute(hash);
   var sameHarness = !initial && prev.page === 'harness' && route.page === 'harness' && prev.harness === route.harness;
   render({ keepScroll: sameHarness });
   if (route.page === 'harness' && route.q.at && reveal(document.getElementById('hunk-' + route.q.at), 'center')) return;
@@ -243,7 +264,9 @@ function navigate(hash) {
 // --- deciding -------------------------------------------------------------------------------
 
 function decide(target, action, note, exclude) {
-  var d = makeDecision(RUN_ID, target, action, note, exclude, newId(), new Date().toISOString());
+  // The decision carries the revision of what it answers, so it is never applied to a proposal
+  // that changed after this page was drawn.
+  var d = makeDecision(RUN_ID, target, action, note, exclude, newId(), new Date().toISOString(), revOf(ST, target));
   localDecisions = localDecisions.filter(function (x) { return x.target !== target; }).concat([d]);
   freshIds[d.id] = true;
   sendState[d.id] = channelKind === 'file' ? 'paste' : 'sending';
@@ -320,5 +343,5 @@ append(document.getElementById('foot'), [
   el('span', { cls: 'made' }, el('span', { cls: 'glyph' }),
     /^https:\/\//.test(String(BOOT.home || '')) ? el('a', { href: BOOT.home, target: '_blank', rel: 'noopener noreferrer', text: T.madeWith }) : T.madeWith),
 ]);
-onRoute(window.location.hash, true);
+onRoute(START_HASH, true);
 channel.start();

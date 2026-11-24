@@ -1,15 +1,20 @@
 // Turns what scan.mjs found into the element views and the layer list of the state schema.
 // Pure: it reads nothing from disk. Runs after the file list has its ids.
+// What it writes for a person to read (layer names and notes, hook notes) is worded through
+// `ctx.t`, the translator of the language the snapshot was asked for (strings.mjs).
 import { createHash } from 'node:crypto';
 import { approxTokens } from '../common.mjs';
 import { normalizeMcpName } from '../transcripts.mjs';
 import { inline, maskLine, scrubHome } from './mask.mjs';
+import { hookSource } from './hookcode.mjs';
+import { translator } from './strings.mjs';
 
 // Which agent hook events can stop their action, and through what. From the Claude Code hooks
 // reference, sections "Exit code 2 behavior per event" and "Decision control"
 // (https://code.claude.com/docs/en/hooks, read on 2026-11-23). Re-read it before changing a row.
-//   exit: the exit status that stops the action (2 on most events)
-//   json: the decision a hook prints on stdout that stops it
+//   exit:   the exit status that stops the action (2 on most events)
+//   json:   the decision a hook prints on stdout that stops it
+//   fields: the names of the fields that decision is written in
 const EXIT_2 = /\bexit\s+2\b|exit\(2\)|exitCode\s*=\s*2\b/i;
 const EXIT_NON_ZERO = /\bexit\s+[1-9]\d*\b|exit\([1-9]\d*\)|exitCode\s*=\s*[1-9]/i;
 // `name: value` as JSON, jq, JavaScript or Python write it, quotes escaped or not.
@@ -18,27 +23,40 @@ const either = (...res) => new RegExp(res.map((r) => r.source).join('|'), 'i');
 const DECISION_BLOCK = field('decision', 'block');
 const PERMISSION_DENY = field('permissionDecision', 'deny|ask');
 const CONTINUE_FALSE = field('continue', 'false');
-const TOP_LEVEL = { exit: EXIT_2, json: DECISION_BLOCK };
+const TOP_LEVEL = { exit: EXIT_2, json: DECISION_BLOCK, fields: 'decision' };
 const BLOCKING_EVENTS = {
   // deny or ask inside hookSpecificOutput; the deprecated top-level `decision: "block"` still maps
   // to deny. `continue: false` stops Claude afterwards but does not block the tool call.
-  PreToolUse: { exit: EXIT_2, json: either(PERMISSION_DENY, DECISION_BLOCK) },
+  PreToolUse: { exit: EXIT_2, json: either(PERMISSION_DENY, DECISION_BLOCK), fields: 'permissionDecision|decision' },
   // Exit status 2 is not read as a decision here: the hook denies with decision.behavior "deny".
-  PermissionRequest: { exit: null, json: field('behavior', 'deny') },
+  PermissionRequest: { exit: null, json: field('behavior', 'deny'), fields: 'behavior' },
   // `continue: false` makes Claude stop processing, so the prompt goes nowhere.
-  UserPromptSubmit: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE) },
-  UserPromptExpansion: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE) },
+  UserPromptSubmit: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE), fields: 'decision|continue' },
+  UserPromptExpansion: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE), fields: 'decision|continue' },
   // Blocking these keeps Claude, the subagent or the teammate working. `continue: false` does the
   // opposite (the turn ends) or is ignored, so it is no sign of blocking.
   Stop: TOP_LEVEL, SubagentStop: TOP_LEVEL, TeammateIdle: TOP_LEVEL, TaskCreated: TOP_LEVEL, TaskCompleted: TOP_LEVEL,
   ConfigChange: TOP_LEVEL, PreCompact: TOP_LEVEL,
-  PostToolBatch: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE) },
-  PreModelSwitch: { exit: EXIT_2, json: either(PERMISSION_DENY, DECISION_BLOCK) },
-  Elicitation: { exit: EXIT_2, json: either(field('action', 'decline|cancel'), DECISION_BLOCK) },
-  ElicitationResult: { exit: EXIT_2, json: either(field('action', 'decline|cancel'), DECISION_BLOCK) },
+  PostToolBatch: { exit: EXIT_2, json: either(DECISION_BLOCK, CONTINUE_FALSE), fields: 'decision|continue' },
+  PreModelSwitch: { exit: EXIT_2, json: either(PERMISSION_DENY, DECISION_BLOCK), fields: 'permissionDecision|decision' },
+  Elicitation: { exit: EXIT_2, json: either(field('action', 'decline|cancel'), DECISION_BLOCK), fields: 'action|decision' },
+  ElicitationResult: { exit: EXIT_2, json: either(field('action', 'decline|cancel'), DECISION_BLOCK), fields: 'action|decision' },
   // Any non-zero exit status makes the worktree operation fail; JSON is not a decision here.
-  WorktreeCreate: { exit: EXIT_NON_ZERO, json: null }, WorktreeRemove: { exit: EXIT_NON_ZERO, json: null },
+  WorktreeCreate: { exit: EXIT_NON_ZERO, json: null, fields: null }, WorktreeRemove: { exit: EXIT_NON_ZERO, json: null, fields: null },
 };
+// How the evidence is read (lib/snapshot/hookcode.mjs splits the source): a decision is looked
+// for in everything but the comments, because a hook prints it from a string; an exit status only
+// in the code, because `echo "use exit 2 to block"` exits with nothing. The two patterns below
+// are the cases where the code does block or might, but with a value the text does not show:
+// an exit status that is not a number written there (`exit $rc`, `process.exit(code)`,
+// `sys.exit(1 if bad else 0)`, `raise SystemExit(rc)`, `exec other-program`) ...
+const COMPUTED_EXIT = /\bexit\s+(?:\$|["'`])|(?:\b|System)exit\s*\(\s*(?!\d+\s*\)|["'`)])|exitCode\s*=\s*(?!\d)[^\s;]|(?:^|[\s;&|])exec\s+(?![-<>\d])/im;
+// ... and a decision field whose value is not a word written there (`permissionDecision: verdict`,
+// `"decision": "$d"`, the shorthand `{ decision }`).
+const computedField = (fields) => new RegExp(
+  `(?<![A-Za-z0-9_])(?:${fields})\\\\?["']?\\s*[:=](?![=>])\\s*(?!\\\\?["'\`][A-Za-z_-]*\\\\?["'\`]|[{[]|(?:true|false|null)\\b|\\d)\\S|[{,]\\s*(?:${fields})\\s*[,}]`, 'i');
+const COMPUTED_FIELD = {};
+for (const r of Object.values(BLOCKING_EVENTS)) if (r.fields && !COMPUTED_FIELD[r.fields]) COMPUTED_FIELD[r.fields] = computedField(r.fields);
 // Events the reference lists with "Can block? No": the action already happened or cannot be
 // prevented. (A PostToolUse hook can still stop Claude with `continue: false`; the tool has run.)
 // StatusLine is this script's own name for the statusLine command, which decides nothing.
@@ -70,10 +88,13 @@ function inlineIsTransparent(command) {
 }
 
 /**
- * Whether a hook can stop the action it is attached to. true / false only when the text that
- * could be read settles it; null otherwise: a program or script that could not be read, a prompt,
- * agent, HTTP or MCP tool hook (their decision is not in a file), an event the table above does
- * not list, a CI job (its weight depends on branch protection).
+ * Whether a hook can stop the action it is attached to: true or false only when the code that
+ * could be read shows it, null (unknown) otherwise. Unknown is: a program or script that could
+ * not be read, a prompt, agent, HTTP or MCP tool hook (their decision is not in a file), an event
+ * the table above does not list, a CI job (its weight depends on branch protection), and a hook
+ * whose code does not settle it: the exit status or the decision is computed at run time, is
+ * written only inside a string literal, or sits in source the scanner could not follow.
+ * A comment is never evidence. Callers must treat null as "could not tell", never as true or false.
  */
 export function hookBlocking(h) {
   if (h.source === 'git') return GIT_BLOCKING.has(h.event);
@@ -84,14 +105,21 @@ export function hookBlocking(h) {
   if (!rule) return null;
   if (h.onFailure === 'block' && ON_FAILURE_TYPES.has(h.type) && !ON_FAILURE_IGNORED.has(h.event)) return true;
   if (h.type !== 'command' || !h.command) return null;
-  const read = typeof h.scriptText === 'string';
-  const text = `${h.command}\n${read ? h.scriptText : ''}`;
-  if (rule.json && rule.json.test(text)) return true;
-  if (rule.exit && rule.exit.test(text)) return !FORCED_SUCCESS_RE.test(h.command);
+  const src = hookSource(h);
+  if (rule.json && rule.json.test(src.text)) return src.ok ? true : null;
+  const forced = FORCED_SUCCESS_RE.test(h.command);
+  const computed = !!rule.fields && COMPUTED_FIELD[rule.fields].test(src.text);
+  if (rule.exit && rule.exit.test(src.code)) {
+    if (!forced) return src.ok ? true : null;
+    // The status is thrown away: only a decision the hook still prints could block.
+    return computed ? null : false;
+  }
   // Where any failure of the hook stops the action, a script without an explicit exit settles nothing.
   if (rule.exit === EXIT_NON_ZERO) return null;
-  // No sign of blocking is an answer only when everything the hook runs was read.
-  if (read) return false;
+  // Nothing in the code blocks. That is an answer only when the text leaves nothing open ...
+  if (computed || (rule.exit && !forced && (rule.exit.test(src.text) || COMPUTED_EXIT.test(src.code)))) return null;
+  // ... and when everything the hook runs was read.
+  if (src.read) return false;
   return !h.outside && inlineIsTransparent(h.command) ? false : null;
 }
 
@@ -175,6 +203,7 @@ export function buildElements(ctx, { impact = null, clis = null, catalog = null 
   const idOf = (abs) => ctx.files.idOf(abs);
   const displayOf = (abs) => { const e = ctx.files.get(abs); return e ? e.display : null; };
   const use = usage(impact);
+  const t = ctx.t || translator('en');
   const el = {};
 
   el.permissions = ctx.permissions.map((p) => {
@@ -194,9 +223,9 @@ export function buildElements(ctx, { impact = null, clis = null, catalog = null 
     o.blocking = hookBlocking(h);
     const notes = [];
     if (h.note) notes.push(h.note);
-    if (h.type && h.type !== 'command') notes.push(`${h.type} hook`);
-    if (h.async) notes.push('runs in the background');
-    if (h.outside) notes.push('runs a script outside the harness folders');
+    if (h.type && h.type !== 'command') notes.push(t('hook.type', { type: h.type }));
+    if (h.async) notes.push(t('hook.background'));
+    if (h.outside) notes.push(t('hook.outside'));
     put(o, 'note', notes.join('; '));
     return o;
   });
@@ -251,7 +280,7 @@ export function buildElements(ctx, { impact = null, clis = null, catalog = null 
   return el;
 }
 
-/** What enters every session, in load order. Token figures are characters / 4. */
+/** What enters every session, in load order. Token figures are characters / 4. Names and notes are in the language of `ctx.t`. */
 export function buildLayers(ctx, harnessId) {
   const layers = [];
   const layer = (name, kind, extra = {}) => {
@@ -260,47 +289,47 @@ export function buildLayers(ctx, harnessId) {
     if (typeof l.tokens === 'number') l.basis = 'estimated';
     layers.push(l);
   };
-  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const t = ctx.t || translator('en');
 
   for (const c of ctx.chains) {
     if (c.loaded !== 'always' || !c.files.length) continue;
     const e = ctx.files.get(c.root);
     const imports = c.files.length - 1;
     const notes = [];
-    if (imports) notes.push(`includes ${plural(imports, 'imported file')}`);
-    if (c.broken) notes.push(`${plural(c.broken, 'import')} that ${c.broken === 1 ? 'does' : 'do'} not resolve`);
-    layer(e ? e.display.split('/').pop() : 'instructions', 'instructions', {
+    if (imports) notes.push(t('layer.includes', { n: imports }));
+    if (c.broken) notes.push(t('layer.broken', { n: c.broken }));
+    layer(e ? e.display.split('/').pop() : t('layer.instructions'), 'instructions', {
       file: ctx.files.idOf(c.root), path: e ? e.display : null, tokens: approxTokens(c.files.reduce((s, f) => s + f.chars, 0)), note: notes.join('; '),
     });
   }
-  if (ctx.rules.length) layer(`Rules (${plural(ctx.rules.length, 'file')} without a path scope)`, 'instructions', { tokens: approxTokens(ctx.rules.reduce((s, r) => s + r.chars, 0)) });
+  if (ctx.rules.length) layer(t('layer.rules', { n: ctx.rules.length }), 'instructions', { tokens: approxTokens(ctx.rules.reduce((s, r) => s + r.chars, 0)) });
   for (const m of ctx.memory) {
     const e = ctx.files.get(m.abs);
-    layer('Memory index', 'memory', { file: ctx.files.idOf(m.abs), path: e ? e.display : null, tokens: approxTokens(m.chars) });
+    layer(t('layer.memory'), 'memory', { file: ctx.files.idOf(m.abs), path: e ? e.display : null, tokens: approxTokens(m.chars) });
   }
   const style = ctx.outputStyle;
   if (style) {
-    layer(`Output style ${trimTo(style.name, 60)}`, 'other', { file: ctx.files.idOf(style.abs), path: style.entry.display, tokens: approxTokens(style.chars) });
+    layer(t('layer.outputStyle', { name: trimTo(style.name, 60) }), 'other', { file: ctx.files.idOf(style.abs), path: style.entry.display, tokens: approxTokens(style.chars) });
   }
   if (ctx.skills.length) {
     const fromPlugins = ctx.skills.filter((s) => s.level === 'plugin').length;
     const chars = ctx.skills.reduce((s, k) => s + k.name.length + k.description.length, 0);
-    layer(`Skill descriptions (${plural(ctx.skills.length, 'skill')})`, 'skills', { tokens: approxTokens(chars), note: fromPlugins ? `${fromPlugins} from plugins` : '' });
+    layer(t('layer.skills', { n: ctx.skills.length }), 'skills', { tokens: approxTokens(chars), note: fromPlugins ? t('layer.skillsFromPlugins', { n: fromPlugins }) : '' });
   }
   if (ctx.agents.length) {
     const chars = ctx.agents.reduce((s, a) => s + a.name.length + a.description.length, 0);
-    layer(`Agent definitions (${plural(ctx.agents.length, 'agent')})`, 'other', { tokens: approxTokens(chars), note: 'Name and description of each agent are listed in every session; the prompt loads when the agent runs.' });
+    layer(t('layer.agents', { n: ctx.agents.length }), 'other', { tokens: approxTokens(chars), note: t('layer.agentsNote') });
   }
-  if (ctx.mcp.length) layer(`MCP servers (${ctx.mcp.length})`, 'mcp', { note: 'Each server adds its tool definitions to the session; their size is not measured here.' });
+  if (ctx.mcp.length) layer(t('layer.mcp', { n: ctx.mcp.length }), 'mcp', { note: t('layer.mcpNote') });
   const on = ctx.plugins.filter((p) => p.enabled === true).length;
   const unknown = ctx.plugins.filter((p) => typeof p.enabled !== 'boolean').length;
   if (on || unknown) {
     const counted = ctx.skills.some((s) => s.level === 'plugin') || ctx.agents.some((a) => a.level === 'plugin');
-    const notes = [counted ? 'Their skills and agents are counted in the layers above.' : 'What each plugin adds is not measured here.'];
-    if (unknown) notes.push(`${plural(unknown, 'plugin')} listed without an on/off state`);
-    layer(`Plugins (${on} enabled)`, 'plugins', { note: notes.join(' ') });
+    const notes = [t(counted ? 'layer.pluginsCounted' : 'layer.pluginsUnmeasured')];
+    if (unknown) notes.push(t('layer.pluginsNoState', { n: unknown }));
+    layer(t('layer.plugins', { n: on }), 'plugins', { note: notes.join(' ') });
   }
   const starts = ctx.hooks.filter((h) => h.event === 'SessionStart');
-  if (starts.length) layer(`SessionStart hooks (${starts.length})`, 'hooks', { note: 'What these hooks print is added to the context; its size is not measured here.' });
+  if (starts.length) layer(t('layer.sessionStart', { n: starts.length }), 'hooks', { note: t('layer.sessionStartNote') });
   return layers;
 }

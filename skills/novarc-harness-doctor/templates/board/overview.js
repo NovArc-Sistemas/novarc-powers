@@ -179,10 +179,50 @@ function harnessTypeText(h) {
   return lbl(T.harnessKind, h.kind) + (p ? ' · ' + lbl(T.provider, p) : '');
 }
 
+/**
+ * The score an earlier review ended with and the score the harness has now, in the visual language
+ * of scoreBar: grade, bar, grade. What was gained since is the green part; what was lost, the red one.
+ */
+function thenNowBar(then, now) {
+  if (countOf(then) === null || countOf(now) === null) return null;
+  var t = Math.max(0, Math.min(100, then));
+  var n = Math.max(0, Math.min(100, now));
+  var grade = function (value, cls, word) {
+    return el('div', { cls: 'g' + (cls ? ' ' + cls : '') }, el('span', { cls: 'sr', text: word + ' ' }), Scoring.gradeFor(value), el('small', { text: fmtScore(value) }));
+  };
+  return el('div', { cls: 'score' },
+    grade(then, '', T.fu.then),
+    el('div', { cls: 'sbar', role: 'img', 'aria-label': tx(T.fu.scoreAria, { then: fmtScore(then), now: fmtScore(now) }) },
+      el('i', { cls: 'b', style: { width: Math.min(t, n) + '%' } }),
+      n > t ? el('i', { cls: 'a', style: { left: t + '%', width: (n - t) + '%' } })
+        : n < t ? el('i', { cls: 'd', style: { left: n + '%', width: (t - n) + '%' } }) : null),
+    grade(now, n > t ? 'after' : n < t ? 'down' : '', T.fu.now));
+}
+
+/**
+ * A harness that was reviewed before: the score then and now, and in one line what came of what
+ * that review expected, or when there will be enough data to tell. Null for a first review.
+ * Returns `{ node, say }`; `say` is the same in words, for the label of the row.
+ */
+function followUpRow(h) {
+  var fu = h.followUp;
+  var sum = followUpSummary(fu);
+  if (!sum) return null;
+  var score = fu.score || {};
+  var when = fu.of && dateOf(fu.of.reviewedAt) ? tx(T.fu.since, { date: fmtDate(fu.of.reviewedAt) }) : T.fu.h;
+  var line = followUpLine(sum, T, FMT);
+  return {
+    say: when + ': ' + line,
+    node: el('div', { cls: 'hfu' }, el('span', { cls: 'lbl', text: when }), thenNowBar(score.then, score.now),
+      el('span', { cls: 'hfu-t' + (sum.state === 'waiting' ? ' wait' : ''), text: line })),
+  };
+}
+
 function fleetRow(h) {
   var name = el('div', { cls: 'hname' }, el('span', { cls: 'htype', text: harnessTypeText(h) }), el('b', { text: h.name }), el('span', { cls: 'p', text: h.path }));
-  var label = tx(T.fleet.open, { name: h.name });
-  if (isEmptyHarness(h)) return el('a', { cls: 'hrow', href: R.harness(h.id), 'aria-label': label }, name, el('span', { cls: 'hempty', text: emptyText(h) }));
+  var since = followUpRow(h);
+  var label = tx(T.fleet.open, { name: h.name }) + (since ? '. ' + since.say : '');
+  if (isEmptyHarness(h)) return el('a', { cls: 'hrow', href: R.harness(h.id), 'aria-label': label }, name, el('span', { cls: 'hempty', text: emptyText(h) }), since ? since.node : null);
   var sc = scoresOf(h.id);
   var open = openItems(h.id).sort(function (a, b) { return SEV_RANK[a.severity] - SEV_RANK[b.severity]; });
   var sessions = sessionsOf(h);
@@ -199,7 +239,8 @@ function fleetRow(h) {
     scoreBar(sc),
     el('div', { cls: 'metric' }, el('b', { text: value }), el('span', { text: note })),
     el('div', { cls: 'pend' }, el('span', { cls: 'p', text: open.length ? pl(T.fleet.toDecide, open.length) : T.fleet.nothing }), open.length ? dots : null),
-    el('span', { cls: 'go', 'aria-hidden': 'true', text: '\u203a' }));
+    el('span', { cls: 'go', 'aria-hidden': 'true', text: '\u203a' }),
+    since ? since.node : null);
 }
 
 // --- groups ---------------------------------------------------------------------------------
@@ -277,6 +318,8 @@ function viewOverview() {
     [T.by.os, ST.environment.os],
     [T.by.window, pl(T.windowDays, windowDays())],
     [T.by.date, fmtDate(ST.run.lastRun || ST.run.startedAt, true)],
+    // A run started as the follow-up of an earlier one says which.
+    ST.run.followUpOf && dateOf(ST.run.followUpOf.reviewedAt) ? [T.fu.runOf, fmtDate(ST.run.followUpOf.reviewedAt)] : null,
   ]));
   out.appendChild(totalsBand());
   if (ST.harnesses.some(function (h) { return h.impact && h.impact.example; })) out.appendChild(el('p', { cls: 'example', text: T.imp.example }));

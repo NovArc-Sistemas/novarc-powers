@@ -77,6 +77,45 @@ export function agentsDirs() {
   return isDir(p) ? [{ path: p, agent: 'shared', source: 'default', realpath: realpathSafe(p) || p, aliases: [] }] : [];
 }
 
+/** What an account can be an account of: the `provider` values a run and the probes use. */
+export const ACCOUNT_PROVIDERS = ['claude-code', 'codex', 'gemini', 'opencode', 'cursor', 'copilot', 'agents', 'other'];
+/** The providers whose config dir discover.mjs and harness-checks.mjs know how to read. */
+const ACCOUNT_KIND = { 'claude-code': 'claude', codex: 'codex', agents: 'agents' };
+/** False for a provider those two scripts have no reader for: its account is listed, never read. */
+export const accountSupported = (provider) => Object.hasOwn(ACCOUNT_KIND, String(provider));
+
+/**
+ * The user-level locations a probe reads, as `{ claude, codex, agents, desktop }`.
+ * Without `account`: every account found on this machine (the functions above), which is what a
+ * probe run by hand has always read. With `account` (`{ provider, configDir }`): that one config
+ * dir and nothing that belongs to another account, the shared `~/.agents` folder and the desktop
+ * app included, since each of them is somebody else's harness. A provider the probes have no
+ * reader for gets no location at all.
+ */
+export function userLocations(account = null) {
+  if (!account) return { claude: claudeConfigDirs(), codex: codexDirs(), agents: agentsDirs(), desktop: desktopConfigFiles() };
+  const out = { claude: [], codex: [], agents: [], desktop: [] };
+  const kind = ACCOUNT_KIND[account.provider];
+  const dir = normalizeInputPath(account.configDir);
+  if (kind && isDir(dir)) out[kind] = [{ path: dir, agent: kind === 'agents' ? 'shared' : kind, source: 'argument', realpath: realpathSafe(dir) || dir, aliases: [] }];
+  return out;
+}
+
+/**
+ * The account a probe was asked about on its command line: `--provider <p> --config-dir <dir>`,
+ * both or neither. Returns `{ account }` (null when the flags are absent) or `{ error }`.
+ */
+export function accountFromArgs(args) {
+  const provider = args.provider;
+  const dir = args['config-dir'];
+  if (provider === undefined && dir === undefined) return { account: null };
+  if (typeof dir !== 'string' || typeof provider !== 'string') return { error: '--provider and --config-dir go together: one account is one config dir of one provider' };
+  if (!ACCOUNT_PROVIDERS.includes(provider)) return { error: `--provider must be one of ${ACCOUNT_PROVIDERS.join(', ')}` };
+  const configDir = normalizeInputPath(dir);
+  if (!isDir(configDir)) return { error: '--config-dir is not a directory' };
+  return { account: { provider, configDir, supported: accountSupported(provider) } };
+}
+
 /** Claude desktop app config file candidates for every OS; only existing ones are returned. */
 export function desktopConfigFiles() {
   const h = home();

@@ -36,6 +36,12 @@ then just ask "review my harnesses" in any session. It needs Node 20+ and git.
 4. **Show the board**, with one tab per harness.
 5. **Apply what you approve**, with a backup, verification after the change and a record of
    what could not be verified. `run.mjs undo` reverts one item or the whole review.
+6. **Record, and come back to check.** On close, each harness gets a record of the review: what
+   was decided, what changed, what each change promised to save, and the measurements of the
+   day. Ask for the review again a month later: it measures the period since, says per
+   measurement whether the expected effect was confirmed, checks on disk that each fix is still
+   in place, shows what came back, and reviews the harness again. What you declined is not
+   proposed again without a reason.
 
 ## The board
 
@@ -97,6 +103,7 @@ files (secrets masked); it goes to claude.ai only if you ask.
 ```text
 ~/.novarc-powers/novarc-harness-doctor/
 ├── runs/<id>/     # one folder per review: measurements, findings, decisions, backups, board
+├── history/       # one record per harness and review, which the next review compares against
 ├── sync/          # record and check of linked accounts
 └── latest.json
 ```

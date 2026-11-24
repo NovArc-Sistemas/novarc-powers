@@ -2,19 +2,19 @@
 // itself (findings + status overlay + claim files), never state.json, so they are right even
 // when the board is behind.
 import fs from 'node:fs';
-import { readJson } from './store.mjs';
+import { readJson, nowMs } from './store.mjs';
 import { loadFindings, loadItems, loadStatus, loadUnits, inputsFingerprint } from './model.mjs';
 import { claimable, roundApplies, ROUNDS, DEFAULT_TTL_MINUTES } from './units.mjs';
 import { inboxCount, PRIMARY_TARGET } from './decisions.mjs';
 import { SAFE_CLASSES } from './apply.mjs';
 
-function gather(ctx, now = Date.now()) {
+function gather(ctx, now = nowMs()) {
   const { paths, run } = ctx;
   const status = loadStatus(paths);
   const findings = loadFindings(paths, run);
-  const { items } = loadItems(paths, run, findings, status);
+  const { items, outdated } = loadItems(paths, run, findings, status);
   const units = loadUnits(paths, run, items, now);
-  return { status, findings, items, units, inbox: inboxCount(paths, status, paths.runId) };
+  return { status, findings, items, outdated, units, inbox: inboxCount(paths, status, paths.runId) };
 }
 
 function unitRow(u) {
@@ -69,7 +69,7 @@ export function statusReport(ctx) {
 /** `run.mjs next`. */
 export function next(ctx) {
   const { paths, run } = ctx;
-  const now = Date.now();
+  const now = nowMs();
   const g = gather(ctx, now);
   const review = g.units.filter((u) => u.kind !== 'apply');
   const apply = g.units.filter((u) => u.kind === 'apply');
@@ -92,8 +92,11 @@ export function next(ctx) {
   const reviewOpen = review.some((u) => u.status !== 'done');
   const autoApplicable = {};
   if (run.mode === 'doctor' && !reviewOpen) {
-    for (const i of g.items) if (i.status === 'open' && SAFE_CLASSES.includes(i.class)) (autoApplicable[i.harness] = autoApplicable[i.harness] || []).push(i.id);
+    // Not an item the user already decided in another version: that one waits for them.
+    for (const i of g.items) if (i.status === 'open' && SAFE_CLASSES.includes(i.class) && !g.outdated.has(i.id)) (autoApplicable[i.harness] = autoApplicable[i.harness] || []).push(i.id);
   }
+  // Open again because the proposal changed after the user decided: they decide again.
+  const decideAgain = g.items.filter((i) => i.status === 'open' && g.outdated.has(i.id)).map((i) => i.id);
 
   const probed = fs.existsSync(paths.probeSummary);
   const stamp = readJson(paths.buildStamp);
@@ -127,6 +130,7 @@ export function next(ctx) {
     inProgress,
     ...(stuck.length ? { stuck } : {}),
     ...(failed.length ? { failed } : {}),
+    ...(decideAgain.length ? { decideAgain } : {}),
     questions,
     inbox: g.inbox,
     boardStale,

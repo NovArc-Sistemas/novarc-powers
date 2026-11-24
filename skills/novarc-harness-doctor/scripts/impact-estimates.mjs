@@ -13,6 +13,12 @@
 //   - Descriptions of skills never invoked: description size from the snapshot, per session.
 //   - MCP servers never called are listed by name under `unmeasured`, without a token number.
 //
+// "Never used" is taken only from what session-impact.mjs measured. A skill or server it lists as
+// unknown (`unusedContext.skillsUnknown` / `mcpServersUnknown`), or whose count in
+// `skillInvocations` / `mcpCalls` is null, was not measured: it gets no estimate and no "never
+// called" row, and is named under `unknownUsage` instead. A name with a count above 0 is not
+// unused, whatever list it sits in.
+//
 // `--clis` is the output of probe-clis.mjs, `--snapshot` of snapshot-harness.mjs (code project or
 // not, skill description sizes, and a `signals` list when it has one) and `--discover` of
 // discover.mjs (its project part says whether graphify-out/ exists). What the snapshot does not
@@ -86,6 +92,33 @@ export function snapshotFacts(snapshot) {
   return { kind, isCode, hasGraph, skills };
 }
 
+/**
+ * Split the names a measurement lists as never used into the ones it really measured as unused
+ * and the ones whose use is unknown. `counts` is the measurement's `{ name: count }` map when it
+ * has one: null there means "not measured", a number above 0 means the name was used.
+ */
+export function settledUnused(list, unknownList, counts) {
+  const names = (x) => (Array.isArray(x) ? x : []).filter((n) => typeof n === 'string');
+  const map = obj(counts);
+  const unknown = new Set(names(unknownList));
+  const never = [];
+  for (const n of names(list)) {
+    if (unknown.has(n)) continue;
+    const c = Object.hasOwn(map, n) ? map[n] : 0; // no map entry: the list is all the measurement says
+    if (c === null) unknown.add(n);
+    else if (!count(c)) never.push(n);
+  }
+  // A null count is unknown even when the name sits in neither list.
+  for (const [n, c] of Object.entries(map)) if (c === null) unknown.add(n);
+  return { never, unknown: [...unknown].sort() };
+}
+
+/** The sources whose tool calls the measurement could not read in full (`coverage.<source>.toolCalls` is `unknown`). */
+function blindSources(impact) {
+  const cov = obj(obj(impact).coverage);
+  return Object.keys(cov).filter((s) => obj(cov[s]).toolCalls === 'unknown').sort();
+}
+
 /** Facts from the snapshot, completed by what only the discover file says. `null` when neither was given. */
 function projectFacts(snapshot, discover) {
   if (!snapshot && !discover) return null;
@@ -104,6 +137,7 @@ export function estimate({ impact, clis = null, snapshot = null, discover = null
   const skip = (id, reason) => skipped.push({ estimate: id, reason });
   const weightedView = typeof imp.weightedTotal === 'number';
   const facts = projectFacts(snapshot, discover);
+  const blind = blindSources(imp);
 
   // 1. Unfiltered command output.
   {
@@ -116,6 +150,7 @@ export function estimate({ impact, clis = null, snapshot = null, discover = null
     else if (!tools) skip(id, 'no CLI probe given, so it is not known whether the filter is installed');
     else if (!probe || typeof probe.installed !== 'boolean') skip(id, 'the CLI probe has no answer for the filter');
     else if (probe.installed) skip(id, 'the filter is installed');
+    else if (!base && blind.length) skip(id, `shell output could not be measured: the tool calls of ${blind.join(' and ')} were not fully read`);
     else if (!base) skip(id, 'no shell output was measured in the window');
     else {
       const tokens = Math.round(base * f.factor);
@@ -148,8 +183,12 @@ export function estimate({ impact, clis = null, snapshot = null, discover = null
   }
 
   // 3. Descriptions of skills never invoked, and MCP servers never called.
+  // Only what the measurement established: a name it could not measure is unknown, never unused.
   const unused = obj(imp.unusedContext);
-  const never = (Array.isArray(unused.skillsNeverInvoked) ? unused.skillsNeverInvoked : []).filter((n) => typeof n === 'string');
+  const skillUse = settledUnused(unused.skillsNeverInvoked, unused.skillsUnknown, imp.skillInvocations);
+  const mcpUse = settledUnused(unused.mcpServersNeverCalled, unused.mcpServersUnknown, imp.mcpCalls);
+  const unknownUsage = { skills: skillUse.unknown.map((n) => safeName(n)), mcpServers: mcpUse.unknown.map((n) => safeName(n)) };
+  const never = skillUse.never;
   const sessions = count(imp.sessions);
   const detail = { sessions, skills: [], skillsWithoutSize: [] };
   {
@@ -157,6 +196,7 @@ export function estimate({ impact, clis = null, snapshot = null, discover = null
     const f = factors.byId[id];
     const cap = f && count(f.maxDescriptionChars) ? f.maxDescriptionChars : Infinity;
     if (!f) skip(id, 'no confirmed factor in the catalog');
+    else if (!never.length && skillUse.unknown.length) skip(id, `whether ${skillUse.unknown.length} configured skill(s) were invoked could not be measured, and no other skill was measured as never invoked`);
     else if (!never.length) skip(id, 'every configured skill was invoked in the window, or none is configured');
     else if (!facts || !facts.skills) skip(id, 'no snapshot with a skill inventory given, so description sizes are unknown');
     else if (!sessions) skip(id, 'no session in the window');
@@ -184,11 +224,11 @@ export function estimate({ impact, clis = null, snapshot = null, discover = null
   {
     const id = 'unused-mcp-servers';
     const f = factors.byId[id];
-    const names = (Array.isArray(unused.mcpServersNeverCalled) ? unused.mcpServersNeverCalled : []).filter((n) => typeof n === 'string');
-    if (f) for (const n of names) unmeasured.push({ id, label: texts(f, lang).label, tool: safeName(n), source: texts(f, lang).source });
+    if (f) for (const n of mcpUse.never) unmeasured.push({ id, label: texts(f, lang).label, tool: safeName(n), source: texts(f, lang).source });
+    if (f && !mcpUse.never.length && mcpUse.unknown.length) skip(id, `whether ${mcpUse.unknown.length} configured MCP server(s) were called could not be measured`);
   }
 
-  return { estimates, unmeasured, detail, skipped };
+  return { estimates, unmeasured, unknownUsage, detail, skipped };
 }
 
 if (isMain(import.meta.url)) {

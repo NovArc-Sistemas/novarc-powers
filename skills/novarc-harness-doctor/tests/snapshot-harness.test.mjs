@@ -20,7 +20,9 @@ const ENV_VALUE = `plain/val+${'k3'.repeat(8)}=`; // has `/`, `+`, `=`: not the 
 const KEY_BODY = ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASC', 'BKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj'].map((s) => s.split('').reverse().join(''));
 const KEY_BEGIN = `-----BEGIN RSA ${'PRIVATE'} KEY-----`;
 const KEY_END = `-----END RSA ${'PRIVATE'} KEY-----`;
-const SECRETS = [TOKEN_GH, TOKEN_SB, TOKEN_BEARER, URL_PASSWORD, ENV_VALUE, ...KEY_BODY];
+const SHORT_PW = ['Zq7', '!kP2'].join(''); // 7 characters and no shape: only the key it sits under says it is a secret
+const TOML_LINE = `ml${'Kk4'.repeat(6)}`; // one line of a multi-line TOML string
+const SECRETS = [TOKEN_GH, TOKEN_SB, TOKEN_BEARER, URL_PASSWORD, ENV_VALUE, SHORT_PW, TOML_LINE, ...KEY_BODY];
 const MAIL = ['person', 'example.invalid'].join('@');
 const WORKER_TOML = 'model = "y"\ndescription = "Does the work."\n';
 
@@ -53,13 +55,17 @@ function buildProject(home) {
       PreToolUse: [{ matcher: 'Bash', hooks: [
         { type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/guard.mjs"' },
         { type: 'command', command: 'my-guard --strict' },
+        { type: 'command', command: 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/log.sh"' },
       ] }],
       PostToolUse: [{ matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'echo edited >> .claude/log.txt' }] }],
       Stop: [{ hooks: [{ type: 'command', command: `curl -s -H "Authorization: Bearer ${TOKEN_BEARER}" https://hooks.example.invalid/done || true` }] }],
     },
-    env: { SERVICE_SECRET: ENV_VALUE, DATABASE_URL: `postgres://app:${URL_PASSWORD}@db.example.invalid:5432/app` },
+    env: { SERVICE_SECRET: ENV_VALUE, DATABASE_URL: `postgres://app:${URL_PASSWORD}@db.example.invalid:5432/app`, DB_PASSWORD: SHORT_PW, DB_PASSWORD_FILE: '/run/secrets/db' },
+    credentials: { kind: 'basic', value: `x"${SHORT_PW}`, history: [SHORT_PW] },
     enabledPlugins: { 'alpha@market-one': true },
   }, null, 2));
+  // The comment mentions the status that blocks; the code never exits with it.
+  write(path.join(proj, '.claude', 'hooks', 'log.sh'), '#!/bin/sh\n# exit 2 would block the call; this hook only keeps a log\necho "$1" >> .claude/log.txt\n');
   write(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: [`Bash(GH_TOKEN=${TOKEN_GH} gh api *)`] } }, null, 2));
   write(path.join(proj, '.claude', 'hooks', 'guard.mjs'), '// Stops a dangerous command.\nif (process.argv.includes("--bad")) { console.error("blocked"); process.exit(2); }\n');
   write(path.join(proj, '.claude', 'skills', 'proj-skill', 'SKILL.md'), `---\nname: proj-skill\ndescription: ${'Use when the project needs its own release steps. '.repeat(9).trim()}\n---\n\n# Proj skill\n\nBody.\n`);
@@ -145,6 +151,7 @@ function buildUser(home, proj) {
     '[mcp_servers.local_one]', 'command = "npx"', '',
     '[plugins."helper@market-two"]', 'enabled = true', '',
     '[plugins."idle@market-two"]', 'enabled = false', '',
+    '[model_providers.acme]', 'name = "Acme"', 'api_key = """', TOML_LINE, `  ${SHORT_PW}`, '"""', '',
   ].join('\n'));
   write(path.join(codex, 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'shell', hooks: [{ type: 'command', command: 'echo checking' }] }] } }));
   write(path.join(codex, 'skills', 'cx-skill', 'SKILL.md'), '---\nname: cx-skill\ndescription: A Codex skill.\n---\n');
@@ -505,6 +512,18 @@ test('project: masking keeps every line where it was', () => {
   assert.equal(env.content, `# local values\nAPI_URL=…27\nDB_PASSWORD=…${URL_PASSWORD.length}\n`);
 });
 
+test('project: a secret is hidden by the key it sits under, however short and however deep', () => {
+  const settings = fileAt(fx.p.json, './.claude/settings.json');
+  const disk = fs.readFileSync(path.join(fx.proj, '.claude', 'settings.json'), 'utf8');
+  assert.equal(settings.content.split('\n').length, disk.split('\n').length);
+  const lines = settings.content.split('\n').map((l) => l.trim());
+  assert.ok(lines.includes('"DB_PASSWORD": "…7",'), 'seven characters under a password key');
+  assert.ok(lines.includes('"DB_PASSWORD_FILE": "/run/secrets/db"'), 'the name of a file is not a secret');
+  const at = lines.indexOf('"credentials": {');
+  assert.deepEqual(lines.slice(at, at + 7), ['"credentials": {', '"kind": "…5",', '"value": "…10",', '"history": [', '"…7"', ']', '},'], 'every string below a secret key, escaped quotes included');
+  assert.ok(lines.includes('"SERVICE_SECRET": "plai…27",') && lines.includes('"defaultMode": "acceptEdits"'));
+});
+
 test('project: every file has its role, language and load mode', () => {
   const got = Object.fromEntries(fx.p.json.files.map((f) => [f.path, `${f.category}/${f.loaded}/${f.lang}`]));
   const want = {
@@ -516,6 +535,7 @@ test('project: every file has its role, language and load mode', () => {
     './.claude/settings.json': 'settings/always/json',
     './.claude/settings.local.json': 'settings/always/json',
     './.claude/hooks/guard.mjs': 'script/never/javascript',
+    './.claude/hooks/log.sh': 'script/never/shell',
     './scripts/check.sh': 'script/on-demand/shell',
     './.git/hooks/pre-commit': 'gate/never/shell',
     './.github/workflows/ci.yml': 'gate/never/yaml',
@@ -585,11 +605,13 @@ test('project: hooks point at their registration and at the script they run', ()
   const settings = fileAt(fx.p.json, './.claude/settings.json');
   const guard = fileAt(fx.p.json, './.claude/hooks/guard.mjs');
   const pre = hooks.filter((h) => h.source === 'agent' && h.event === 'PreToolUse');
-  assert.equal(pre.length, 2);
+  assert.equal(pre.length, 3);
   assert.deepEqual({ ...pre[0], id: 'x' }, { id: 'x', source: 'agent', event: 'PreToolUse', matcher: 'Bash', command: 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/guard.mjs"', file: settings.id, script: guard.id, blocking: true });
   assert.equal(pre[1].command, 'my-guard --strict');
   assert.equal(pre[1].blocking, null);
   assert.ok(!('script' in pre[1]));
+  // Its script was read, and the only `exit 2` in it is a comment: it does not block.
+  assert.deepEqual([pre[2].script, pre[2].blocking], [fileAt(fx.p.json, './.claude/hooks/log.sh').id, false]);
   const post = hooks.find((h) => h.event === 'PostToolUse');
   assert.equal(post.blocking, false);
   assert.equal(post.matcher, 'Edit|Write');
@@ -822,6 +844,94 @@ test('user: layers', () => {
   assert.ok(!fx.u.json.layers.some((l) => l.path === '~/.claude/AGENTS.md'), 'a file this agent never loads is not a layer');
 });
 
+// ------------------------------------------------------------------------------------------
+// Language: what a person reads comes in the language asked for; machine fields never change
+// ------------------------------------------------------------------------------------------
+
+const AGENTS_NOTE = {
+  en: 'Name and description of each agent are listed in every session; the prompt loads when the agent runs.',
+  pt: 'O nome e a descrição de cada agente são listados em toda sessão; o prompt só é carregado quando o agente roda.',
+};
+const MCP_NOTE = {
+  en: 'Each server adds its tool definitions to the session; their size is not measured here.',
+  pt: 'Cada servidor acrescenta à sessão as definições das suas ferramentas; o tamanho delas não é medido aqui.',
+};
+const PLUGINS_NOTE = { en: 'Their skills and agents are counted in the layers above.', pt: 'As skills e os agentes deles já estão contados nas camadas acima.' };
+const START_NOTE = {
+  en: 'What these hooks print is added to the context; its size is not measured here.',
+  pt: 'O que esses hooks imprimem entra no contexto; o tamanho disso não é medido aqui.',
+};
+const texts = (out) => out.layers.map((l) => [l.name, l.note || '']);
+const notesOf = (list) => list.filter((x) => x.note).map((x) => x.note).sort();
+
+test('layers of a project in English and in Portuguese', () => {
+  assert.deepEqual(texts(fx.p.json), [
+    ['CLAUDE.md', 'includes 4 imported files; 1 import that does not resolve'],
+    ['Rules (1 file without a path scope)', ''],
+    ['Memory index', ''],
+    ['Skill descriptions (2 skills)', '1 from plugins'],
+    ['Agent definitions (2 agents)', AGENTS_NOTE.en],
+    ['MCP servers (4)', MCP_NOTE.en],
+    ['Plugins (1 enabled)', PLUGINS_NOTE.en],
+    ['SessionStart hooks (1)', START_NOTE.en],
+  ]);
+  const pt = runScript('snapshot-harness.mjs', ['--kind', 'project', '--cwd', fx.proj, '--id', 'proj-snap', '--impact', fx.impact, '--clis', fx.clis, '--lang', 'pt'], { env: fx.env });
+  assert.equal(pt.code, 0, pt.stderr);
+  assert.deepEqual(texts(pt.json), [
+    ['CLAUDE.md', 'inclui 4 arquivos importados; 1 import que não resolve'],
+    ['Regras (1 arquivo sem restrição de caminho)', ''],
+    ['Índice de memória', ''],
+    ['Descrições das skills (2 skills)', '1 vem de plugins'],
+    ['Definições dos agentes (2 agentes)', AGENTS_NOTE.pt],
+    ['Servidores MCP (4)', MCP_NOTE.pt],
+    ['Plugins (1 ativo)', PLUGINS_NOTE.pt],
+    ['Hooks de SessionStart (1)', START_NOTE.pt],
+  ]);
+  assert.deepEqual(schemaErrors(pt.json), []);
+  assertNoLeak(pt, 'project in Portuguese');
+  // The notes on elements follow the language too.
+  assert.deepEqual(notesOf(fx.p.json.elements.mcp), ['from plugin alpha', 'kept in ~/.claude.json, which is not part of the snapshot']);
+  assert.deepEqual(notesOf(pt.json.elements.mcp), ['fica em ~/.claude.json, que não faz parte do retrato', 'vem do plugin alpha']);
+  assert.deepEqual([notesOf(fx.p.json.elements.plugins), notesOf(pt.json.elements.plugins)], [['version 1.0.0'], ['versão 1.0.0']]);
+  assert.deepEqual([...new Set(notesOf(pt.json.elements.hooks))], ['workflow CI']);
+
+  // Everything a program reads is the same in both: only names and notes were reworded.
+  const machine = (out) => ({
+    harness: out.harness, files: out.files,
+    layers: out.layers.map(({ name, note, ...rest }) => rest),
+    elements: Object.fromEntries(Object.entries(out.elements).map(([k, list]) => [k, list.map(({ note, ...rest }) => rest)])),
+  });
+  assert.deepEqual(machine(pt.json), machine(fx.p.json));
+  assert.deepEqual(runScript('snapshot-harness.mjs', ['--kind', 'project', '--cwd', fx.proj, '--id', 'proj-snap', '--impact', fx.impact, '--clis', fx.clis, '--lang', 'pt-BR'], { env: fx.env }).stdout, pt.stdout, 'pt-BR is pt');
+});
+
+test('layers and notes of an account in Portuguese', () => {
+  const pt = runScript('snapshot-harness.mjs', ['--kind', 'user', '--config-dir', fx.claude, '--provider', 'claude-code', '--id', 'user-main', '--impact', fx.impact, '--lang', 'pt'], { env: fx.env });
+  assert.equal(pt.code, 0, pt.stderr);
+  assert.deepEqual(texts(pt.json), [
+    ['CLAUDE.md', fx.fileLink ? 'inclui 2 arquivos importados; 1 import que não resolve' : 'inclui 1 arquivo importado; 2 imports que não resolvem'],
+    ['Regras (1 arquivo sem restrição de caminho)', ''],
+    ['Estilo de saída Terse', ''],
+    [`Descrições das skills (${fx.dirLink ? 3 : 2} skills)`, '1 vem de plugins'],
+    ['Definições dos agentes (2 agentes)', AGENTS_NOTE.pt],
+    ['Servidores MCP (3)', MCP_NOTE.pt],
+    ['Plugins (1 ativo)', PLUGINS_NOTE.pt],
+    ['Hooks de SessionStart (2)', START_NOTE.pt],
+  ]);
+  assert.equal(pt.json.harness.name, 'Claude Code (~/.claude)', 'a product name is not translated');
+  assert.deepEqual([notesOf(fx.u.json.elements.hooks), notesOf(pt.json.elements.hooks)], [['runs in the background'], ['roda em segundo plano']]);
+  assert.deepEqual(notesOf(pt.json.elements.plugins), ['versão 0.1.0', 'versão 1.0.0']);
+  assert.deepEqual(notesOf(pt.json.elements.mcp), ['fica em ~/.claude.json, que não faz parte do retrato', 'fica em ~/.claude.json, que não faz parte do retrato', 'vem do plugin alpha']);
+
+  // A folder that is nobody's product gets its name from the dictionary; one skill is one skill.
+  const shared = path.join(fx.home, 'shared');
+  const named = (provider, lang) => runScript('snapshot-harness.mjs', ['--kind', 'user', '--config-dir', shared, '--provider', provider, '--id', 'user-shared', '--lang', lang], { env: fx.env }).json;
+  const [agentsEn, agentsPt] = [named('agents', 'en'), named('agents', 'pt')];
+  assert.deepEqual([agentsEn.harness.name, agentsPt.harness.name], ['Shared agents folder (~/shared)', 'Pasta compartilhada de agentes (~/shared)']);
+  assert.deepEqual([named('other', 'en').harness.name, named('other', 'pt').harness.name], ['Agent (~/shared)', 'Agente (~/shared)']);
+  assert.deepEqual([texts(agentsEn), texts(agentsPt)], [[['Skill descriptions (1 skill)', '']], [['Descrições das skills (1 skill)', '']]]);
+});
+
 test('user: a Codex account', () => {
   const r = runScript('snapshot-harness.mjs', ['--kind', 'user', '--config-dir', fx.codex, '--provider', 'codex', '--id', 'user-codex', '--name', 'Codex · account 1'], { env: fx.env });
   assert.equal(r.code, 0, r.stderr);
@@ -837,6 +947,8 @@ test('user: a Codex account', () => {
   });
   const cfg = fileAt(r.json, '~/.codex/config.toml');
   assert.ok(cfg.content.includes('bearer_token = "tkZz…38"'));
+  assert.ok(cfg.content.includes('name = "Acme"\napi_key = """\n…20\n…9\n"""\n'), 'a string that spans lines is hidden line by line');
+  assert.equal(cfg.content.split('\n').length, fs.readFileSync(path.join(fx.codex, 'config.toml'), 'utf8').split('\n').length);
   assert.deepEqual(r.json.elements.permissions, [
     { layer: 'user', kind: 'mode', rule: 'approval_policy = on-request', file: cfg.id },
     { layer: 'user', kind: 'mode', rule: 'sandbox_mode = workspace-write', file: cfg.id },
@@ -864,6 +976,8 @@ test('bad arguments exit 2 and print no JSON', () => {
     ['--kind', 'user', '--config-dir', fx.claude, '--provider', 'nobody', '--id', 'x'],
     ['--kind', 'project', '--cwd', fx.proj, '--id', 'x', '--impact', path.join(fx.root, 'missing.json')],
     ['--kind', 'project', '--cwd', fx.proj, '--id', 'x', '--budget', '0'],
+    ['--kind', 'project', '--cwd', fx.proj, '--id', 'x', '--lang', 'tlh'],
+    ['--kind', 'project', '--cwd', fx.proj, '--id', 'x', '--lang'],
   ];
   for (const args of cases) {
     const r = run(args);

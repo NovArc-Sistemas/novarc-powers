@@ -1,6 +1,6 @@
 ---
 name: novarc-harness-doctor
-description: Use when someone wants their AI coding agent setup reviewed, measured, explained or fixed - "review my harness", "harness doctor", "audit my CLAUDE.md / AGENTS.md", "why does my agent keep failing on this project", "how many tokens am I wasting", "too many MCP servers", "which CLIs or plugins should I install", "set up gates for this project", "keep my Claude and Codex accounts in sync". Reviews every user account's harness and any number of project harnesses in one run, measures what they cost over the last 30 days of sessions, and shows each finding with the why and a before/after diff on one interactive board where the user decides. Guided or doctor mode. Works in Claude Code, Codex and any agent with file and shell access.
+description: Use when someone wants their AI coding agent setup reviewed, measured, explained or fixed - "review my harness", "harness doctor", "audit my CLAUDE.md / AGENTS.md", "why does my agent keep failing on this project", "how many tokens am I wasting", "too many MCP servers", "which CLIs or plugins should I install", "set up gates for this project", "keep my Claude and Codex accounts in sync", "did the last harness review work", "review my harness again". Reviews every user account's harness and any number of project harnesses in one run, measures what they cost over the last 30 days of sessions, and shows each finding with the why and a before/after diff on one interactive board where the user decides. Records every review, so a later run measures whether the expected effect happened and reviews each harness again. Guided or doctor mode. Works in Claude Code, Codex and any agent with file and shell access.
 ---
 
 # novarc-harness-doctor
@@ -51,12 +51,17 @@ They hold in both modes. Each one was broken once and cost real work.
 ### 1. Find and choose
 
 ```bash
+node <skill>/scripts/run.mjs history                     # what was reviewed before, and what is due
 node <skill>/scripts/accounts.mjs list --lang <pt|en>
 node <skill>/scripts/find-projects.mjs --days 30        # add --roots <dir,dir> if the user names folders
 ```
 
 Tell the user, in one message, what you found: the accounts by provider (label and masked
-identity) and the projects with their activity. Then ask only what the request did not already
+identity), the projects with their activity, and which harnesses were reviewed before, when,
+and whether their follow-up is due. A harness with a review record is reviewed **as a
+follow-up**: the run measures what happened since, checks that what was applied is still
+there, and reviews it again (`references/follow-up.md`). To go straight to the harnesses of an
+earlier run: `run.mjs init --follow-up latest`. Then ask only what the request did not already
 answer:
 
 - **Which harnesses.** Default: every account that is not `empty` plus every `suggested`
@@ -150,6 +155,11 @@ Guided mode applies nothing without a decision on that item. Doctor mode applies
 classes on its own (`references/doctor-policy.md`, `run.mjs mark --auto`) and leaves the rest
 open on the board; everything it applied still shows its lesson and diff.
 
+A decision is about the exact proposal the user saw. When `run.mjs decisions` returns `stale`,
+or `run.mjs next` returns `decideAgain`, the proposal changed after the decision: build the
+board again and ask the user to decide on the current version. Never apply from a stale
+approval.
+
 ### 6. Accounts
 
 When there is more than one account, after the primary's harness is in the state the user
@@ -160,11 +170,18 @@ safety rules: `references/accounts.md`.
 
 ### 7. Close
 
-Write `<run>/report.md`: per harness the score before and after, what changed, what was
-declined or deferred, what could not be verified, the unconfirmed leads, and "what to carry
-forward": the `principle` of every fixed item. Tell the user that `run.mjs undo` reverts the
-run and that running the skill again in 30 days measures the real effect. Then
-`run.mjs close`. For a project, offer to copy the report into
+`run.mjs close` writes the **review record** of each harness under
+`~/.novarc-powers/novarc-harness-doctor/history/<harness>/`: every item with its decision and
+status, the exact changes applied, what each one is expected to save and in which measurement,
+the scores, and the measurements of today. That record is what the next review compares
+against, so close every run, including one where the user approved nothing.
+
+Then write `<run>/report.md` from the record's `.md`: per harness the score before and after,
+what changed, what was declined or deferred, what could not be verified, the unconfirmed leads,
+and "what to carry forward": the `principle` of every fixed item. In a follow-up, lead with
+what the comparison showed. Tell the user that `run.mjs undo` reverts the run, and the date
+from which a new review can measure the real effect (`followUpAfter`, 30 days by default): they
+only need to ask for the review again. For a project, offer to copy the report into
 `.novarc-powers/novarc-harness-doctor/reports/` in the repo.
 
 ## Modes

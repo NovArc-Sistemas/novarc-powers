@@ -209,15 +209,33 @@ Rules:
 - **Undo is one command**, printed by `apply`: `accounts.mjs undo --stamp <stamp> --yes`. It
   restores the originals byte for byte and removes what the run created, only where each thing
   is still as the run left it; anything edited since is reported and left alone.
+- **An undo that could not finish is run again.** Each step is marked in the run's journal the
+  moment it is undone, and the run counts as undone only when every step is. When the result
+  has `pending` above 0, `conflicts` says why each of those steps is still there (a file edited
+  since the run, something else at the original place, a backup out of reach). Clear the cause
+  and run the same command: it skips what is already undone (`alreadyUndone`) and retries only
+  what is pending. Tell the user what is pending; never report a partial undo as done.
 - **`apply` verifies each action** (the link resolves to the primary, the generated file has the
   expected hash, each server reads back as written) and rolls a failed one back. Check its
   `done` list yourself: a result is `done` or `failed`, never assumed.
 - **A stale plan is refused.** If an account changed between `plan` and `apply`, plan again and
-  show the new plan.
-- **Files are written in place** (open, truncate, write), so a link on `settings.json` survives.
-  The one exception is the Claude Code state file, which nothing links to and the app rewrites
-  often: there the managed keys are written through a temp file, and the session-start check
-  never writes that file at all.
+  show the new plan. The plan signs the content of everything it is about to change, and what a
+  link leads to counts as content: a file edited behind a symbolic link, or inside a linked
+  folder, makes the plan stale although the link itself did not change. `apply` compares the
+  whole plan before it starts, and each element once more right before that step writes. A step
+  whose element moved in between is given up with nothing written: its `done` entry is `failed`
+  with `"stale": true`, the other steps still run and the exit code is 1. Plan again for it.
+- **A write never leaves a file truncated or half written.** A file with a single name is
+  written through a temp file in the same folder and an atomic rename. A symbolic link is kept,
+  and the file it resolves to is written that same way. A file with other names (a hardlink, as
+  `settings.json` is where symbolic links are refused) has to be written in place, or the other
+  names would stop following it: an intact copy goes to `sync/recovery/` first, the file is
+  written, synced and read back, and on any failure the copy is written back and the step fails
+  saying so. The copy is deleted afterwards. Only if the restore fails too does it stay: the
+  error then names it, under `~/.novarc-powers/novarc-harness-doctor/sync/recovery/`. Give that
+  path to the user; it holds what the file contained, anything sensitive included. A process
+  killed in the middle of a write can leave a `*.nhd-*.tmp` file beside the destination, which is
+  safe to delete. The session-start check never writes the Claude Code state file at all.
 
 ## The session-start check
 
@@ -230,7 +248,9 @@ Rules:
   MCP definition nobody edited is removed with its source. A file that still has content is left
   and mentioned once. None of this happens while the primary's own folder is missing;
 - never overwrites a file somebody edited by hand: it reports it, with both paths, until the user
-  decides (edit the primary and delete the copy, or keep it apart with `keep-as-exception`).
+  decides (edit the primary and delete the copy, or keep it apart with `keep-as-exception`);
+- never follows a generated file to a new destination, and never leaves one half written: see
+  "Where the check is allowed to write" below.
 
 It prints nothing when all is well and one line otherwise, and always exits 0, so it cannot
 block a session. `install-check` copies `scripts/sync-check.mjs` (one self-contained file) to
@@ -238,6 +258,41 @@ block a session. `install-check` copies `scripts/sync-check.mjs` (one self-conta
 in the primary's `settings.json`, or in `hooks.json` for a Codex primary, where the user must
 also trust it once through `/hooks`. When the hook reports something, tell the user what it
 says before doing anything else.
+
+### Where the check is allowed to write
+
+The check runs unattended, so it never writes to a place nobody approved. `apply` records where
+each generated file is: the real path of the file and of its folder, that it is a plain file
+with one name, and its volume and file ids (`identity` in the manifest). Before a repair the
+check looks again and rewrites the file only while the path is still a plain file with no other
+name (or is missing), in that same folder, inside the account folder. Otherwise it reports the
+element as needing a decision and writes nothing:
+
+| Note in the report | What happened |
+|---|---|
+| `it became a link to another place` | The generated file was replaced by a symbolic link. |
+| `it now shares its content with another file (a hardlink)` | The path is now a second name of some other file. |
+| `its folder now leads somewhere else`, `... outside the account folder` | A folder above the file was replaced by a link, or the account folder was moved and linked. |
+| `its place was never recorded and cannot be confirmed` | The manifest is from a version that did not record places, and the account folder is a link. |
+
+Two ways out, both the user's choice. Put a plain file back (delete the link; the check
+re-creates the file at the next session start). Or plan again: a generated instruction file in
+that state shows as `divergent`, where `replace-with-primary` moves whatever sits at the path to
+the backup and generates a plain file, and `keep-as-exception` stops managing it. `apply`
+records the place it ends up in.
+
+The same rule guards a Codex `config.toml`. When it is a link, has another name or sits behind a
+redirected folder, its servers are reported as behind (`manual`) with the reason in the note,
+and the file is left to `plan` and `apply`, which write through links on purpose.
+
+A file that an editor or a sync tool saved again with the same bytes is a different file on
+disk (another file id) but still a plain file at the recorded place: that alone is not a reason
+to refuse, and the check keeps repairing it.
+
+A manifest written before places were recorded has none. The first `check --repair` records one
+for each generated file that is provably the generated one: a plain single-name file holding the
+generated bytes, with no link anywhere from the account folder down. Anything else is reported
+as above until a plan and apply.
 
 ## Links on Windows
 

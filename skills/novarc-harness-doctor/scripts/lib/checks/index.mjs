@@ -35,6 +35,8 @@ export function detectDefenses(model) {
     // 2026-11-23): exit status 2 unless the command throws its status away, a printed deny, ask
     // or block decision, or `onFailure: "block"` ("a failure does what exit code 2 does on that
     // event"); never a background hook ("Async hooks can't block or control Claude's behavior").
+    // Only `true` is a defense: `null` means the code did not settle it (a comment or a message
+    // that mentions `exit 2`, a status computed at run time, a program that could not be read).
     if (h.event !== 'PreToolUse' || hookBlocking(withBlockingFields(h)) !== true) continue;
     out.push({ scope: h.scope, title: 'Blocking PreToolUse hook', detail: `${h.display}: matcher ${h.matcher ? safeSnippet(h.matcher, model.projectRoot, 40) : '(all tools)'}${h.scriptDisplay ? `, script ${h.scriptDisplay}` : ''}` });
   }

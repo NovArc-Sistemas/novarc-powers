@@ -344,24 +344,29 @@ function sortChips(key, current, options) {
   return box;
 }
 
-/** A copy sorted by a use count; an unknown count (null) always goes last. Stable. */
+/** A copy sorted by a use count; an unknown count (missing or null) always goes last. Stable. */
 function byUse(list, field, mostFirst) {
   return list.map(function (x, i) { return { x: x, i: i }; }).sort(function (a, b) {
-    var av = typeof a.x[field] === 'number' ? a.x[field] : null;
-    var bv = typeof b.x[field] === 'number' ? b.x[field] : null;
+    var av = countOf(a.x[field]);
+    var bv = countOf(b.x[field]);
     if (av === null || bv === null) return ((av === null) - (bv === null)) || (a.i - b.i);
     return (mostFirst ? bv - av : av - bv) || (a.i - b.i);
   }).map(function (e) { return e.x; });
 }
 
-/** A measured count: zero is a real zero and is said out loud; null was not measured. */
+/**
+ * A measured count: zero is a real zero and is said out loud. A count that is missing or null
+ * was not measured, and says so: it is never drawn as zero.
+ */
 function useCell(value, zeroForms, days) {
-  if (typeof value !== 'number') return el('td', { cls: 'num' }, el('span', { cls: 'muted', text: T.notMeasured }));
-  if (value === 0) return el('td', { cls: 'num' }, tag(pl(zeroForms, days), 'warn soft'));
-  return el('td', { cls: 'num', text: fmtInt(value) });
+  var n = countOf(value);
+  if (n === null) return el('td', { cls: 'num' }, el('span', { cls: 'muted', text: T.notMeasured }));
+  if (n === 0) return el('td', { cls: 'num' }, tag(pl(zeroForms, days), 'warn soft'));
+  return el('td', { cls: 'num', text: fmtInt(n) });
 }
 
-function yesNo(v) { return v === true ? T.yes : v === false ? T.no : T.unknown; }
+/** Only a real true or false is an answer; anything else reads "unknown", never "no". */
+function yesNo(v) { return lbl({ yes: T.yes, no: T.no, unknown: T.unknown }, triState(v)); }
 function measured(v) { return typeof v === 'number' ? fmtInt(v) : T.notMeasured; }
 function noteCell(text) { return text ? el('small', { text: text }) : null; }
 function itemCell(id) { return id ? cid(id) : null; }
@@ -387,7 +392,8 @@ var VIEWS = {
   hooks: function (h, list) {
     var tone = { yes: 'navy', no: '', unknown: 'dashed' };
     var rows = list.map(function (k) {
-      var blocks = k.blocking === true ? 'yes' : k.blocking === false ? 'no' : 'unknown';
+      // A hook whose effect could not be told (missing or null) is "could not tell", not "does not block".
+      var blocks = triState(k.blocking);
       return row([tag(lbl(T.hookSource, k.source)), k.plugin ? noteCell(tx(T.v.pluginOf, { name: k.plugin })) : null],
         [el('b', { text: k.event }), k.matcher ? el('small', { cls: 'mono', text: k.matcher }) : null],
         [k.command ? el('span', { cls: 'mono', text: k.command }) : null, noteCell(k.note)],
@@ -445,14 +451,16 @@ var VIEWS = {
   },
   plugins: function (h, list) {
     var rows = list.map(function (p) {
-      return row([el('b', { text: p.name }), noteCell(p.note)], p.marketplace || '', p.enabled === undefined ? '' : yesNo(p.enabled), p.pinned === undefined ? '' : yesNo(p.pinned), itemCell(p.item));
+      // A plugin listed without an on/off state, or without a known pin, says "unknown": a blank
+      // cell under "Enabled" would read as "no".
+      return row([el('b', { text: p.name }), noteCell(p.note)], p.marketplace || '', yesNo(p.enabled), yesNo(p.pinned), itemCell(p.item));
     });
     return tableBox([T.col.name, T.col.marketplace, T.col.enabled, T.col.pinned, T.col.item], rows, T.view.plugins);
   },
   clis: function (h, list) {
     var rows = list.map(function (c) {
       return row([el('b', { cls: 'mono', text: c.name }), c.collision ? el('small', null, tag(T.v.collision, 'warn')) : null, noteCell(c.note)],
-        tag(yesNo(c.installed), c.installed ? 'ok' : ''), c.version || '', c.auth ? lbl(T.auth, c.auth) : '',
+        tag(yesNo(c.installed), { yes: 'ok', no: '', unknown: 'dashed' }[triState(c.installed)]), c.version || '', c.auth ? lbl(T.auth, c.auth) : '',
         (c.signals || []).length ? el('span', { cls: 'mono', text: c.signals.join(', ') }) : '', itemCell(c.item));
     });
     return tableBox([T.col.name, T.col.installed, T.col.version, T.col.auth, T.col.signals, T.col.item], rows, T.view.clis);

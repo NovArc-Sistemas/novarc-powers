@@ -10,6 +10,10 @@
 //   GET  /api/decisions?t=        { decisions: [...] } recorded so far
 //   POST /api/decisions?t=        validates one decision and appends it to decisions.jsonl
 //
+// A decision carries `rev`, the revision of the item or group the board showed; one that comes
+// without it is bound, on arrival, to the revision in the last built state.json. A note that
+// holds a credential is refused. `--help` prints the usage.
+//
 // Every route needs the token (random per start, compared in constant time). It serves no other
 // file and no directory, sets no CORS header, rejects bodies over 16 KB, answers only requests
 // addressed to this machine, and exits after 12 hours or when run.json says the run is closed.
@@ -19,7 +23,9 @@ import crypto from 'node:crypto';
 import { parseArgs, isMain, warn } from './lib/common.mjs';
 import { runPaths, latestRunId, RUN_ID_RE } from './lib/run/paths.mjs';
 import { RunError, readJson, readJsonl, appendJsonLine, withLock, sha256, nowIso } from './lib/run/store.mjs';
-import { normalizeDecision } from './lib/run/decisions.mjs';
+import { normalizeDecision, PRIMARY_TARGET } from './lib/run/decisions.mjs';
+import { builtRevs } from './lib/run/rev.mjs';
+import { maskDeep } from './lib/run/secrets.mjs';
 
 export const MAX_BODY_BYTES = 16 * 1024;
 export const MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -116,7 +122,8 @@ export function createBoardServer(paths, token) {
     },
     '/api/decisions': {
       GET: (req, res) => {
-        send(res, 200, { decisions: readJsonl(paths.decisions).filter((l) => l.value && typeof l.value === 'object').map((l) => l.value) });
+        // What POST stores holds no credential; a line somebody wrote into the file by hand may.
+        send(res, 200, { decisions: readJsonl(paths.decisions).filter((l) => l.value && typeof l.value === 'object').map((l) => maskDeep(l.value)) });
       },
       POST: async (req, res) => {
         const got = await readBody(req, MAX_BODY_BYTES);
@@ -136,6 +143,13 @@ export function createBoardServer(paths, token) {
         let run = null;
         try { run = readJson(paths.run); } catch { run = null; }
         if (!run || run.closed === true) { send(res, 409, { ok: false, error: 'the run is closed' }); return; }
+        // A page that sent no rev decided on what the last build showed. Bind the decision to
+        // that revision now: by the time the session takes it in, the board may have been rebuilt.
+        if (!checked.decision.rev && checked.decision.target !== PRIMARY_TARGET) {
+          const built = builtRevs(paths);
+          const rev = built ? (built.items.get(checked.decision.target) || built.groups.get(checked.decision.target)) : null;
+          if (rev) checked.decision.rev = rev;
+        }
         try {
           withLock(paths.mutex, () => appendJsonLine(paths.decisions, checked.decision), { timeoutMs: 3000 });
         } catch (e) {
@@ -165,12 +179,18 @@ function envMs(name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+const USAGE = 'usage: serve-board.mjs [--run <id>] [--port 0]';
+
 function main() {
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    process.stdout.write(`${USAGE}\n\nServes one run's board on 127.0.0.1 (the latest run without --run) and prints { "url": ... }.\n`);
+    return;
+  }
   const args = parseArgs();
   const fail = (msg, code) => { warn(msg); process.exit(code); };
   let runId = args.run;
   if (runId === undefined) runId = latestRunId();
-  if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) fail('usage: serve-board.mjs --run <id> [--port 0]', 2);
+  if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) fail(USAGE, 2);
   const port = args.port === undefined ? 0 : Number(args.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) fail('--port takes a number from 0 to 65535 (0 picks a free one)', 2);
   const paths = runPaths(runId);

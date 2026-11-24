@@ -585,6 +585,34 @@ footer .made { display: inline-flex; align-items: center; gap: 10px }
 #view:focus { outline: none }
 .fatal pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 400 12px var(--term); margin: 8px 0 0 }
 
+/* follow-up: what an earlier review expected, and what happened since */
+/* The second line of a fleet row repeats the columns of .hrow, so the score then and now sits under the score bar. */
+.hfu { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(220px, 1.4fr) minmax(120px, .8fr) minmax(120px, .7fr) 20px; gap: 8px 20px; align-items: center; padding-top: 12px; border-top: 1px dashed var(--line-2); min-width: 0 }
+.hfu .score .g { font-size: 17px }
+.hfu-t { grid-column: 3 / -1; min-width: 0; font: 500 13px var(--term); color: var(--navy-900) }
+.hfu-t.wait { color: var(--gray-500); font-weight: 400 }
+.score .g.down { color: var(--bad) }
+.sbar .d { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(-14deg, var(--bad) 0 6px, var(--bad-300) 6px 8px) }
+.trail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; font: 400 12px var(--mono); color: var(--gray-500) }
+.trail ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 0 }
+.trail li { display: inline-flex; align-items: baseline; gap: 6px }
+.trail li + li::before { content: "\203A"; margin: 0 10px; color: var(--navy-200) }
+.trail li b { color: var(--navy-900); font-weight: 600 }
+.trail li.now b { color: var(--signal-600) }
+.chist { margin-top: -8px; max-width: 56em; font: 400 12.5px/1.5 var(--term); color: var(--gray-500); overflow-wrap: anywhere }
+.fu-lead { margin-top: 2px; font: 600 16px/1.4 var(--sans); color: var(--navy-900) }
+.fu-nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; margin-top: 12px; border: 1px solid var(--line-2); border-radius: 14px; overflow: hidden; background: var(--line) }
+.fu-chg { font-weight: 600; color: var(--gray-700) }
+.fu-chg.good { color: var(--ok) }
+.fu-chg.bad { color: var(--bad) }
+.oid { display: inline-block; font: 700 12.5px var(--term); color: var(--navy-900); border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 7px; white-space: nowrap }
+.fu .callout { margin: 0 }
+.fu .legend-line { margin: 8px 0 10px }
+.fu .scroll, .fu .empty { margin-top: 10px }
+.fu .foldbox { margin-top: 14px }
+.fu .foldbox > .scroll { margin-top: 0 }
+.fu .note-line { margin-top: 18px }
+
 @media (max-width: 1020px) {
   .fv-wrap.notes { margin-right: 0 }
   .fv-note { position: static; width: auto; background: var(--navy-900); padding: 8px 12px 12px }
@@ -599,6 +627,9 @@ footer .made { display: inline-flex; align-items: center; gap: 10px }
   .hrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) }
   .hrow .go { display: none }
   .hrow .hempty { grid-column: 1 / -1 }
+  .hfu { display: flex; flex-wrap: wrap }
+  .hfu .score { flex: 1 1 240px }
+  .hfu-t { flex: 1 1 100% }
   .cgrid, .ibig, .ifixed { grid-template-columns: minmax(0, 1fr) }
   .ex { grid-template-columns: minmax(0, 1fr) }
   .ex-side { position: static }

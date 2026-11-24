@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// snapshot-harness.mjs --kind project --cwd <abs> --id <harnessId> [--impact <impact.json>] [--clis <clis.json>]
-// snapshot-harness.mjs --kind user --config-dir <abs> --provider <provider> --id <harnessId> [--impact ...] [--clis ...]
+// snapshot-harness.mjs --kind project --cwd <abs> --id <harnessId> [--impact <impact.json>] [--clis <clis.json>] [--lang pt|en]
+// snapshot-harness.mjs --kind user --config-dir <abs> --provider <provider> --id <harnessId> [--impact ...] [--clis ...] [--lang pt|en]
 //
 // Read-only picture of ONE harness for the board's explorer: `{ harness, files, elements, layers }`,
 // each shaped as templates/state.schema.v2.json says (a `harnesses[]` entry without scores,
@@ -13,6 +13,9 @@
 // --impact takes the output of session-impact.mjs (or transcript-signals.mjs) and fills skill
 // invocations and MCP calls; --clis takes the output of probe-clis.mjs. --name sets the tab label.
 // --file-cap and --budget (bytes) override the two size limits.
+// --lang (default en) is the language of what a person reads on the board: the names and notes
+// of the layers and the notes on hooks, plugins and MCP servers (lib/snapshot/strings.mjs).
+// Ids, events, categories, load modes, paths and commands never change with the language.
 // It never prints a secret, transcript text or an absolute home path, and it never reads
 // credential stores: files are picked by role, not by listing a config dir.
 import path from 'node:path';
@@ -22,23 +25,27 @@ import { FileSet, Loader, FILE_CAP, HARNESS_BUDGET } from './lib/snapshot/files.
 import { newScan, scanProject, scanUser } from './lib/snapshot/scan.mjs';
 import { buildElements, buildLayers } from './lib/snapshot/elements.mjs';
 import { isCodeDir, projectGitInfo } from './lib/snapshot/project.mjs';
+import { translator, parseLang } from './lib/snapshot/strings.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CATALOG_TOOLS = path.join(HERE, '..', 'references', 'catalog', 'tools.json');
 export const PROVIDERS = ['claude-code', 'codex', 'gemini', 'opencode', 'cursor', 'copilot', 'agents', 'other'];
-const PROVIDER_LABEL = { 'claude-code': 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', opencode: 'opencode', cursor: 'Cursor', copilot: 'Copilot', agents: 'Shared agents folder', other: 'Agent' };
+// Product names; the two providers that are not a product are worded by the translator.
+const PROVIDER_LABEL = { 'claude-code': 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', opencode: 'opencode', cursor: 'Cursor', copilot: 'Copilot' };
 const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 /**
  * Build the snapshot. `kind` project needs `cwd`; `kind` user needs `configDir` and `provider`.
  * `impact` and `clis` are the parsed probe outputs, when the caller has them. `report`, when
- * given, receives counts for diagnostics (`contentBytes`, `docsFound`).
+ * given, receives counts for diagnostics (`contentBytes`, `docsFound`). `lang` is the language
+ * of the names and notes a person reads; machine fields are the same in every language.
  */
-export function snapshot({ kind, id, cwd = null, configDir = null, provider = null, name = null, impact = null, clis = null, fileCap = FILE_CAP, budget = HARNESS_BUDGET }, report = null) {
+export function snapshot({ kind, id, cwd = null, configDir = null, provider = null, name = null, impact = null, clis = null, fileCap = FILE_CAP, budget = HARNESS_BUDGET, lang = 'en' }, report = null) {
   const root = kind === 'project' ? cwd : configDir;
   const loader = new Loader();
   const files = new FileSet({ harnessId: id, kind, root, loader, fileCap, budget });
-  const ctx = newScan({ kind, root, provider, files, loader });
+  const t = translator(lang);
+  const ctx = newScan({ kind, root, provider, files, loader, t });
   if (kind === 'project') scanProject(ctx); else scanUser(ctx);
 
   const fileList = files.finalize();
@@ -47,7 +54,8 @@ export function snapshot({ kind, id, cwd = null, configDir = null, provider = nu
   const elements = buildElements(ctx, { impact, clis, catalog });
   const layers = buildLayers(ctx, id);
 
-  const harness = { id, kind, name: name || (kind === 'project' ? path.basename(root) : `${PROVIDER_LABEL[provider] || provider} (${displayPath(root)})`), path: displayPath(root) };
+  const label = PROVIDER_LABEL[provider] || (provider === 'agents' || provider === 'other' ? t(`harness.${provider}`) : provider);
+  const harness = { id, kind, name: name || (kind === 'project' ? path.basename(root) : t('harness.user', { provider: label, path: displayPath(root) })), path: displayPath(root) };
   if (kind === 'user') harness.provider = provider;
   else harness.project = { isCode: isCodeDir(root), ...projectGitInfo(root) };
   if (report) Object.assign(report, { contentBytes: files.contentBytes, docsFound: ctx.docsTotal || 0 });
@@ -93,6 +101,8 @@ if (isMain(import.meta.url)) {
   opts.clis = jsonArg(args.clis, '--clis');
   opts.fileCap = bytesArg(args['file-cap'], '--file-cap', FILE_CAP);
   opts.budget = bytesArg(args.budget, '--budget', HARNESS_BUDGET);
+  opts.lang = parseLang(args.lang === true ? '' : args.lang);
+  if (!opts.lang) fail('--lang must be pt or en');
   try {
     const started = Date.now();
     const stats = {};

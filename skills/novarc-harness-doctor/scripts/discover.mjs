@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-// discover.mjs --scope user|project|both --cwd <dir>
+// discover.mjs --scope user|project|both --cwd <dir> [--provider <p> --config-dir <dir>]
 //
 // Read-only inventory of agent harness locations. User scope: Claude-style config dirs (default,
 // CLAUDE_CONFIG_DIR, host-app account dirs), Codex, ~/.agents and the Claude desktop config.
+// With --provider and --config-dir the user scope is one account: that config dir and nothing
+// of any other account (the output then says which, in `account`).
 // Project scope: instruction files, agent folders, settings, git state, knowledge graph, git
 // hooks, CI and a docs inventory. Prints JSON. Never prints file contents, setting values,
 // environment variables or credentials; only names, counts, sizes and display paths.
@@ -13,7 +15,7 @@ import {
   lstatSafe, statSafe, isDir, isFile, readdirSafe, readlinkSafe, realpathSafe, readTextSafe,
   readJsonSafe, approxTokens, git, SKIP_DIRS,
 } from './lib/common.mjs';
-import { claudeConfigDirs, codexDirs, agentsDirs, desktopConfigFiles } from './lib/locations.mjs';
+import { userLocations, accountFromArgs } from './lib/locations.mjs';
 
 const INSTRUCTION_NAMES = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENTS.override.md', 'GEMINI.md'];
 const BACKUP_RE = /(\.(bak|old|orig|backup|tmp)(\b|[-.])|~$|\.bak-|\.tmp\.)/i;
@@ -336,17 +338,23 @@ function fillHardlinkPeers(groups) {
   for (const g of groups) for (const l of g.links || []) { delete l._ino; delete l._abs; }
 }
 
-export function discoverUser() {
-  const claude = claudeConfigDirs().map(describeClaudeDir);
-  const codex = codexDirs().map(describeCodexDir);
-  const agents = agentsDirs().map(describeAgentsDir);
+/**
+ * The user-level harness locations. `account` (`{ provider, configDir }`) narrows it to one
+ * account: nothing of any other config dir is opened, so a hardlink names only the peers it has
+ * inside that dir.
+ */
+export function discoverUser(account = null) {
+  const loc = userLocations(account);
+  const claude = loc.claude.map(describeClaudeDir);
+  const codex = loc.codex.map(describeCodexDir);
+  const agents = loc.agents.map(describeAgentsDir);
   const all = [...claude, ...codex, ...agents];
   fillHardlinkPeers(all);
   return {
     configDirs: claude,
     codex,
     agentsDirs: agents,
-    desktopConfigs: desktopConfigFiles().map(describeDesktopConfig),
+    desktopConfigs: loc.desktop.map(describeDesktopConfig),
     env: { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ? 'set' : 'unset', CODEX_HOME: process.env.CODEX_HOME ? 'set' : 'unset' },
   };
 }
@@ -624,9 +632,13 @@ if (isMain(import.meta.url)) {
   if (!['user', 'project', 'both'].includes(scope)) { warn('--scope must be user, project or both'); process.exit(2); }
   const cwd = normalizeInputPath(args.cwd || process.cwd());
   if ((scope === 'project' || scope === 'both') && !isDir(cwd)) { warn('--cwd is not a directory'); process.exit(2); }
+  const { account, error } = accountFromArgs(args);
+  if (error) { warn(error); process.exit(2); }
+  if (account && scope === 'project') { warn('--provider and --config-dir narrow the user scope; they have no meaning with --scope project'); process.exit(2); }
   const started = Date.now();
   const result = { generatedAt: new Date().toISOString(), scope, os: process.platform, home: '~' };
-  if (scope === 'user' || scope === 'both') result.user = discoverUser();
+  if (account) result.account = { provider: account.provider, path: displayPath(account.configDir), supported: account.supported };
+  if (scope === 'user' || scope === 'both') result.user = discoverUser(account);
   if (scope === 'project' || scope === 'both') result.project = discoverProject(cwd);
   result.durationMs = Date.now() - started;
   printJson(result);

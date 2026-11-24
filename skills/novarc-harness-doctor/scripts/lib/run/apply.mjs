@@ -2,6 +2,11 @@
 // changes back. The ledger is the only record of what the run wrote outside its own directory,
 // so every entry carries the hash the file had before (from the backup) and after: `undo` only
 // touches a file that still has the hash the run left.
+//
+// A run that already left review records (it was closed, or `history --write` ran) has them
+// written again by each of the three, so that a record always says what is applied now: never a
+// change that was undone, and never without one that was applied after the run was closed. That
+// happens after the run mutex is released (history.mjs, `refreshRecords`).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +15,10 @@ import { RunError, UsageError, readJson, writeJsonAtomic, withLock, sha256File, 
 import { homeBase } from './paths.mjs';
 import { homeMatchers, scrubString } from './scrub.mjs';
 import { loadItems, loadStatus, appendLog, harnessById } from './model.mjs';
+import { REV_RE } from './rev.mjs';
+import { hasCredential, CREDENTIAL_HINT } from './secrets.mjs';
+import { refreshRecords } from './history.mjs';
+
 
 /** Classes doctor mode may apply without a decision (references/doctor-policy.md). */
 export const SAFE_CLASSES = ['reversible', 'additive'];
@@ -20,35 +29,49 @@ function noteArg(args, name) {
   const v = args[name];
   if (v === undefined) return undefined;
   if (typeof v !== 'string' || !v.trim()) throw new UsageError(`--${name} needs a text`);
+  // The note goes to status.json, the log and the board.
+  if (hasCredential(v)) throw new UsageError(`--${name} holds a credential: ${CREDENTIAL_HINT}`);
   return scrubString(v.trim().slice(0, MAX_NOTE), homeMatchers());
 }
 
+/** The item, plus `was`: its earlier decision when that was made on another revision (model.mjs). */
 function findItem(ctx, status, id) {
-  const { items } = loadItems(ctx.paths, ctx.run, undefined, status);
+  const { items, outdated } = loadItems(ctx.paths, ctx.run, undefined, status);
   const item = items.find((i) => i.id === id);
   if (!item) throw new RunError(`no item ${id} in this run`);
-  return item;
+  return { item, was: outdated.get(id) || null };
 }
 
-/** `mark --item <id> --status in-progress|fixed|failed [--verified <t>] [--not-verified <t>] [--auto]`. */
+/**
+ * `mark --item <id> --status in-progress|fixed|failed [--verified <t>] [--not-verified <t>] [--auto] [--rev <rev>]`.
+ *
+ * This is where an approval is checked again, at the moment of applying: an item is `approved`
+ * here only while the revision the user approved is the revision it has now (model.mjs). `--rev`
+ * adds the executor's side: the revision it read, so a proposal replaced between reading and
+ * marking is refused.
+ */
 export function mark(ctx, args) {
   if (typeof args.item !== 'string') throw new UsageError('mark needs --item <id>');
   if (!MARK_STATUSES.includes(args.status)) throw new UsageError(`--status must be one of ${MARK_STATUSES.join(', ')}`);
+  if (args.rev !== undefined && (typeof args.rev !== 'string' || !REV_RE.test(args.rev))) throw new UsageError('--rev takes the 12-character revision of the item');
   const verified = noteArg(args, 'verified');
   const notVerified = noteArg(args, 'not-verified');
   const target = args.status;
-  return withLock(ctx.paths.mutex, () => {
+  const out = withLock(ctx.paths.mutex, () => {
     const status = loadStatus(ctx.paths);
-    const item = findItem(ctx, status, args.item);
+    const { item, was } = findItem(ctx, status, args.item);
     const from = item.status;
-    const refuse = (why) => { throw new RunError(`cannot mark ${item.id} as ${target}: ${why}`, { item: item.id, status: from }); };
+    const refuse = (why) => { throw new RunError(`cannot mark ${item.id} as ${target}: ${why}`, { item: item.id, status: from, rev: item.rev, ...(was ? { decidedRev: was.decidedRev } : {}) }); };
     let auto = false;
     if (target === 'in-progress') {
       if (from === 'in-progress') return { runId: ctx.paths.runId, item: item.id, status: from, changed: false };
+      if (args.rev !== undefined && args.rev !== item.rev) refuse('its proposal is not the revision given with --rev any more; read the item again');
       if (from === 'open') {
-        if (args.auto !== true) refuse('it is open; the user has not approved it');
+        if (args.auto !== true) refuse(was ? `it is open again: the user ${was.status} another version of this proposal, and has to decide on the current one` : 'it is open; the user has not approved it');
         if (ctx.run.mode !== 'doctor') refuse('--auto is only for doctor mode; this run is guided');
         if (!SAFE_CLASSES.includes(item.class)) refuse(`class ${item.class} always waits for the user's decision`);
+        // The user had an opinion on this item; another version of it is theirs to judge.
+        if (was) refuse(`the user ${was.status} another version of this proposal; the current one waits for their decision`);
         auto = true;
       } else if (from !== 'approved') refuse(`it is ${from}; only an approved item can be applied`);
     } else {
@@ -59,7 +82,7 @@ export function mark(ctx, args) {
     const o = status.items[item.id] || (status.items[item.id] = {});
     o.status = target;
     o.updatedAt = at;
-    if (target === 'in-progress') { delete o.verified; delete o.notVerified; delete o.applied; }
+    if (target === 'in-progress') { delete o.verified; delete o.notVerified; delete o.applied; o.rev = item.rev; }
     else {
       if (verified) o.verified = verified; else delete o.verified;
       if (notVerified) o.notVerified = notVerified; else delete o.notVerified;
@@ -74,6 +97,7 @@ export function mark(ctx, args) {
     appendLog(ctx.paths, { at, event: 'mark', harness: item.harness, item: item.id, status: target, ...(auto ? { auto: true } : {}), ...(verified ? { verified } : {}), ...(notVerified ? { notVerified } : {}) });
     return { runId: ctx.paths.runId, item: item.id, harness: item.harness, from, status: target, changed: true, ...(auto ? { auto: true } : {}) };
   });
+  return out.changed ? refreshRecords(ctx, out) : out;
 }
 
 function inside(base, target) {
@@ -119,9 +143,9 @@ export function record(ctx, args) {
     if (relativeInside(ctx.paths.backups, backup) === null) throw new RunError('--backup must be a file under this run\'s backups/ folder');
     if (!fs.existsSync(backup) || !fs.statSync(backup).isFile()) throw new RunError('--backup file not found');
   }
-  return withLock(ctx.paths.mutex, () => {
+  return refreshRecords(ctx, withLock(ctx.paths.mutex, () => {
     const status = loadStatus(ctx.paths);
-    const item = findItem(ctx, status, args.item);
+    const { item } = findItem(ctx, status, args.item);
     if (item.status !== 'in-progress' && item.status !== 'fixed') throw new RunError(`cannot record a change for ${item.id}: it is ${item.status}; mark it in-progress first`);
     const hashBefore = backup === null ? null : sha256File(backup);
     const hashAfter = sha256File(file);
@@ -148,7 +172,7 @@ export function record(ctx, args) {
     }
     const { path: _path, backup: _backup, ...shown } = entry;
     return { runId: ctx.paths.runId, recorded: { ...shown, created: hashBefore === null, deleted: hashAfter === null } };
-  });
+  }));
 }
 
 const pathKey = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
@@ -159,7 +183,8 @@ export function undo(ctx, args) {
   if (all === (typeof args.item === 'string')) throw new UsageError('undo needs --item <id> or --all');
   const dryRun = args['dry-run'] === true;
   if (!dryRun && args.yes !== true) throw new UsageError('undo changes files: pass --yes, or --dry-run to see what it would do');
-  return withLock(ctx.paths.mutex, () => {
+  let undone = false;
+  const result = withLock(ctx.paths.mutex, () => {
     const ledger = readJson(ctx.paths.ledger) || { version: 1, entries: [] };
     const entries = (ledger.entries || []).filter((e) => !e.undoneAt && (all || e.item === args.item));
     const out = { runId: ctx.paths.runId, dryRun, restored: [], deleted: [], conflicts: [], flipped: [], partial: [] };
@@ -228,6 +253,9 @@ export function undo(ctx, args) {
     out.flipped.sort();
     out.partial.sort();
     if (!entries.length) out.note = 'no recorded change to undo';
+    undone = !dryRun && entries.some((e) => e.undoneAt === now);
     return out;
   });
+  // A record never claims a change that was undone.
+  return undone ? refreshRecords(ctx, result) : result;
 }

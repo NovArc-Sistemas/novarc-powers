@@ -4,13 +4,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { sandbox, securityFindings, item, together } from './run-helpers.mjs';
+import { sandbox, securityFindings, item, together, builtRev } from './run-helpers.mjs';
 
 function ready(t) {
   const sb = sandbox(t);
   assert.equal(sb.init().code, 0);
   assert.equal(sb.complete('review:security', securityFindings()).code, 0);
   assert.equal(sb.complete('review:gates', { items: [item('ACME-401', 'acme-shop', 4), item('NP-401', 'novarc-powers', 4), item('U1-401', 'claude-1', 4)], groups: [{ title: 'Same gate', round: 4, items: ['ACME-401', 'NP-401', 'U1-401'] }] }).code, 0);
+  return sb;
+}
+/** The same, with the board built: a decision that comes from the board needs a board to come from. */
+function shown(t) {
+  const sb = ready(t);
+  assert.equal(sb.run(['build', '--no-render']).code, 0);
   return sb;
 }
 const statusOf = (sb, id) => (sb.read('status.json').items[id] || {}).status;
@@ -143,7 +149,7 @@ test('ask keeps the item open with the question; --answered clears it', (t) => {
 });
 
 test('decisions --ingest takes an array, a map or wrapped documents; the same id twice is a no-op', (t) => {
-  const sb = ready(t);
+  const sb = shown(t);
   const at = (s) => `2020-01-01T10:00:${s}.000Z`;
   const array = [
     { id: 'dec-1', at: at('01'), runId: sb.runId, target: 'ACME-101', action: 'approve', note: 'from the board', exclude: [], via: 'board' },
@@ -156,6 +162,10 @@ test('decisions --ingest takes an array, a map or wrapped documents; the same id
   assert.equal(statusOf(sb, 'ACME-101'), 'approved');
   assert.equal(statusOf(sb, 'NP-101'), 'declined');
   assert.equal(sb.text('decisions.jsonl').trim().split('\n').length, 2, 'ingested decisions join the record');
+  // They came without a rev: each one is bound to the revision the last built board showed.
+  assert.deepEqual(first.json.new.map((d) => d.rev), [builtRev(sb, 'ACME-101'), builtRev(sb, 'NP-101')]);
+  assert.deepEqual(sb.text('decisions.jsonl').trim().split('\n').map((l) => JSON.parse(l).rev), [builtRev(sb, 'ACME-101'), builtRev(sb, 'NP-101')]);
+  assert.deepEqual(first.json.stale, []);
 
   const again = ingest(sb, array);
   assert.equal(again.code, 0);
@@ -185,7 +195,7 @@ test('decisions --ingest takes an array, a map or wrapped documents; the same id
 });
 
 test('bad entries are reported and skipped; an older decision never overrides a newer one', (t) => {
-  const sb = ready(t);
+  const sb = shown(t);
   const r = ingest(sb, [
     { id: 'ok-1', at: '2020-01-01T10:00:00.000Z', target: 'ACME-101', action: 'approve' },
     { id: 'bad-action', target: 'ACME-102', action: 'explode' },
@@ -193,11 +203,13 @@ test('bad entries are reported and skipped; an older decision never overrides a 
     { id: 'other-run', runId: '20200101-zzzz', target: 'NP-101', action: 'approve' },
     { id: 'unknown-1', at: '2020-01-01T10:00:01.000Z', target: 'ACME-777', action: 'approve' },
     'not an object',
+    { id: 'bad-rev', target: 'ACME-102', action: 'approve', rev: 12 },
+    { id: 'odd-rev', target: 'ACME-102', action: 'approve', rev: 'latest' },
   ]);
   assert.equal(r.code, 0, r.stdout);
   assert.deepEqual(r.json.new.map((d) => [d.id, d.result]), [['ok-1', 'applied'], ['unknown-1', 'unknown-target']]);
-  assert.equal(r.json.rejected.length, 4);
-  assert.match(r.json.rejected.map((x) => x.reason).join('|'), /action must be one of.*target must be.*runId is not this run.*must be a JSON object/);
+  assert.equal(r.json.rejected.length, 6);
+  assert.match(r.json.rejected.map((x) => x.reason).join('|'), /action must be one of.*target must be.*runId is not this run.*must be a JSON object.*rev must be a text.*rev must be the 12-character revision/);
   assert.deepEqual(r.json.unknown, [{ target: 'ACME-777', reason: 'no such item' }]);
   assert.equal(statusOf(sb, 'NP-101'), undefined);
 
@@ -219,8 +231,53 @@ test('bad entries are reported and skipped; an older decision never overrides a 
   assert.equal(sb.run(['decisions', '--ingest', path.join(sb.home, 'missing.json')]).code, 1);
 });
 
+test('decisions --ingest takes a directory of one JSON file per document', (t) => {
+  const sb = shown(t);
+  const dir = path.join(sb.home, 'decisions-export');
+  fs.mkdirSync(dir);
+  const put = (name, value) => fs.writeFileSync(path.join(dir, name), typeof value === 'string' ? value : JSON.stringify(value));
+  const at = (s) => `2020-03-01T10:00:${s}.000Z`;
+  // The document id is the target, so the file name is too.
+  put('ACME-101.json', { id: 'doc-1', at: at('01'), action: 'approve', rev: builtRev(sb, 'ACME-101'), via: 'board' });
+  put('NP-101.json', { id: 'NP-101', data: { id: 'doc-2', at: at('02'), action: 'decline' } });
+  put('G-2.JSON', { id: 'doc-3', at: at('03'), target: 'G-2', action: 'approve', exclude: ['U1-401'], rev: builtRev(sb, 'G-2') });
+  put('notes.txt', 'not a decision');
+  put('README.md', '# export');
+  put('broken.json', '{ "target": "ACME-102", "action":');
+  put('number.json', '42');
+  put('wrong.json', { target: 'ACME-102', action: 'explode' });
+  fs.mkdirSync(path.join(dir, 'folder.json'));
+
+  const r = sb.run(['decisions', '--ingest', dir]);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.json.new.map((d) => [d.id, d.target, d.result]), [['doc-1', 'ACME-101', 'applied'], ['doc-2', 'NP-101', 'applied'], ['doc-3', 'G-2', 'applied']]);
+  assert.deepEqual(r.json.approvedByHarness, { 'acme-shop': ['ACME-101', 'ACME-401'], 'novarc-powers': ['NP-401'] });
+  assert.equal(statusOf(sb, 'NP-101'), 'declined');
+  assert.equal(statusOf(sb, 'U1-401'), undefined, 'excluded from the group decision');
+  // What is not JSON is ignored; what cannot be read or parsed is reported, and the rest still lands.
+  assert.deepEqual(r.json.ingest, { files: 7, ignored: 2 });
+  assert.deepEqual(r.json.rejected, [
+    { source: 'file broken.json', reason: 'not valid JSON' },
+    { source: 'file folder.json', reason: 'cannot be read: not a file' },
+    { source: 'file number.json', reason: 'holds no decision' },
+    { source: 'file wrong.json', reason: 'action must be one of approve, decline, defer, ask' },
+  ]);
+  assert.ok(!r.stdout.includes(sb.home) && !r.stdout.includes('ACME-102'), 'neither the directory nor the text of a rejected file is echoed');
+
+  const again = sb.run(['decisions', '--ingest', dir]);
+  assert.deepEqual(again.json.new, []);
+  assert.equal(again.json.duplicates, 3, 'the same export twice changes nothing');
+  assert.equal(sb.text('decisions.jsonl').trim().split('\n').length, 3);
+
+  const empty = path.join(sb.home, 'empty-export');
+  fs.mkdirSync(empty);
+  const none = sb.run(['decisions', '--ingest', empty]);
+  assert.equal(none.code, 0);
+  assert.deepEqual([none.json.new, none.json.rejected, none.json.ingest], [[], [], { files: 0, ignored: 0 }]);
+});
+
 test('decisions takes in what the board appended to decisions.jsonl, once', (t) => {
-  const sb = ready(t);
+  const sb = shown(t);
   const line = (d) => fs.appendFileSync(sb.file('decisions.jsonl'), `${JSON.stringify({ runId: sb.runId, via: 'board', ...d })}\n`);
   line({ id: 'b-1', at: '2020-02-01T08:00:00.000Z', target: 'ACME-101', action: 'approve' });
   line({ id: 'b-2', at: '2020-02-01T08:00:01.000Z', target: 'ACME-102', action: 'ask', note: 'Is this safe?' });

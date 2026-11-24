@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { nowMs } from './store.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +34,14 @@ export function baseDir() {
 
 export function runsDir() { return path.join(baseDir(), 'runs'); }
 export function latestPath() { return path.join(baseDir(), 'latest.json'); }
+
+/**
+ * `<base>/history`: the review records, one folder per harness key (references/follow-up.md).
+ * It is shared by every run of this machine, so it has its own mutex.
+ */
+export function historyDir() { return path.join(baseDir(), 'history'); }
+export function historyIndexPath() { return path.join(historyDir(), 'index.json'); }
+export function historyMutex() { return path.join(historyDir(), '.mutex'); }
 
 /** File name for a unit id: `review:security#2` -> `review.security.2` (`:` is illegal on Windows). */
 export function unitFileName(unitId) {
@@ -71,7 +80,7 @@ export function runPaths(runId) {
 }
 
 /** `<yyyymmdd>-<4 random base36>` from the local date. */
-export function newRunId(now = new Date()) {
+export function newRunId(now = new Date(nowMs())) {
   const pad = (n) => String(n).padStart(2, '0');
   const day = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
   let rand = '';

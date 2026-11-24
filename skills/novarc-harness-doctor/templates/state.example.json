@@ -8,7 +8,11 @@
     "title": "Marina",
     "startedAt": "2026-11-20T13:30:00Z",
     "lastRun": "2026-11-20T15:10:00Z",
-    "windowDays": 30
+    "windowDays": 30,
+    "followUpOf": {
+      "runId": "20261018-m4rt",
+      "reviewedAt": "2026-10-18T16:20:00Z"
+    }
   },
   "environment": {
     "agent": "claude-code",
@@ -122,6 +126,7 @@
       "kind": "user",
       "name": "Claude Code · conta 1",
       "path": "~/.claude",
+      "key": "claude-code-conta-1-5e1f0a9c",
       "provider": "claude-code",
       "account": "claude-1",
       "activity": {
@@ -469,6 +474,185 @@
         },
         "example": true
       },
+      "history": [
+        {
+          "runId": "20260914-b7qe",
+          "reviewedAt": "2026-09-14T15:05:00Z",
+          "score": 61.5,
+          "grade": "C",
+          "fixed": 4,
+          "tokensPerSession": 1310000
+        },
+        {
+          "runId": "20261018-m4rt",
+          "reviewedAt": "2026-10-18T16:20:00Z",
+          "score": 76.4,
+          "grade": "B",
+          "fixed": 5,
+          "tokensPerSession": 1262000
+        }
+      ],
+      "followUp": {
+        "of": {
+          "runId": "20261018-m4rt",
+          "reviewedAt": "2026-10-18T16:20:00Z"
+        },
+        "days": 33,
+        "sample": {
+          "sessions": 412,
+          "enough": true
+        },
+        "score": {
+          "then": 76.4,
+          "expected": 84.2,
+          "now": 78.2
+        },
+        "metrics": [
+          {
+            "metric": "context-at-start",
+            "unit": "tokens/session",
+            "before": 46000,
+            "expected": 37870,
+            "after": 38200,
+            "changePct": -17,
+            "verdict": "confirmed",
+            "items": [
+              "U1-204",
+              "U1-206"
+            ]
+          },
+          {
+            "metric": "waste:notfound",
+            "unit": "tokens/session",
+            "before": 4400,
+            "expected": 1400,
+            "after": 2670,
+            "changePct": -39.3,
+            "verdict": "partial",
+            "items": [
+              "U1-703"
+            ]
+          },
+          {
+            "metric": "tokens-per-session",
+            "unit": "tokens/session",
+            "before": 1262000,
+            "expected": null,
+            "after": 1179612,
+            "changePct": -6.5,
+            "verdict": "no-change"
+          },
+          {
+            "metric": "waste:retry",
+            "unit": "tokens/session",
+            "before": 9800,
+            "expected": null,
+            "after": 13592,
+            "changePct": 38.7,
+            "verdict": "worse"
+          },
+          {
+            "metric": "waste-share",
+            "unit": "percent",
+            "before": 2.6,
+            "expected": null,
+            "after": 2,
+            "changePct": -23.1,
+            "verdict": "improved"
+          },
+          {
+            "metric": "tool-output",
+            "unit": "chars/session",
+            "before": 96000,
+            "expected": null,
+            "after": null,
+            "changePct": null,
+            "verdict": "not-measured"
+          }
+        ],
+        "items": [
+          {
+            "id": "U1-204",
+            "title": "CLAUDE.md repetia o guia de estilo inteiro",
+            "round": 2,
+            "status": "fixed",
+            "check": "in-place",
+            "paths": [
+              "~/.claude/CLAUDE.md"
+            ],
+            "saves": 3200000
+          },
+          {
+            "id": "U1-206",
+            "title": "Checklist de release carregado em toda sessão",
+            "round": 2,
+            "status": "fixed",
+            "check": "reverted",
+            "paths": [
+              "~/.claude/CLAUDE.md"
+            ],
+            "saves": 52000,
+            "now": "U1-202"
+          },
+          {
+            "id": "U1-703",
+            "title": "Atalho `pn` apontava para um programa removido",
+            "round": 7,
+            "status": "fixed",
+            "check": "in-place",
+            "paths": [
+              "~/.claude/settings.json"
+            ],
+            "saves": 1200000
+          },
+          {
+            "id": "U1-205",
+            "title": "Regra de testes escrita em dois lugares",
+            "round": 2,
+            "status": "fixed",
+            "check": "changed",
+            "paths": [
+              "~/.claude/CLAUDE.md"
+            ],
+            "saves": null
+          },
+          {
+            "id": "U1-801",
+            "title": "Plugin exemplo-tools atualizado pela linha de comando",
+            "round": 8,
+            "status": "fixed",
+            "check": "not-checked",
+            "saves": null
+          },
+          {
+            "id": "U1-701",
+            "title": "Comando `pnpm` chamado sem estar instalado",
+            "round": 7,
+            "status": "deferred",
+            "now": "U1-701"
+          },
+          {
+            "id": "U1-601",
+            "title": "Skill de revisão de PR nunca invocada",
+            "round": 6,
+            "status": "open",
+            "now": "U1-601"
+          },
+          {
+            "id": "U1-602",
+            "title": "Duas skills com a mesma descrição",
+            "round": 6,
+            "status": "declined"
+          }
+        ],
+        "summary": {
+          "expectedTokensPerSession": 11130,
+          "observedTokensPerSession": -82388,
+          "inPlace": 2,
+          "reverted": 1,
+          "cameBack": 1
+        }
+      },
       "scores": {
         "current": 79.6,
         "baseline": 78.2,
@@ -536,6 +720,7 @@
       "kind": "project",
       "name": "loja-web",
       "path": "~/dev/loja-web",
+      "key": "loja-web-8c2d4b7a",
       "project": {
         "isCode": true,
         "defaultBranch": "main",
@@ -762,6 +947,142 @@
         },
         "example": true
       },
+      "history": [
+        {
+          "runId": "20261018-m4rt",
+          "reviewedAt": "2026-10-18T16:20:00Z",
+          "score": 71.8,
+          "grade": "C",
+          "fixed": 3,
+          "tokensPerSession": 1340000
+        }
+      ],
+      "followUp": {
+        "of": {
+          "runId": "20261018-m4rt",
+          "reviewedAt": "2026-10-18T16:20:00Z"
+        },
+        "days": 33,
+        "sample": {
+          "sessions": 187,
+          "enough": true
+        },
+        "score": {
+          "then": 71.8,
+          "expected": 80.5,
+          "now": 82.1
+        },
+        "metrics": [
+          {
+            "metric": "context-at-start",
+            "unit": "tokens/session",
+            "before": 53800,
+            "expected": 47600,
+            "after": 47400,
+            "changePct": -11.9,
+            "verdict": "confirmed",
+            "items": [
+              "LOJA-203"
+            ]
+          },
+          {
+            "metric": "waste:correction",
+            "unit": "tokens/session",
+            "before": 21500,
+            "expected": 18500,
+            "after": 24599,
+            "changePct": 14.4,
+            "verdict": "worse",
+            "items": [
+              "LOJA-402"
+            ]
+          },
+          {
+            "metric": "tokens-per-session",
+            "unit": "tokens/session",
+            "before": 1340000,
+            "expected": null,
+            "after": 1299465,
+            "changePct": -3,
+            "verdict": "no-change"
+          },
+          {
+            "metric": "context-peak",
+            "unit": "tokens/session",
+            "before": 139000,
+            "expected": null,
+            "after": 121000,
+            "changePct": -12.9,
+            "verdict": "improved"
+          },
+          {
+            "metric": "weighted-per-session",
+            "unit": "tokens/session",
+            "before": null,
+            "expected": null,
+            "after": 194412,
+            "changePct": null,
+            "verdict": "not-measured"
+          }
+        ],
+        "items": [
+          {
+            "id": "LOJA-203",
+            "title": "CLAUDE.md repetia o README inteiro",
+            "round": 2,
+            "status": "fixed",
+            "check": "in-place",
+            "paths": [
+              "./CLAUDE.md"
+            ],
+            "saves": 1240000
+          },
+          {
+            "id": "LOJA-402",
+            "title": "O lint não rodava antes do commit",
+            "round": 4,
+            "status": "fixed",
+            "check": "changed",
+            "paths": [
+              "./.githooks/pre-commit"
+            ],
+            "saves": 600000,
+            "now": "LOJA-401"
+          },
+          {
+            "id": "LOJA-303",
+            "title": "Guia de deploy descrevia um servidor desativado",
+            "round": 3,
+            "status": "fixed",
+            "check": "missing",
+            "paths": [
+              "./docs/deploy.md"
+            ],
+            "saves": null
+          },
+          {
+            "id": "LOJA-104",
+            "title": "O perfil local opcional libera o deploy",
+            "round": 1,
+            "status": "declined",
+            "now": "LOJA-104"
+          },
+          {
+            "id": "LOJA-302",
+            "title": "README para clientes escrito em inglês",
+            "round": 3,
+            "status": "deferred",
+            "now": "LOJA-302"
+          }
+        ],
+        "summary": {
+          "expectedTokensPerSession": 9200,
+          "observedTokensPerSession": -40535,
+          "inPlace": 1,
+          "reverted": 0,
+          "cameBack": 1
+        }
+      },
       "scores": {
         "current": 82.5,
         "baseline": 82.1,
@@ -780,6 +1101,7 @@
       "kind": "project",
       "name": "api-pedidos",
       "path": "~/dev/api-pedidos",
+      "key": "api-pedidos-1f6e3d90",
       "project": {
         "isCode": true,
         "defaultBranch": "main",
@@ -789,6 +1111,62 @@
       "activity": {
         "sessions": 96,
         "lastActive": "2026-11-19T17:20:00Z"
+      },
+      "history": [
+        {
+          "runId": "20261116-h2vd",
+          "reviewedAt": "2026-11-16T18:00:00Z",
+          "score": 96.4,
+          "grade": "A",
+          "fixed": 1,
+          "tokensPerSession": null
+        }
+      ],
+      "followUp": {
+        "of": {
+          "runId": "20261116-h2vd",
+          "reviewedAt": "2026-11-16T18:00:00Z"
+        },
+        "days": 4,
+        "sample": {
+          "sessions": 14,
+          "enough": false,
+          "reason": "too-few-days",
+          "readyAt": "2026-11-23T18:00:00Z"
+        },
+        "score": {
+          "then": 96.4,
+          "expected": 97.8,
+          "now": 97.8
+        },
+        "metrics": [],
+        "items": [
+          {
+            "id": "API-101",
+            "title": "Chave de teste escrita no AGENTS.md",
+            "round": 1,
+            "status": "fixed",
+            "check": "in-place",
+            "paths": [
+              "./AGENTS.md"
+            ],
+            "saves": null
+          },
+          {
+            "id": "API-201",
+            "title": "AGENTS.md do projeto em português",
+            "round": 2,
+            "status": "deferred",
+            "now": "API-201"
+          }
+        ],
+        "summary": {
+          "expectedTokensPerSession": null,
+          "observedTokensPerSession": null,
+          "inPlace": 1,
+          "reverted": 0,
+          "cameBack": 0
+        }
       },
       "scores": {
         "current": 97.8,
@@ -1424,6 +1802,7 @@
       "severity": "critical",
       "class": "permission",
       "check": "deny-prefix-bypass",
+      "rev": "f9f4b4fb2fa9",
       "title": "A regra que bloqueia push forçado é contornável",
       "finding": "A regra de deny só bloqueia o comando quando `--force` vem logo depois de `git push`.",
       "evidence": "settings.json, permissions.deny[0]; 9 chamadas bloqueadas e 2 que passaram em 30 dias",
@@ -1471,6 +1850,7 @@
       "round": 1,
       "severity": "critical",
       "class": "secret",
+      "rev": "08a9d65befdf",
       "title": "Token do GitHub escrito no settings.json",
       "finding": "O settings.json guarda um token de acesso em texto puro, na seção `env`.",
       "evidence": "settings.json, env.GITHUB_TOKEN (mascarado)",
@@ -1503,6 +1883,7 @@
       "round": 1,
       "severity": "low",
       "class": "none",
+      "rev": "544973f84262",
       "title": "Leitura do .env bloqueada",
       "finding": "A regra `Read(./.env)` impede o agente de ler o arquivo de ambiente do projeto.",
       "proposal": "Nada a mudar.",
@@ -1516,6 +1897,7 @@
       "severity": "medium",
       "class": "translate-agent",
       "group": "G-1",
+      "rev": "55722edcc881",
       "title": "CLAUDE.md da conta em português",
       "finding": "As regras da conta estão em português, e só o agente lê este arquivo.",
       "evidence": "29 linhas, cerca de 310 tokens por sessão",
@@ -1524,6 +1906,7 @@
       "saves": {
         "tokens": 1100000,
         "basis": "estimated",
+        "metric": "context-at-start",
         "how": "cerca de 2.700 tokens a menos por sessão em instruções e releituras, vezes 412 sessões"
       },
       "lesson": {
@@ -1559,8 +1942,19 @@
       "round": 2,
       "severity": "medium",
       "class": "reversible",
+      "rev": "f614179b037c",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "U1-206"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "fixed",
+        "lastDecisionAt": "2026-10-18T15:42:00Z"
+      },
       "title": "Checklist de release carregado em toda sessão",
-      "finding": "O CLAUDE.md traz um checklist de release que você usa uma vez por mês.",
+      "finding": "O CLAUDE.md traz um checklist de release que você usa uma vez por mês. Ele saiu do arquivo na revisão de outubro e voltou depois.",
       "evidence": "8 linhas, cerca de 130 tokens em cada uma das 412 sessões",
       "proposal": "Mover o checklist para um arquivo próprio e deixar uma linha que diz quando ler.",
       "opinion": "Mudança sem risco: nada se perde, só deixa de ser carregado à toa.",
@@ -1569,12 +1963,13 @@
       "saves": {
         "tokens": 53000,
         "basis": "measured",
+        "metric": "context-at-start",
         "how": "130 tokens vezes 412 sessões"
       },
       "lesson": {
         "why": "Tudo que está no CLAUDE.md entra no contexto de toda sessão, mesmo quando a tarefa não tem relação.",
         "impact": "O checklist ocupa contexto em 412 sessões e foi útil em 2.",
-        "better": "O arquivo principal diz que o checklist existe e onde está. O agente lê quando a tarefa é publicar uma versão.",
+        "better": "O arquivo principal diz que o checklist existe e onde está. O agente lê quando a tarefa é publicar uma versão. Como ele já voltou uma vez, vale um aviso quando o CLAUDE.md crescer.",
         "principle": "No arquivo sempre carregado fica o que vale para toda tarefa; o resto fica a uma linha de distância.",
         "tradeoff": "Se a linha de referência for vaga, o agente pode não abrir o arquivo quando precisa."
       },
@@ -1612,6 +2007,7 @@
       "round": 2,
       "severity": "low",
       "class": "additive",
+      "rev": "a79e45ee893c",
       "title": "Regra de commit sem o motivo",
       "finding": "A regra dizia para não fazer commit sem pedido, mas não dizia por quê.",
       "proposal": "Acrescentar o motivo na mesma linha.",
@@ -1648,6 +2044,16 @@
       "severity": "medium",
       "class": "delete",
       "file": "~/.claude/skills/revisao-pr/SKILL.md",
+      "rev": "42bf424be2fd",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "U1-601"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "open"
+      },
       "title": "Skill de revisão de PR nunca invocada",
       "finding": "A skill `revisao-pr` não foi invocada nenhuma vez em 30 dias.",
       "evidence": "0 invocações em 412 sessões; descrição de 82 caracteres carregada em todas",
@@ -1669,6 +2075,18 @@
       "round": 7,
       "severity": "medium",
       "class": "install",
+      "rev": "9c8996a68100",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "U1-701"
+      },
+      "history": {
+        "firstSeenAt": "2026-09-14T15:05:00Z",
+        "times": 2,
+        "lastStatus": "deferred",
+        "lastDecisionAt": "2026-10-18T15:48:00Z",
+        "lastNote": "Depois de migrar o último projeto para npm."
+      },
       "title": "Comando `pnpm` chamado sem estar instalado",
       "finding": "O agente tentou `pnpm run` 18 vezes e o comando não existe nesta máquina.",
       "evidence": "18 episódios em 11 sessões",
@@ -1684,6 +2102,7 @@
       "round": 7,
       "severity": "high",
       "class": "external",
+      "rev": "16fe8f4bec40",
       "title": "Servidor MCP do GitHub no nível do usuário",
       "finding": "O servidor MCP do GitHub está configurado para a conta inteira e carrega a lista de ferramentas em toda sessão.",
       "evidence": "0 chamadas em 30 dias; o CLI `gh` está instalado e logado",
@@ -1692,6 +2111,7 @@
       "saves": {
         "tokens": 3200000,
         "basis": "estimated",
+        "metric": "context-at-start",
         "how": "cerca de 7.800 tokens da lista de ferramentas vezes 412 sessões"
       },
       "lesson": {
@@ -1711,6 +2131,7 @@
       "class": "external",
       "origin": "plugin",
       "file": "~/.claude/plugins/cache/exemplo-tools/hooks/hooks.json",
+      "rev": "d354ddeac589",
       "title": "Plugin roda um pacote sem versão fixa",
       "finding": "Um hook do plugin `exemplo-tools` roda um pacote npm na versão mais recente a cada sessão.",
       "evidence": "hooks.json do plugin, evento SessionStart",
@@ -1727,6 +2148,7 @@
       "round": 8,
       "severity": "medium",
       "class": "sync",
+      "rev": "3c32b4ac05d2",
       "title": "A conta 2 não enxerga os agentes da principal",
       "finding": "A pasta `agents/` existe na conta principal e falta na conta 2.",
       "evidence": "comparação das duas pastas de configuração",
@@ -1747,6 +2169,7 @@
       "round": 2,
       "severity": "low",
       "class": "additive",
+      "rev": "67b8086a2b3a",
       "title": "O Codex não recebeu a regra de commit",
       "finding": "O AGENTS.md do Codex foi gerado antes de a regra de commit ganhar o motivo.",
       "proposal": "Acrescentar a regra, já em inglês, no fim do arquivo.",
@@ -1776,6 +2199,7 @@
       "round": 1,
       "severity": "critical",
       "class": "permission",
+      "rev": "f5854ab9bc19",
       "title": "O projeto libera `rm -rf` sem perguntar",
       "finding": "A lista de allow do projeto deixa o agente rodar `rm -rf` com qualquer argumento, sem pedir confirmação.",
       "evidence": "./.claude/settings.json, permissions.allow[2]",
@@ -1808,6 +2232,7 @@
       "class": "permission",
       "origin": "example",
       "file": "./examples/settings.exemplo.json",
+      "rev": "f2173968e153",
       "title": "O exemplo de configuração sugere liberar tudo",
       "finding": "O arquivo de exemplo traz `Bash(*)` na lista de allow.",
       "proposal": "Trocar o exemplo por uma lista curta de comandos do projeto.",
@@ -1822,6 +2247,18 @@
       "class": "permission",
       "origin": "project-optional",
       "file": "./.claude/settings.local.example.json",
+      "rev": "350b680b57f4",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "LOJA-104"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "declined",
+        "lastDecisionAt": "2026-10-18T15:31:00Z",
+        "lastNote": "Só eu uso esse perfil, e de propósito."
+      },
       "title": "O perfil local opcional libera o deploy",
       "finding": "O perfil local de exemplo libera `npm run deploy` sem confirmação.",
       "proposal": "Trocar por uma regra de ask.",
@@ -1836,6 +2273,7 @@
       "severity": "medium",
       "class": "translate-agent",
       "group": "G-1",
+      "rev": "2f8ef9f5668a",
       "title": "AGENTS.md do projeto em português",
       "finding": "As instruções do projeto para agentes estão em português.",
       "evidence": "5 linhas, carregadas em 187 sessões",
@@ -1844,6 +2282,7 @@
       "saves": {
         "tokens": 240000,
         "basis": "estimated",
+        "metric": "context-at-start",
         "how": "cerca de 1.300 tokens a menos por sessão em instruções e releituras, vezes 187 sessões"
       },
       "lesson": {
@@ -1871,6 +2310,7 @@
       "round": 2,
       "severity": "high",
       "class": "reversible",
+      "rev": "f9cb720c6241",
       "title": "Documento de arquitetura importado em toda sessão",
       "finding": "O CLAUDE.md importa `docs/arquitetura.md` inteiro, e ele entra no contexto de toda sessão do projeto.",
       "evidence": "cerca de 9.200 tokens em cada uma das 187 sessões",
@@ -1879,6 +2319,7 @@
       "saves": {
         "tokens": 1720000,
         "basis": "measured",
+        "metric": "context-at-start",
         "how": "9.200 tokens vezes 187 sessões"
       },
       "lesson": {
@@ -1906,6 +2347,7 @@
       "round": 3,
       "severity": "medium",
       "class": "reversible",
+      "rev": "921cd2071865",
       "title": "O guia de setup cita um comando que não existe",
       "finding": "O passo 2 manda rodar `npm run seed`, que foi renomeado.",
       "evidence": "package.json tem `db:seed`; 6 episódios de comando inexistente em 30 dias",
@@ -1937,6 +2379,17 @@
       "severity": "low",
       "class": "translate-human",
       "file": "./README.md",
+      "rev": "f252befeb2cf",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "LOJA-302"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "deferred",
+        "lastDecisionAt": "2026-10-18T15:36:00Z"
+      },
       "title": "README para clientes escrito em inglês",
       "finding": "O README é o que o cliente lê na entrega, e o cliente lê em português.",
       "proposal": "Traduzir o README para português. O rascunho precisa da sua revisão antes de valer.",
@@ -1949,8 +2402,19 @@
       "round": 4,
       "severity": "high",
       "class": "gate",
+      "rev": "a989f8b50523",
+      "previous": {
+        "run": "20261018-m4rt",
+        "item": "LOJA-402"
+      },
+      "history": {
+        "firstSeenAt": "2026-10-18T16:20:00Z",
+        "times": 1,
+        "lastStatus": "fixed",
+        "lastDecisionAt": "2026-10-18T15:12:00Z"
+      },
       "title": "O pre-commit nunca bloqueia",
-      "finding": "O hook de pre-commit roda o lint e ignora o resultado.",
+      "finding": "O hook de pre-commit roda o lint e ignora o resultado. Na revisão de outubro o lint passou a rodar no hook; depois o `|| true` foi acrescentado.",
       "evidence": "./.githooks/pre-commit, linha 3; 14 commits com erro de lint chegaram à main em 30 dias",
       "proposal": "Tirar o `|| true` do hook e rodar o lint também no CI.",
       "opinion": "O gate existe e não funciona, que é pior do que não existir: todo mundo acha que está coberto.",
@@ -1988,6 +2452,7 @@
       "round": 5,
       "severity": "low",
       "class": "none",
+      "rev": "cef6342078cc",
       "title": "Pasta de rascunhos fora do git",
       "finding": "A pasta `rascunhos/` não é versionada.",
       "proposal": "Nada a mudar.",
@@ -2001,6 +2466,18 @@
       "severity": "medium",
       "class": "translate-agent",
       "group": "G-1",
+      "rev": "879d638d3bb3",
+      "previous": {
+        "run": "20261116-h2vd",
+        "item": "API-201"
+      },
+      "history": {
+        "firstSeenAt": "2026-11-16T18:00:00Z",
+        "times": 1,
+        "lastStatus": "deferred",
+        "lastDecisionAt": "2026-11-16T17:40:00Z",
+        "lastNote": "Junto com os outros arquivos de agente."
+      },
       "title": "AGENTS.md do projeto em português",
       "finding": "As instruções do projeto para agentes estão em português.",
       "evidence": "4 linhas, carregadas em 96 sessões",
@@ -2009,6 +2486,7 @@
       "saves": {
         "tokens": 96000,
         "basis": "estimated",
+        "metric": "context-at-start",
         "how": "cerca de 1.000 tokens a menos por sessão em instruções e releituras, vezes 96 sessões"
       },
       "lesson": {
@@ -2037,6 +2515,7 @@
       "title": "Arquivos de agente em português",
       "round": 2,
       "summary": "O CLAUDE.md da conta e os AGENTS.md de dois projetos estão em português. Só o agente lê esses arquivos: em inglês eles custam menos em toda sessão e casam melhor com skills e código.",
+      "rev": "ff53194e9e6b",
       "items": [
         "U1-201",
         "LOJA-201",
@@ -2089,6 +2568,7 @@
       "runId": "20261120-k3x9",
       "target": "U1-202",
       "action": "approve",
+      "rev": "f614179b037c",
       "via": "board"
     }
   ],

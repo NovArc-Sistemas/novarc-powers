@@ -2,7 +2,7 @@
 // and who holds it right now. A claim is one lock file per unit; the file is the truth and
 // `queue.json` mirrors it for readers.
 import fs from 'node:fs';
-import { readText } from './store.mjs';
+import { readText, nowMs } from './store.mjs';
 
 export const REVIEW_UNITS = [
   { name: 'security', rounds: [1] },
@@ -60,7 +60,7 @@ export function staticUnits(run) {
  * `busy` is true while an item of that harness is in progress (changed within the ttl): the unit
  * then belongs to whoever is applying, and nobody else may start.
  */
-export function applyUnits(run, items, now = Date.now(), ttlMinutes = DEFAULT_TTL_MINUTES) {
+export function applyUnits(run, items, now = nowMs(), ttlMinutes = DEFAULT_TTL_MINUTES) {
   const units = [];
   for (const h of run.harnesses) {
     const mine = items.filter((i) => i.harness === h.id);
@@ -71,13 +71,16 @@ export function applyUnits(run, items, now = Date.now(), ttlMinutes = DEFAULT_TT
       const t = Date.parse(i.updatedAt || '');
       return Number.isNaN(t) || now - t <= ttlMinutes * 60000;
     });
-    units.push({ id: `apply:${h.id}`, kind: 'apply', rounds: [], harnesses: [h.id], approved, inProgress: inProgress.map((i) => i.id), busy });
+    // The rev of each item as it is now: what the executor is about to apply (`mark --rev`).
+    const revs = {};
+    for (const i of mine) if ((i.status === 'approved' || i.status === 'in-progress') && typeof i.rev === 'string') revs[i.id] = i.rev;
+    units.push({ id: `apply:${h.id}`, kind: 'apply', rounds: [], harnesses: [h.id], approved, inProgress: inProgress.map((i) => i.id), revs, busy });
   }
   return units;
 }
 
 /** The claim on a unit, or null: `{ unit, session, at, ttlMinutes, ageMinutes, stale }`. */
-export function readClaim(paths, unitId, now = Date.now()) {
+export function readClaim(paths, unitId, now = nowMs()) {
   const file = paths.claimFile(unitId);
   let text;
   try { text = readText(file); } catch { text = ''; }
@@ -102,7 +105,7 @@ export function readClaim(paths, unitId, now = Date.now()) {
  *   busy     an apply unit whose harness is being changed without a claim
  *   pending  free to claim
  */
-export function unitsView(paths, run, queue, items, now = Date.now()) {
+export function unitsView(paths, run, queue, items, now = nowMs()) {
   const stored = new Map(((queue && queue.units) || []).map((u) => [u.id, u]));
   const out = [];
   for (const u of [...staticUnits(run), ...applyUnits(run, items, now)]) {

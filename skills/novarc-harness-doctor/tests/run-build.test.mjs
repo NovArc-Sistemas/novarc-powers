@@ -175,7 +175,10 @@ test('group ids are stable when another unit completes later', (t) => {
   assert.equal(sb.complete('review:gates', gates).code, 0);
   assert.equal(sb.run(['build', '--no-render']).code, 0);
   let state = sb.read('state.json');
-  assert.deepEqual(state.groups, [{ id: 'G-1', title: 'Same gate', round: 4, items: ['ACME-401', 'NP-401', 'U1-401'], summary: 'Three places.' }]);
+  const { rev: groupRev, ...group } = state.groups[0];
+  assert.deepEqual(state.groups.length, 1);
+  assert.deepEqual(group, { id: 'G-1', title: 'Same gate', round: 4, items: ['ACME-401', 'NP-401', 'U1-401'], summary: 'Three places.' });
+  assert.match(groupRev, /^[0-9a-f]{12}$/, 'build writes the revision of the group');
   assert.equal(state.items.find((i) => i.id === 'NP-401').group, 'G-1');
   sb.run(['decide', '--target', 'G-1', '--action', 'approve', '--exclude', 'U1-401']);
 
@@ -267,7 +270,9 @@ test('a build with no probes and no findings still gives a valid, empty state', 
   const state = sb.read('state.json');
   assert.deepEqual(validate(state, loadStateSchema().schema), []);
   assert.ok(!('accounts' in state), 'no account selected: no accounts section');
-  assert.deepEqual(state.harnesses, [{ id: 'acme-shop', kind: 'project', name: 'acme-shop', path: '~/dev/acme-shop' }]);
+  const key = sb.read('run.json').harnesses[0].harnessKey;
+  assert.match(key, /^acme-shop-[0-9a-f]{8}$/, 'the stable key of the harness across runs');
+  assert.deepEqual(state.harnesses, [{ id: 'acme-shop', key, kind: 'project', name: 'acme-shop', path: '~/dev/acme-shop' }]);
   assert.deepEqual([state.files, state.items, state.groups, state.inventory, state.decisions], [[], [], [], [], []]);
   assert.equal(state.rounds.length, 8);
   assert.equal(state.environment.channel, 'file');
