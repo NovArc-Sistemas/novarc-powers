@@ -250,7 +250,15 @@ Rules:
   changed, that name is left exactly as it is and the result says so (`warnings` of `apply`,
   `notes` of `install-check`, `note` of `undo`: "... had been changed by something else in the
   meantime and was left as it is"), and the session-start check then reports it as edited by
-  hand. Between that last look and the rename there are two system calls and no lock: an app
+  hand. The look is taken before EVERY attempt: a rename that the system refuses for a moment
+  (a scanner holds the file, on Windows above all) is tried again up to three times a few
+  milliseconds apart, and an edit, or a folder moved away, during such a wait is seen before
+  the next attempt. It also reaches back to the moment the file was read: where the new content
+  was worked out from the old one (an MCP file, a hook file, a generated file that is out of
+  date), a file that changed between that read and the write is not written either. The same
+  holds in recovery, in `undo`, for a folder brought into the primary (the place is checked
+  before each attempt of its rename) and for the check when it links an unedited copy again.
+  Between the last look and the rename itself there are two system calls and no lock: an app
   that writes that very path in that instant can still lose its edit. The window cannot be made
   zero with renames; it is the reason to apply with the agent apps closed.
 - **A path is a place only while its folder is the same folder.** Whatever is recorded for

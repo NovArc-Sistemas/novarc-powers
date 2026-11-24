@@ -154,7 +154,7 @@ export function installCheck({ primaryId, yes = false, home = homeDir(), env = p
   const patch = makePatch(text, next);
   const afterHash = sha256(Buffer.from(next, 'utf8'));
   const edit = run.intend({ op: 'patch', path: target.file, beforeHash: sha256(buf), afterHash, patch });
-  try { run.write(target.file, next); } catch (err) {
+  try { run.write(target.file, next, sha256(buf)); } catch (err) {
     run.unop(); // a failed write leaves the file as it was
     throw err;
   }
@@ -216,7 +216,7 @@ export function uninstallCheck({ primaryId, yes = false, home = homeDir(), env =
       const peers = peerCandidates(file, { manifests: [readManifest(manifestFile(home))], accounts: detectAccounts({ home, env }) });
       const refusal = refuseUnknownNames(file, peers, home, { account: accountId });
       if (refusal) return refusal;
-      const r = writeKeepingLinks(file, next, { home, peers });
+      const r = writeKeepingLinks(file, next, { home, peers, expect: sha256(buf) });
       if (r.pending.length) out.notes = [pendingNote(file, r, home)];
       if (r.left) (out.notes ||= []).push(leftNote(file, r, home));
       out.changed = true;

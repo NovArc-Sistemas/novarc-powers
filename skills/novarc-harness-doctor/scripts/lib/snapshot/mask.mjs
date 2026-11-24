@@ -77,6 +77,9 @@ const ANY_WORD = /secret|password|passwd|passphrase|credential|senha|segredo|cre
 // `chave_api`, `chave_de_acesso`, `chave_secreta`, and `pwd` when it is part of a longer name
 // (`DB_PWD`; alone it is as often the working directory).
 const LONGER_NAME = /(?:^|_)chave_(?:de_)?(?:api|acesso|secreta|privada)(?:_?\d+)?$|_pwd(?:_?\d+)?$/;
+// The session key of a password manager, the way its environment variable is written
+// (`BW_SESSION`, `OP_SESSION_account`). Upper case only: `tokensPerSession` counts things.
+const ENV_SESSION = /^(?:[A-Z][A-Z0-9]*_)+SESSION$|^OP_SESSION_\w+$/;
 const KEY_MEMO = new Map();
 
 // A name is classified by what it says once it is read, not by how it is spelled in the file:
@@ -142,6 +145,7 @@ function keyWords(name) {
 }
 
 function saysSecret(name) {
+  if (ENV_SESSION.test(name)) return true;
   const words = keyWords(name);
   if (!words.length || words.length > 16 || DESCRIPTORS.has(words[words.length - 1])) return false;
   // With its separators, and without them: `pass_word`, `passWord` and `pass-word` are `password`.
@@ -218,6 +222,13 @@ const CODE_READER = new RegExp(`^(?:${[
 ].join('|')})$`);
 const REFERENCE_MAX = 512;
 
+/**
+ * True when `s` can be the message of a `${VAR:?message}`: a sentence about the variable, made
+ * of words of letters and of names in upper case, with nothing that could be a value written
+ * where a message goes.
+ */
+const isMessage = (s) => /^(?:(?:\p{L}+|[A-Z][A-Z0-9_]*)(?:[ .,:;!?'-]+|$))*$/u.test(s);
+
 /** Index after the `${...}` that starts at `i`, when all of it is a reference; else -1. */
 function bracedEnd(v, i, ctx) {
   let j = i + 2;
@@ -231,7 +242,7 @@ function bracedEnd(v, i, ctx) {
   if (op[0].endsWith('?')) {
     // `${VAR:?message}`: the message is printed when VAR is missing; it never becomes the value.
     const end = v.indexOf('}', j);
-    return end === -1 || /[$`\\]/.test(v.slice(j, end)) ? -1 : end + 1;
+    return end === -1 || !isMessage(v.slice(j, end)) ? -1 : end + 1;
   }
   // What follows `:-`, `-`, `:=`, `=`, `:+`, `+` or a bare `:` can become the value: it has to be
   // empty (`""` and `''` included) or made of references itself.
@@ -240,46 +251,183 @@ function bracedEnd(v, i, ctx) {
   return v[j] === '}' ? j + 1 : -1;
 }
 
-// What a `$(...)` may run and still be a reference: a command that reads the value from where it
-// is kept. A file: `cat`, `type`, `Get-Content` (`gc`), `< file`. A password manager or the
-// secret store of a cloud: `op`, `pass`, `gopass`, `bw`, `vault`, `doppler`, `aws`, `gcloud`,
-// `az`, `gh auth token`, `security find-generic-password` (and `find-internet-password`),
-// `secret-tool`, `keyring`, `sops`, `Get-Secret`. Its output may go through `tr`, `head`, `tail`,
-// `cut`, `base64`, `grep` or `jq` with a plain path. Anything else is a command whose output
-// cannot be told from its text, and `$(printf literal)` is a literal.
-const FETCHERS = new Set(['cat', 'type', 'get-content', 'gc', 'op', 'pass', 'gopass', 'bw', 'vault', 'doppler', 'aws', 'gcloud', 'az', 'gh', 'security', 'secret-tool', 'keyring', 'sops', 'get-secret']);
-const FILTERS = new Set(['tr', 'head', 'tail', 'cut', 'base64', 'grep', 'jq']);
-const ECHO_LIKE = /(?:^|[^A-Za-z0-9_-])(?:echo|printf|print|write-output|write-host|out-string|yes)(?![A-Za-z0-9_-])/i;
-const JQ_PLAIN = /^jq(?:\s+-[rejcM]+)*\s+'?\.[\w.[\]-]*'?$/;
+// Every exemption in this section leaves a text readable because it names a value. So nothing
+// in such a text may read like a value itself: a run of letters and digits that is long and
+// mixed (`aB3xK9mQ2pL7`), a long number, or any run too long for a word is a credential wherever
+// it stands: in the name of a variable, in an argument of a command, in the name asked of the
+// environment.
+function valueLike(run) {
+  if (run.length >= 32) return true;
+  if (run.length < 10) return false;
+  const digits = run.replace(/\D/g, '').length;
+  return digits === run.length ? digits >= 16 : digits >= 3 && run.length - digits >= 3;
+}
+const carriesValue = (text) => (text.match(/[A-Za-z0-9]+/g) || []).some(valueLike);
 
-/** True when the body of a `$(...)` only fetches a value: nothing in it prints a text of its own. */
+// A command substitution. Knowing that a command fetches a value says nothing about its
+// arguments (`bw get password item --session KEY` carries a key, `bw unlock PASSWORD` a
+// password), so a `$(...)` is a reference only when the whole command is one of the forms
+// written down here, argument by argument: the words of the form in order, and for each flag it
+// may carry whether that flag takes nothing (null), a name, or one of a set of words. A command
+// in any other shape is masked: another subcommand, a flag the form does not list, a quoted or
+// escaped argument, a glob, a redirection, an argument that reads like a value.
+const ITEM = Symbol('name'); // a path, a URI, the name of an item or of a field: see argName
+const OP_URI = Symbol('op uri'); // `op://vault/item/field`
+const JQ_PATH = Symbol('jq path'); // `.`, `.token`, `.data.token`
+const oneOf = (...words) => new Set(words);
+const OUTPUT = oneOf('text', 'json', 'tsv', 'yaml', 'table', 'none');
+const AWS_FLAGS = { '--query': ITEM, '--output': OUTPUT, '--region': ITEM, '--profile': ITEM };
+const AZ_FLAGS = { '--query': ITEM, '--output': OUTPUT, '-o': OUTPUT, '--subscription': ITEM };
+const KEYCHAIN_FLAGS = { '-s': ITEM, '-a': ITEM, '-l': ITEM, '-w': null };
+const GET_CONTENT = [
+  { ci: true, words: [ITEM], flags: { '-raw': null } },
+  { ci: true, words: [], flags: { '-path': ITEM, '-literalpath': ITEM, '-raw': null }, any: ['-path', '-literalpath'] },
+];
+// `any` lists the flags of which the form needs at least one. `ci` is a PowerShell command:
+// its words and flags are matched without regard to case.
+const COMMAND_FORMS = {
+  cat: [{ words: [ITEM] }],
+  type: [{ words: [ITEM] }],
+  'get-content': GET_CONTENT,
+  gc: GET_CONTENT,
+  'get-secret': [
+    { ci: true, words: [ITEM], flags: { '-asplaintext': null, '-vault': ITEM } },
+    { ci: true, words: [], flags: { '-name': ITEM, '-asplaintext': null, '-vault': ITEM }, any: ['-name'] },
+  ],
+  op: [
+    { words: ['read', OP_URI], flags: { '--account': ITEM, '-n': null, '--no-newline': null } },
+    { words: ['item', 'get', ITEM], flags: { '--fields': ITEM, '--vault': ITEM, '--account': ITEM, '--reveal': null }, any: ['--fields'] },
+  ],
+  pass: [{ words: ['show', ITEM] }, { words: [ITEM] }],
+  gopass: [{ words: ['show', ITEM], flags: { '-o': null } }],
+  bw: [{ words: ['get', oneOf('password', 'username', 'uri', 'totp', 'notes', 'item'), ITEM], flags: { '--raw': null, '--nointeraction': null } }],
+  vault: [
+    { words: ['kv', 'get', ITEM], flags: { '-field': ITEM, '--field': ITEM, '-mount': ITEM, '--mount': ITEM }, any: ['-field', '--field'] },
+    { words: ['read', ITEM], flags: { '-field': ITEM, '--field': ITEM }, any: ['-field', '--field'] },
+  ],
+  doppler: [{ words: ['secrets', 'get', ITEM], flags: { '--plain': null, '--project': ITEM, '--config': ITEM }, any: ['--plain'] }],
+  aws: [
+    { words: ['secretsmanager', 'get-secret-value'], flags: { '--secret-id': ITEM, '--version-stage': ITEM, ...AWS_FLAGS }, any: ['--secret-id'] },
+    { words: ['ssm', 'get-parameter'], flags: { '--name': ITEM, '--with-decryption': null, ...AWS_FLAGS }, any: ['--name'] },
+    { words: ['ecr', 'get-login-password'], flags: { '--region': ITEM, '--profile': ITEM } },
+  ],
+  gcloud: [
+    { words: ['secrets', 'versions', 'access', ITEM], flags: { '--secret': ITEM, '--project': ITEM }, any: ['--secret'] },
+    { words: ['auth', 'print-access-token'] },
+    { words: ['auth', 'print-identity-token'] },
+  ],
+  az: [
+    { words: ['keyvault', 'secret', 'show'], flags: { '--vault-name': ITEM, '--name': ITEM, '-n': ITEM, '--id': ITEM, ...AZ_FLAGS }, any: ['--name', '-n', '--id'] },
+    { words: ['account', 'get-access-token'], flags: { '--resource': ITEM, ...AZ_FLAGS } },
+  ],
+  gh: [{ words: ['auth', 'token'], flags: { '--hostname': ITEM, '-h': ITEM } }],
+  security: [
+    { words: ['find-generic-password'], flags: KEYCHAIN_FLAGS, any: ['-w'] },
+    { words: ['find-internet-password'], flags: KEYCHAIN_FLAGS, any: ['-w'] },
+  ],
+  'secret-tool': [{ words: ['lookup', ITEM, ITEM] }, { words: ['lookup', ITEM, ITEM, ITEM, ITEM] }],
+  keyring: [{ words: ['get', ITEM, ITEM] }],
+  sops: [{ words: [ITEM], flags: { '-d': null, '--decrypt': null }, any: ['-d', '--decrypt'] }, { words: ['decrypt', ITEM] }],
+  jq: [{ words: [JQ_PATH, ITEM], flags: { '-r': null, '--raw-output': null } }],
+};
+// What the output of such a command may be piped through: a filter that only cuts it, written
+// with no argument that is a text of its own.
+const FILTER_FORMS = [
+  /^head(?: -n ?\d{1,4}| -c ?\d{1,6}| -\d{1,4})?$/,
+  /^tail(?: -n ?\d{1,4}| -c ?\d{1,6}| -\d{1,4})?$/,
+  /^cut(?: -d ?[:=,.@/_-])? -f ?\d{1,3}(?:[,-]\d{1,3})*$/,
+  /^base64 (?:-d|-D|--decode)$/,
+  /^jq(?: -r| -j| -e| --raw-output)* \.(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?$/,
+  /^grep(?: -[iEow])* [A-Za-z_][A-Za-z0-9_.=-]{0,60}$/,
+];
+const JQ_PATH_RE = /^\.(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?$/;
+const SAFE_ARGUMENT = /^[A-Za-z0-9._/:@~+,%=-]+$/;
+
+/**
+ * True when `tok` is an argument that names something: a path, a URI, an item, a field. It is
+ * made of safe characters (no quote, no escape, no glob, no space), a reference may stand in it
+ * (`$HOME/.token`, `${XDG_CONFIG_HOME}/app/key`), and nothing in it reads like a value.
+ */
+function argName(tok) {
+  if (!tok || tok.length > 200 || tok[0] === '-') return false;
+  let written = '';
+  for (let i = 0; i < tok.length;) {
+    const end = tok[i] === '$' ? referenceEnd(tok, i, { template: false }) : -1;
+    if (end !== -1) { written += '/'; i = end; } else written += tok[i++];
+  }
+  return SAFE_ARGUMENT.test(written) && !carriesValue(written);
+}
+
+/** True when the token `tok` is what the slot of a form asks for. */
+function fits(slot, tok, ci) {
+  if (typeof slot === 'string') return (ci ? tok.toLowerCase() : tok) === slot;
+  if (slot instanceof Set) return slot.has(tok);
+  if (slot === JQ_PATH) return JQ_PATH_RE.test(tok) && !carriesValue(tok);
+  if (slot === OP_URI) return tok.startsWith('op://') && argName(tok);
+  return argName(tok);
+}
+
+/** True when the tokens after a command are that form: its words in order, its flags anywhere. */
+function matchesForm(form, tokens) {
+  const flags = form.flags || {};
+  const seen = new Set();
+  let w = 0;
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t];
+    if (tok.length > 1 && tok[0] === '-') {
+      const eq = tok.indexOf('=');
+      const written = eq === -1 ? tok : tok.slice(0, eq);
+      const flag = form.ci ? written.toLowerCase() : written;
+      if (!Object.hasOwn(flags, flag)) {
+        // A flag the form does not list (`--session`, `--token`, `--password` among them) may
+        // stand in it only when what it is given is a reference and nothing else: then the
+        // command still holds no text of its own.
+        const value = eq !== -1 ? tok.slice(eq + 1) : tokens[++t];
+        if (!/^--?[A-Za-z][A-Za-z-]*$/.test(written) || !value || referencesEnd(value, 0, { template: false }) !== value.length) return false;
+        continue;
+      }
+      seen.add(flag);
+      if (flags[flag] === null) { if (eq !== -1) return false; continue; }
+      const value = eq !== -1 ? tok.slice(eq + 1) : tokens[++t];
+      if (value === undefined || !fits(flags[flag], value, form.ci)) return false;
+      continue;
+    }
+    if (w >= form.words.length || !fits(form.words[w++], tok, form.ci)) return false;
+  }
+  return w === form.words.length && (!form.any || form.any.some((f) => seen.has(f)));
+}
+
+/** True when the body of a `$(...)` is a verified form of a command that fetches a value. */
 function fetches(body) {
-  const b = body.trim().replace(/\s2>\s*\/dev\/null(?![\w/])/g, '');
-  if (!b) return false;
+  const b = body.trim();
+  if (!b || b.length > 400) return false;
   // A subexpression around a reference: `$($env:TOKEN)`.
   if (referencesEnd(b, 0, { template: false }) === b.length) return true;
-  // No second command, no text fed to the first one, nothing echoed.
-  if (/[;&`\r\n>]|\$\(|<<|<\(/.test(b) || ECHO_LIKE.test(b)) return false;
-  // A quoted argument with another quote inside is as often an expression that yields a literal
-  // (`--query "'text'"`, `jq '"text"'`).
-  if (/"[^"]*'[^"]*"|'[^']*"[^']*'/.test(b)) return false;
   return b.split('|').every((part, n) => {
-    const stage = part.trim();
-    const words = stage.split(/\s+/);
-    if (n === 0 && words[0] === 'sudo') words.shift();
-    const first = words[0] || '';
-    if (n === 0 && first.startsWith('<')) return true; // `$(< file)`
-    const command = first.replace(/^["']|["']$/g, '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '');
-    if (n > 0) return FILTERS.has(command) && (command !== 'jq' || JQ_PLAIN.test(stage));
-    if (!FETCHERS.has(command)) return false;
-    if (command === 'gh') return words[1] === 'auth' && words[2] === 'token';
-    if (command === 'security') return /^find-(?:generic|internet)-password$/.test(words[1] || '');
-    return true;
+    // The one redirection that changes nothing: errors thrown away.
+    const stage = part.trim().replace(/\s+2>\s?\/dev\/null$/, '').replace(/\s+/g, ' ');
+    if (!stage || carriesValue(stage)) return false;
+    if (n > 0) return FILTER_FORMS.some((re) => re.test(stage));
+    const tokens = stage.split(' ');
+    if (tokens[0] === 'sudo') tokens.shift();
+    // `$(< file)`
+    if (tokens[0] === '<' && tokens.length === 2) return argName(tokens[1]);
+    if (tokens.length === 1 && tokens[0].length > 1 && tokens[0][0] === '<') return argName(tokens[0].slice(1));
+    const command = (tokens.shift() || '').toLowerCase().replace(/\.exe$/, '');
+    return Object.hasOwn(COMMAND_FORMS, command) && COMMAND_FORMS[command].some((form) => matchesForm(form, tokens));
   });
 }
 
-/** Index after the one reference that starts at `i`, or -1 when there is none there. */
+/**
+ * Index after the one reference that starts at `i`, or -1 when there is none there. A reference
+ * whose own text reads like a value is none: `${aB3xK9mQ2pL7}` is that value in braces.
+ */
 function referenceEnd(v, i, ctx) {
+  const end = referenceShapeEnd(v, i, ctx);
+  return end !== -1 && carriesValue(v.slice(i, end)) ? -1 : end;
+}
+
+function referenceShapeEnd(v, i, ctx) {
   if (v[i] === '`' && !ctx.template) {
     // Backticks inside another string (`"`cat file`"`): judged like a value written between them.
     const close = v.indexOf('`', i + 1);
@@ -322,7 +470,8 @@ function referencesEnd(v, i, ctx) {
  * True when `v`, all of it, names a secret instead of being one:
  *   `${VAR}`, `${config.token}`, `${env:VAR}`; `${VAR:-default}` and its kin only when the default
  *   is empty or a reference itself; `${VAR:?message}`
- *   `$(command ...)`, whole, when the command fetches the value (see `fetches`)
+ *   `$(command ...)`, whole, when the command is a verified form of one that fetches the value
+ *   (see COMMAND_FORMS)
  *   `$VAR` in upper case, `$env:Name`, and the arguments `$1`, `$@`, `$*`
  *   `{{ expression }}` and `${{ expression }}`, when the expression only names things
  *   `%VAR%`, `<placeholder>`, `***`, `xxx`, `...`
@@ -336,7 +485,7 @@ function referencesEnd(v, i, ctx) {
  */
 function isReference(v, backticks = false) {
   if (!v || v.length > REFERENCE_MAX) return false;
-  if (PLACEHOLDER.test(v) || CODE_READER.test(v)) return true;
+  if ((PLACEHOLDER.test(v) || CODE_READER.test(v)) && !carriesValue(v)) return true;
   if (referencesEnd(v, 0, { template: false }) === v.length) return true;
   return backticks && (referencesEnd(v, 0, { template: true }) === v.length || fetches(v));
 }
@@ -704,7 +853,9 @@ function yamlSpans(text, st) {
     for (let lead; (lead = /^(?:&\S+|!(?!secret\s)\S*)\s+/.exec(v)) !== null;) v = v.slice(lead[0].length);
     const at = end - v.length;
     if (/^[|>][0-9+-]*\s*(?:#.*)?$/.test(v)) { block = m.groups.lead.length; continue; }
-    if (!v || /^(?:[*#`]|!secret\s)/.test(v)) continue;
+    if (!v || v[0] === '#' || v[0] === '`') continue;
+    // Both name the value; a "name" that reads like a value, or more than a name, is the value.
+    if (/^(?:\*|!secret\s+)[A-Za-z0-9_.-]+\s*(?:#.*)?$/.test(v) && !carriesValue(v)) continue;
     if (v[0] === '"' || v[0] === "'") {
       const [stop] = stringEnd(text, at, 0, v[0] === '"');
       pushValue(st, text, at + 1, stop, v[0]);
@@ -787,7 +938,10 @@ function containerSpans(text, open, st) {
         i += num[0].length;
         continue;
       }
+      const from = i;
       while (i < stop && !' \t\r\n{}[],:=#/"\'\\`'.includes(text[i])) i++; // a bare word
+      // A bare word is a name, unless it reads like a value.
+      if (wasSlot && carriesValue(text.slice(from, i))) found.push([false, from, i, null]);
       continue;
     }
     if (c !== '\\' && c !== '`' && text[i + 1] === c && text[i + 2] === c) {
@@ -902,6 +1056,11 @@ function nameSpans(text, j, st) {
   }
 }
 
+// A word with no quotes around it, as far as it may be one value: `cfg.token`, `aB3xK9mQ2pL7+/=`.
+const BARE_WORD = /^[A-Za-z0-9_$@.+/=-]+/;
+/** True when a quoted string is the name of something (a variable, a key), not a value. */
+const isPlainName = (s) => /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,120}$/.test(s) && !carriesValue(s);
+
 /**
  * The inside of the bracket at `open`, to the one that closes it on the same line. Every string
  * in it is masked like a value, except where it is a name: the index in `x["name"]`, and the
@@ -934,15 +1093,21 @@ function groupSpans(text, open, st, kind) {
     if (isQuote(text[i + k])) {
       const q = text[i + k];
       const [end, after] = stringEnd(text, i + k, k, !(st.lang === 'toml' && q === "'"));
-      if (!(kind === 'index' || (kind === 'reader' && arg === 0))) found.push([i + k + 1, end, q]);
+      // The name asked for stays only when it is one: `getenv("DB_PASSWORD")`, not `getenv("aB3xK9mQ2pL7")`.
+      const name = (kind === 'index' || (kind === 'reader' && arg === 0)) && isPlainName(text.slice(i + k + 1, end));
+      if (!name) found.push([i + k + 1, end, q]);
       i = Math.max(after, i + k + 1);
       fresh = false;
       continue;
     }
     const num = fresh && kind === 'reader' && arg > 0 ? NUMBER_RE.exec(text.slice(i, i + 64)) : null;
+    const word = num || k ? null : BARE_WORD.exec(text.slice(i, i + 200));
     if (num) {
       if (!SWITCH_WORD.test(num[0])) found.push([i, i + num[0].length, null]);
       i += num[0].length;
+    } else if (word && carriesValue(word[0])) {
+      found.push([i, i + word[0].length, null]); // an argument that reads like a value is one
+      i += word[0].length;
     } else {
       const named = k === 0 ? nameSpans(text, i, st) : -1;
       i = named !== -1 ? named : i + (k || 1);
@@ -975,6 +1140,12 @@ function operandSpans(text, j, st, depth, group) {
   if (num) {
     if (!SWITCH_WORD.test(num[0])) pushValue(st, text, j, j + num[0].length);
     return j + num[0].length;
+  }
+  // A bare word is a name (`pw`, `cfg.token`), which holds no value, unless it reads like one.
+  const word = BARE_WORD.exec(text.slice(j, j + 200));
+  if (word && carriesValue(word[0])) {
+    pushValue(st, text, j, j + word[0].length);
+    return j + word[0].length;
   }
   const e = nameSpans(text, j, st);
   if (e === -1) return -1;
@@ -1139,7 +1310,7 @@ function valueSpans(text, p, st, { name, quotedKey, tight, sep, opener, at }) {
       // A name that is called or indexed is code (`TOKEN=getToken()`, `password=os.environ["X"]`),
       // when its brackets close; in a query string nothing is.
       const code = !query && CALLED.test(text.slice(from, from + 200)) ? nameSpans(text, from, st) : -1;
-      if (code !== -1 && (text[code - 1] === ')' || text[code - 1] === ']')) end = code;
+      if (code !== -1 && (text[code - 1] === ')' || text[code - 1] === ']') && !carriesValue(text.slice(from, code))) end = code;
       else {
         // The value stops where the brackets around the assignment close, and at the next pair of a query string.
         end = from + unclosedEnd(text.slice(from, end), query);
@@ -1160,6 +1331,12 @@ function valueSpans(text, p, st, { name, quotedKey, tight, sep, opener, at }) {
     if (!/^\S+$/.test(v.replace(SCHEME_RE, '')) || plainScalar(name, v)) return p; // one word: a sentence is not a credential
     pushValue(st, text, i, i + v.length, opener);
     return i + v.length;
+  }
+  // `!secret name` and `*alias` (YAML) name the value; a "name" that reads like a value is one.
+  const named = k === 0 ? /^(?:!secret[ \t]+|\*)([A-Za-z0-9_.-]+)/.exec(text.slice(i, i + 200)) : null;
+  if (named) {
+    if (carriesValue(named[1])) pushValue(st, text, i + named[0].length - named[1].length, i + named[0].length);
+    return i + named[0].length;
   }
   // In a file of prose or of no known format (notes, a configuration file with no extension) an
   // unquoted word after a secret name is its value in two cases: when the line is that name and
@@ -1188,9 +1365,9 @@ function valueSpans(text, p, st, { name, quotedKey, tight, sep, opener, at }) {
   return p;
 }
 
-// `${NAME:-word}`, `${NAME-word}`, `${NAME:=word}`, `${prop:word}`: an expansion with a word the
-// name falls back to. (`${NAME:?message}` has none, and `${NAME:+word}` stands in for the name.)
-const BRACED_DEFAULT = /\$\{([A-Za-z_][A-Za-z0-9_.]*)(?::?[-=]|:(?![?+]))/g;
+// `${NAME:-word}`, `${NAME-word}`, `${NAME:=word}`, `${NAME:+word}`, `${prop:word}`: an expansion
+// with a word that can stand where the name does; and `${NAME:?message}`, with a message.
+const BRACED_DEFAULT = /\$\{([A-Za-z_][A-Za-z0-9_.]*)(:?[-=+?]|:)/g;
 /** True when the name that starts at `at` is the one of a `${NAME...}` expansion. */
 const expanded = (text, at) => text[at - 1] === '{' && text[at - 2] === '$';
 
@@ -1264,8 +1441,10 @@ function flagSpans(text, st) {
   FLAG.lastIndex = 0;
   let m;
   while ((m = FLAG.exec(text)) !== null) {
-    // `--secret-id name`, `--secret-arn ...`: such a flag takes the name of a secret, not one.
-    if (!isSensitiveKey(m[1]) || /[-_](?:id|arn)$/i.test(m[1])) continue;
+    if (!isSensitiveKey(m[1])) continue;
+    // `--secret-id name`, `--secret-arn ...`: such a flag takes the name of a secret, not one,
+    // as long as what it is given reads like a name.
+    const namesOne = /[-_](?:id|arn)$/i.test(m[1]);
     const start = m.index;
     const e = start + m[0].length;
     // The quotes around the flag when it is a whole element: `"--token"`, `\"--token\"`.
@@ -1295,6 +1474,7 @@ function flagSpans(text, st) {
       // In a command a quote of a kind that is open on the line closes the string around it (`"use --token " + t`).
       if (text[p + kv + 1] === '-' || (kind === 'word' && kv === 0 && insideString(text, start, q))) continue;
       const [end, , closed] = stringEnd(text, p + kv, kv, !(st.lang === 'toml' && q === "'"));
+      if (namesOne && isPlainName(text.slice(p + kv + 1, end))) continue;
       if (closed || kind === 'word') pushValue(st, text, p + kv + 1, end, q); // an element of a list is a whole string
       continue;
     }
@@ -1304,7 +1484,7 @@ function flagSpans(text, st) {
     if (kind === 'item') end = p + (/^[^\r\n]*?(?=[ \t]+#|[ \t]*\r?$)/m.exec(text.slice(p, lineEnd(text, p))) || [''])[0].length;
     else end = p + unclosedEnd(text.slice(p, end), false);
     const v = text.slice(p, end);
-    if (value.reference || !/[\p{L}\p{N}]/u.test(v) || plainScalar(m[1], v)) continue;
+    if (value.reference || !/[\p{L}\p{N}]/u.test(v) || plainScalar(m[1], v) || (namesOne && isPlainName(v))) continue;
     if (kind === 'word' && !SCRIPT_LANGS.has(st.lang) && PROSE_WORD.test(v)) continue;
     pushValue(st, text, p, end);
   }
@@ -1316,9 +1496,40 @@ function flagSpans(text, st) {
     const end = q ? stringEnd(text, p - m[2].length - 2, m[1].length - 1)[0] : bareValue(text, p).end;
     if (end > p) pushValue(st, text, p, end, q || null);
   }
+  // A command that is handed a credential as an argument, whatever name it stands under.
+  for (const re of CREDENTIAL_ARGUMENT) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      const p = m.index + m[0].length;
+      let kv = 0;
+      while (text[p + kv] === '\\') kv++;
+      const q = text[p + kv];
+      if (isQuote(q)) {
+        if (!(kv === 0 && insideString(text, m.index, q))) pushValue(st, text, p + kv + 1, stringEnd(text, p + kv, kv)[0], q);
+        continue;
+      }
+      const value = bareValue(text, p);
+      const end = p + unclosedEnd(text.slice(p, value.end), false);
+      const v = text.slice(p, end);
+      if (kv || value.reference || !/[\p{L}\p{N}]/u.test(v) || ANGLE_PLACEHOLDER.test(v)) continue;
+      if (!SCRIPT_LANGS.has(st.lang) && PROSE_WORD.test(v)) continue; // `run bw unlock first`
+      pushValue(st, text, p, end);
+    }
+  }
 }
 
 const CURL_USER = /\bcurl\b[^\n]{0,400}?[ \t](?:-u|--user)[ \t]+(\\*["']|)([^\s:"'\\]*):/g;
+// Each ends right in front of the credential: `bw unlock PASSWORD`, `bw login NAME PASSWORD`,
+// `vault login TOKEN`, `sshpass -p PASSWORD`, `docker login ... -p PASSWORD` (and the tools that
+// log in the same way), `mysql ... -pPASSWORD`.
+const CREDENTIAL_ARGUMENT = [
+  /\bbw[ \t]+unlock[ \t]+(?!-)/g,
+  /\bbw[ \t]+login[ \t]+(?!-)\S+[ \t]+(?!-)/g,
+  /\bvault[ \t]+login[ \t]+(?!-)/g,
+  /\bsshpass[ \t]+-p[ \t]*(?=\S)/g,
+  /\b(?:docker|podman|nerdctl|buildah|skopeo|az|oc|helm[ \t]+registry)[ \t]+login\b[^\n|;&]{0,200}?[ \t]-p[ \t]+(?!-)/g,
+  /\bmysql(?:dump|admin)?\b[^\n|;&]{0,200}?[ \t]-p(?=[^\s-])/g,
+];
 
 /**
  * `text` with the value of every secret name masked, read without any knowledge of its format:
@@ -1329,7 +1540,8 @@ function maskByKey(text, lang) {
   const st = { spans: [], lang, unclosed: 0 };
   const n = text.length;
   // `${TOKEN:-fallback}`: the name is being expanded, not assigned, and what a secret falls back
-  // to is a secret as well, unless it is empty or a reference itself.
+  // to is a secret as well, unless it is empty or a reference itself. A message (`:?`) stays
+  // when it is a sentence and nothing else.
   for (const m of text.matchAll(BRACED_DEFAULT)) {
     if (!isSensitiveKey(m[1])) continue;
     const from = m.index + m[0].length;
@@ -1339,7 +1551,10 @@ function maskByKey(text, lang) {
       if (text[j] === '$' && text[j + 1] === '{') { depth++; j++; } else if (text[j] === '}' && --depth === 0) break;
     }
     const word = text.slice(from, j);
-    if (depth === 0 && word !== '""' && word !== "''" && referencesEnd(word, 0, { template: false }) !== word.length) pushValue(st, text, from, j);
+    const harmless = m[2].endsWith('?')
+      ? isMessage(word) && !carriesValue(word)
+      : word === '""' || word === "''" || referencesEnd(word, 0, { template: false }) === word.length;
+    if (depth === 0 && !harmless) pushValue(st, text, from, j);
   }
   flagSpans(text, st);
   let i = 0; // nothing before `i` is read again

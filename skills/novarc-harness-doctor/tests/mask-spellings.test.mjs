@@ -173,11 +173,12 @@ test('a template expression is a reference when it only names things', () => {
   ].join('\n'));
 });
 
+// (Every command and every form it is accepted in: tests/mask-commands.test.mjs.)
 test('a command substitution is a reference when its command fetches the value', () => {
   const fetching = [
     'TOKEN=$(cat ~/.config/app/token)',
-    "TOKEN=$(cat ~/.config/app/token | tr -d '\\n')",
-    'PASSWORD=$(op read "op://vault/item/password")',
+    'TOKEN=$(cat ~/.config/app/token | head -n 1)',
+    'PASSWORD=$(op read op://vault/item/password)',
     'DB_PASSWORD=$(aws secretsmanager get-secret-value --secret-id prod/db --query SecretString --output text | jq -r .password)',
     'GH_TOKEN=$(gh auth token)',
     'API_KEY=$(security find-generic-password -s my-service -w)',

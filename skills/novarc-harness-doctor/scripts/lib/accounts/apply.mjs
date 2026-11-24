@@ -25,7 +25,7 @@ import {
 import { detectAccounts } from './detect.mjs';
 import { manifestIsFor, liveSignature, serverSignature, instructionSignature } from './diff.mjs';
 import { buildPlan, resolutionsFromPlan, PlanError, PLAN_VERSION } from './plan.mjs';
-import { copyTree, removeTree, movePath, compareTrees, sameContent, listFiles, containedIn, fillFrom } from './fsops.mjs';
+import { copyTree, removeTree, removeIfSame, movePath, compareTrees, sameContent, listFiles, containedIn, fillFrom, signature } from './fsops.mjs';
 import { setIn, removeIn, makePatch, revertPatch } from './jsonedit.mjs';
 import { parseLang } from './strings.mjs';
 
@@ -155,8 +155,10 @@ export class Run {
   }
 
   /** Write a file through the one safe path (see writeKeepingLinks in sync-check.mjs). */
-  write(file, data) {
-    const r = writeKeepingLinks(file, data, { home: this.home, peers: this.peersOf(file) });
+  write(file, data, expect) {
+    // `expect`: the hash of the bytes the caller read before it worked out `data` (null: the file
+    // was not there). A file that something else changed since is not written (code ECHANGED).
+    const r = writeKeepingLinks(file, data, { home: this.home, peers: this.peersOf(file), ...(expect !== undefined ? { expect } : {}) });
     if (r.pending.length) this.notes.push(pendingNote(file, r, this.home));
     if (r.left) this.notes.push(leftNote(file, r, this.home));
     return r;
@@ -256,6 +258,10 @@ function doAdopt(run, step, rec, primaryId) {
   // The account's version is about to be copied into the primary: it must be, byte for byte and
   // behind any link, the version the plan showed.
   confirm(run, step.account, step.name, liveSignature(e));
+  // What the account holds, as just confirmed. It is looked at again once it has been read or
+  // copied: bytes that changed while they were being brought into the primary were never shown.
+  const shown = signature(S);
+  const unseen = () => { if (signature(S) !== shown) throw Object.assign(new Error(`${step.name} changed in the account while it was being brought into the primary; what was brought in is taken back: plan again`), { stale: true }); };
   const mark = run.mark();
   let kept = 0;
   try {
@@ -271,8 +277,9 @@ function doAdopt(run, step, rec, primaryId) {
       mkdirp(path.dirname(pb));
       fs.copyFileSync(P, pb);
       const data = fs.readFileSync(S);
+      unseen();
       const over = run.intend({ op: 'overwrite', path: P, backup: pb, beforeHash: hashFile(pb), afterHash: sha256(data) });
-      run.write(P, data);
+      run.write(P, data, hashFile(pb)); // the primary's file must still hold what went into the backup
       run.did(over);
     } else {
       for (const rel of listFiles(S)) {
@@ -287,6 +294,7 @@ function doAdopt(run, step, rec, primaryId) {
         run.did(added);
       }
     }
+    unseen();
     const r = doLink(run, step, rec, true); // confirmed above; the primary's side has just changed
     if (kept) r.note = `${kept} entr${kept === 1 ? 'y differs' : 'ies differ'} on both sides: the primary's stayed, the account's are in the backup`;
     return r;
@@ -327,7 +335,7 @@ function doInstructions(run, step, rec, home) {
         if (problem) throw new Error(`${problem}; nothing was written: plan again to decide what happens to it`);
         previous = readExact(S);
         const edit = run.intend({ op: 'patch', path: S, beforeHash: sha256(Buffer.from(previous, 'utf8')), afterHash: hash, patch: makePatch(previous, gen.text) });
-        run.write(S, data);
+        run.write(S, data, sha256(Buffer.from(previous, 'utf8')));
         run.did(edit);
       } else {
         if (lstatSafe(S)) {
@@ -337,7 +345,7 @@ function doInstructions(run, step, rec, home) {
         }
         run.parents(S);
         const made = run.intend({ op: 'write', path: S, hash });
-        run.write(S, data);
+        run.write(S, data, null); // nothing is there: whatever was has just been moved to the backup
         run.did(made);
       }
       if (hashFile(S) !== hash) throw new Error('verification failed: the generated file does not match');
@@ -404,7 +412,8 @@ function doServers(run, step, rec) {
   if (after !== before) {
     if (!tgt.exists) run.parents(m.path);
     const edit = run.intend({ op: 'patch', path: m.path, beforeHash: sha256(Buffer.from(before, 'utf8')), afterHash: sha256(Buffer.from(after, 'utf8')), patch: makePatch(before, after), created: !tgt.exists });
-    try { run.write(m.path, after); } catch (err) { run.rewind(mark); throw err; }
+    // `after` was worked out from `before`: a file the app saved in between is not written over.
+    try { run.write(m.path, after, tgt.exists ? sha256(Buffer.from(before, 'utf8')) : null); } catch (err) { run.rewind(mark); throw err; }
     run.did(edit);
   }
   const now = readServers(m.path, m.format).servers;
@@ -636,8 +645,8 @@ export function unfinishedNote(stamps) {
 function undoOp(op, dryRun, seen, { home = homeDir(), peers, finished = false, intend } = {}) {
   if (op.never) return { ok: true }; // struck: the run died before it did this
   const made = !!op.done || finished;
-  const put = (file, data) => {
-    const r = writeKeepingLinks(file, data, { home, peers: peers ? peers(file) : undefined });
+  const put = (file, data, expect) => {
+    const r = writeKeepingLinks(file, data, { home, peers: peers ? peers(file) : undefined, expect });
     if (r.pending.length) (seen.notes ||= []).push(pendingNote(file, r, home));
     if (r.left) (seen.notes ||= []).push(leftNote(file, r, home));
   };
@@ -704,18 +713,19 @@ function undoOp(op, dryRun, seen, { home = homeDir(), peers, finished = false, i
     if (op.beforeHash && op.beforeHash !== op.afterHash && sha256(buf) === op.beforeHash) return { ok: true };
     if (sha256(buf) !== op.afterHash) return conflict('edited since the run; left as it is');
     if (op.created) return remove(op.path, () => removeLink(op.path));
-    return act(() => put(op.path, revertPatch(buf.toString('utf8'), op.patch)));
+    return act(() => put(op.path, revertPatch(buf.toString('utf8'), op.patch), sha256(buf)));
   }
   if (op.op === 'overwrite') {
     if (op.beforeHash && op.beforeHash !== op.afterHash && hashFile(op.path) === op.beforeHash) return { ok: true }; // never made
     if (hashFile(op.path) !== op.afterHash) return conflict('the primary\'s file was edited since the run; its earlier version is in the backup');
     const data = readBuf(op.backup);
     if (data === null) return conflict('the backup is missing');
-    return act(() => put(op.path, data));
+    return act(() => put(op.path, data, op.afterHash));
   }
   if (op.op === 'create' || op.op === 'add') {
     if (!present(op.path)) return { ok: true };
-    return compareTrees(op.path, now(op.like)) === 'same' ? remove(op.path, () => removeTree(op.path)) : conflict('changed in the primary since the run; left there');
+    // Removed entry by entry, each only while it is still what was brought in (see removeIfSame).
+    return compareTrees(op.path, now(op.like)) === 'same' ? remove(op.path, () => removeIfSame(op.path, now(op.like))) : conflict('changed in the primary since the run; left there');
   }
   if (op.op === 'mkdir') {
     if (dryRun || !lstatSafe(op.path)) return { ok: true };

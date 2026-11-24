@@ -124,7 +124,7 @@ export function signature(p, { cap = 4000, bytes = 64 * 1024 * 1024 } = {}) {
  * under a temp name and renamed, a folder is built under a temp name beside the destination and
  * renamed. The next run removes that temp if this one dies in the middle.
  */
-export function copyTree(src, dst, { home = homeDir() } = {}) {
+export function copyTree(src, dst, { home = homeDir(), at } = {}) {
   /** A link as a link; where the OS refuses one, a junction for a folder and the bytes for a file. */
   const link = (from, to, copyFile) => {
     const raw = fs.readlinkSync(from);
@@ -150,9 +150,10 @@ export function copyTree(src, dst, { home = homeDir() } = {}) {
   };
   mkdirp(path.dirname(dst));
   const top = fs.lstatSync(src);
-  if (top.isSymbolicLink()) link(src, dst, (x, y) => copyFileSafe(x, y, { home }));
-  else if (top.isDirectory()) buildThenRename(dst, (tmp) => fill(src, tmp), { home });
-  else copyFileSafe(src, dst, { home });
+  // `at` is for the tests: called at each point the final rename passes (see buildThenRename).
+  if (top.isSymbolicLink()) link(src, dst, (x, y) => copyFileSafe(x, y, { home, at }));
+  else if (top.isDirectory()) buildThenRename(dst, (tmp) => fill(src, tmp), { home, at });
+  else copyFileSafe(src, dst, { home, at });
 }
 
 /** True when everything at `a` is also at `b`, entry for entry and byte for byte; `b` may hold more. */
@@ -183,6 +184,23 @@ export function fillFrom(src, dst, { home = homeDir() } = {}) {
   if (real(ls) && real(ld)) for (const e of readdirSafe(src)) fillFrom(path.join(src, e.name), path.join(dst, e.name), { home });
 }
 
+/**
+ * Remove a tree entry by entry, each one only while it is still identical to its counterpart
+ * under `like`, looked at right before it goes. Stops (code ECHANGED) at the first entry that
+ * something changed since the two trees were compared: what is left stays.
+ */
+export function removeIfSame(p, like) {
+  const l = lstatSafe(p);
+  if (!l) return;
+  if (l.isDirectory() && !l.isSymbolicLink()) {
+    for (const e of fs.readdirSync(p)) removeIfSame(path.join(p, e), path.join(like, e));
+    fs.rmdirSync(p); // fails when something new appeared in it: it stays
+    return;
+  }
+  if (compareTrees(p, like) !== 'same') throw Object.assign(new Error('it changed while it was being removed; what is left of it stays'), { code: 'ECHANGED' });
+  removeLink(p);
+}
+
 /** Remove a file, a link or a tree. A link is removed as a link: its target is never touched. */
 export function removeTree(p) {
   const l = lstatSafe(p);
@@ -207,7 +225,9 @@ export function movePath(src, dst, { home = homeDir() } = {}) {
     removeTree(dst);
     throw new Error('could not move: the copy does not match the original');
   }
-  removeTree(src);
+  // The source goes entry by entry, each only while it still is what was copied: an edit made
+  // after the comparison stays where it is, and the move fails with the copy whole.
+  removeIfSame(src, dst);
 }
 
 /** Every regular file under `root`, as paths relative to it (links are listed, not entered). */

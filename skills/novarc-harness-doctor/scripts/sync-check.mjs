@@ -184,8 +184,12 @@ function tempName(file) {
 /**
  * TESTS ONLY. NOVARC_POWERS_TEST_FAULT lists, separated by commas, the points at which a write
  * is made to fail, so that a failure or a death in the middle of one can be tested without a full
- * disk or a power cut. `point` fails there as a full disk would; `kill@point` ends the process
- * on the spot, with nothing unwound; `#n` restricts either to the n-th time the point is reached.
+ * disk or a power cut. `point` fails there as a full disk would; `EBUSY@point` (or any other
+ * error code) fails there with that code, which is how a rename that is refused for a moment is
+ * produced; `kill@point` ends the process on the spot, with nothing unwound; `#n` restricts any
+ * of them to the n-th time the point is reached. Every rename has a point of its own, reached
+ * right before each attempt (rename-file, rename-name, rename-recovery, rename-temp,
+ * rename-link), and `<that>-retry`, reached before each further attempt.
  * The points, in the order a write passes them: record (half of the record written), intent (the
  * record is durable), temp (half of the new bytes written), staged (the temp is complete),
  * peer-staged (a link for another name is ready), committed (the rename over the destination is
@@ -198,22 +202,25 @@ function tempName(file) {
  * the tests, this costs two environment lookups.
  */
 const faultHits = new Map();
+let faultSpec = null;
 function fault(point, first) {
   const edit = process.env.NOVARC_POWERS_TEST_EDIT;
   if (edit) otherProgram(point, edit);
   const spec = process.env.NOVARC_POWERS_TEST_FAULT;
   if (!spec) return;
+  if (spec !== faultSpec) { faultSpec = spec; faultHits.clear(); } // a new list: its counts start again
   for (const entry of spec.split(',')) {
-    const m = /^(kill@)?([a-z-]+)(?:#(\d+))?$/.exec(entry.trim());
+    const m = /^(?:(kill|E[A-Z]+)@)?([a-z-]+)(?:#(\d+))?$/.exec(entry.trim());
     if (!m || m[2] !== point) continue;
     const n = (faultHits.get(entry) || 0) + 1;
     faultHits.set(entry, n);
     if (m[3] && n !== Number(m[3])) continue;
     if (first) first();
-    if (m[1]) {
+    if (m[1] === 'kill') {
       try { process.kill(process.pid, 'SIGKILL'); } catch { /* not possible here: exit instead */ }
       process.exit(99);
     }
+    if (m[1]) throw Object.assign(new Error(`${m[1]} (simulated)`), { code: m[1] });
     throw Object.assign(new Error('no space left on device (simulated)'), { code: 'ENOSPC' });
   }
 }
@@ -260,13 +267,25 @@ function stageFile(tmp, buf, mode, point) {
 }
 
 /**
- * Rename `from` over `to`: the one atomic step every write here ends in. Windows refuses it for
- * a moment while a scanner or an indexer holds either file, so there it is tried again, briefly.
+ * Rename `from` over `to`: the one atomic step every write here ends in. A rename can be refused
+ * for a moment (a scanner or an indexer holds one of the files, on Windows above all), so it is
+ * tried again, briefly: up to three more times, 15, 30 and 45 ms apart.
+ *
+ * `check` is the last look at what is about to be replaced. It runs immediately before EVERY
+ * attempt, the first and each further one: during the wait between two attempts another program
+ * can edit the file, or its folder can be moved away, and an attempt made on the strength of a
+ * look taken before the wait would replace that. When `check` returns a reason, nothing is
+ * renamed and that reason is returned; null means the rename was made. `point` names the fault
+ * point reached before each attempt (and `<point>-retry` before each further one); `on` is what
+ * is called there.
  */
-function renameOver(from, to) {
+function renameOver(from, to, { check = null, point = 'rename', on = fault } = {}) {
   for (let attempt = 0; ; attempt++) {
-    try { fs.renameSync(from, to); return; } catch (e) {
-      if (!IS_WIN || attempt >= 3 || !e || !(e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES')) throw e;
+    if (attempt) on(`${point}-retry`);
+    const changed = check ? check() : null;
+    if (changed) return changed;
+    try { on(point); fs.renameSync(from, to); return null; } catch (e) {
+      if (attempt >= 3 || !e || !(e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES')) throw e;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * (attempt + 1));
     }
   }
@@ -398,10 +417,14 @@ export function unknownNames(p, { home = homeDir(), peers } = {}) {
  * Nothing is replaced on the strength of what it was when the write was prepared. Right before
  * the rename over the file, and again right before each other name is switched, that path is
  * looked at once more: it must still be a plain file in the same real folder holding the same
- * bytes (see changedSince). When the file itself changed, nothing is written and the call throws
- * with code `ECHANGED`. Another name that changed is left exactly as it is and listed in `left`.
- * What happens between that last look and the rename cannot be seen: the window is two system
- * calls wide, and it is not zero.
+ * bytes (see changedSince). That look is taken before EVERY attempt of a rename, so also after
+ * each wait when a rename is refused for a moment (see renameOver). When the file itself changed,
+ * nothing is written and the call throws with code `ECHANGED`. Another name that changed is left
+ * exactly as it is and listed in `left`. What happens between that last look and the rename
+ * cannot be seen: the window is two system calls wide, and it is not zero.
+ * `expect` extends the look backwards: it is the hash the caller read the file with (null: the
+ * file was not there) when it worked out the new bytes. A file that holds something else by the
+ * time the write is prepared was changed in between, and is not written either (`ECHANGED`).
  *
  * Returns { how: 'created' | 'replaced', relinked, pending, why?, left? }: `pending` lists other
  * names that could not be switched just now (a file held open), for which the record stays and
@@ -409,7 +432,7 @@ export function unknownNames(p, { home = homeDir(), peers } = {}) {
  * something else in the meantime. `at(point)` is for the tests: it is called at each point a
  * write passes (see `fault`), so a test can do there what another program might.
  */
-export function writeKeepingLinks(p, data, { home = homeDir(), peers, at } = {}) {
+export function writeKeepingLinks(p, data, { home = homeDir(), peers, at, expect } = {}) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
   const point = (name) => { if (at) at(name); fault(name); };
   let real = path.resolve(String(p));
@@ -426,6 +449,10 @@ export function writeKeepingLinks(p, data, { home = homeDir(), peers, at } = {})
   if (unknown) throw unknownNamesError(unknown);
   const before = st ? hashFile(real) : null;
   if (st && before === null) throw new Error('the file cannot be read; nothing was written');
+  if (expect !== undefined && before !== expect) {
+    const how = !st ? 'it was removed' : expect === null ? 'something was created at its place' : 'it was edited';
+    throw Object.assign(new Error(`the file changed while this write was being prepared (${how}); nothing was written`), { code: 'ECHANGED' });
+  }
   // The record says where each name is (the real folder and its identity) and which file the
   // names are names of: what recovery needs to be sure it is looking at the same places.
   const intent = openIntent(home, {
@@ -441,10 +468,10 @@ export function writeKeepingLinks(p, data, { home = homeDir(), peers, at } = {})
     point('staged');
     // A link to the NEW file, ready beside each other name: nothing anybody reads has changed yet.
     for (const pr of rec.peers) { fs.linkSync(rec.tmp, pr.tmp); made.push({ tmp: pr.tmp, owner: pr.path, place: pr }); point('peer-staged'); }
-    // The last look at the file, right before it is replaced.
-    const changed = changedSince(real, rec, before, !st);
+    // The one step that makes the path hold the new bytes, with the last look at the file right
+    // before it, and before each further attempt.
+    const changed = renameOver(rec.tmp, real, { check: () => changedSince(real, rec, before, !st), point: 'rename-file', on: point });
     if (changed) throw Object.assign(new Error(`the file changed while this write was being prepared (${changed}); nothing was written`), { code: 'ECHANGED' });
-    renameOver(rec.tmp, real); // the one step that makes the path hold the new bytes
   } catch (e) {
     // A temp is removed only from the folder it was made in. If that folder was moved away or
     // redirected in the meantime, the same name now belongs to whatever is there.
@@ -462,15 +489,14 @@ export function writeKeepingLinks(p, data, { home = homeDir(), peers, at } = {})
   for (const pr of rec.peers) {
     try {
       point('peer');
-      // The last look at this name, right before it is switched: one that something else changed
-      // since the write was prepared is not this tool's to replace.
-      const changed = changedSince(pr.path, pr, before, false);
+      // The last look at this name, right before it is switched and before each further attempt:
+      // one that something else changed since the write was prepared is not this tool's to replace.
+      const changed = renameOver(pr.tmp, pr.path, { check: () => changedSince(pr.path, pr, before, false), point: 'rename-name', on: point });
       if (changed) {
         left.push({ path: pr.path, note: changed });
         if (placeHolds(pr, pr.path)) try { fs.unlinkSync(pr.tmp); } catch { /* not there */ }
         continue;
       }
-      renameOver(pr.tmp, pr.path);
       relinked++;
     } catch (e) { pending.push(pr.path); why = String(e && (e.code || e.message)); }
   }
@@ -482,6 +508,12 @@ export function writeKeepingLinks(p, data, { home = homeDir(), peers, at } = {})
     try { putRecord(intent.file, { ...rec, state: 'pending' }); } catch { /* the record as it is says the same */ }
   } else closeIntent(intent);
   return { how: st ? 'replaced' : 'created', relinked, pending, ...(why ? { why } : {}), ...(left.length ? { left } : {}) };
+}
+
+/** True when `p` is a plain file itself: not a link to one. */
+function isPlainFile(p) {
+  const l = lstatSafe(p);
+  return !!l && l.isFile();
 }
 
 /** The identity of a file where the filesystem gives a stable one: `dev:ino`, or null. */
@@ -534,21 +566,27 @@ function changedSince(file, place, hash, absent) {
  * A record lets the next run remove the temp if this one dies. `dst` must not be a folder that
  * exists already.
  */
-export function buildThenRename(dst, build, { home = homeDir() } = {}) {
+export function buildThenRename(dst, build, { home = homeDir(), at } = {}) {
   const tmp = tempName(dst);
-  const intent = openIntent(home, { cleanup: [{ path: tmp, ...placeOf(tmp) }] });
+  const place = placeOf(tmp);
+  const intent = openIntent(home, { cleanup: [{ path: tmp, ...place }] });
+  const on = (name) => { if (at) at(name); fault(name); };
   try {
     build(tmp);
-    renameOver(tmp, dst);
+    // Before every attempt: the folder is still the one the temp was made in, and nothing has
+    // appeared under the name in the meantime.
+    const still = () => (!placeHolds(place, dst) ? 'its folder was moved, replaced or redirected' : lstatSafe(dst) ? 'something was created at its place' : null);
+    const changed = renameOver(tmp, dst, { check: still, point: 'rename-temp', on });
+    if (changed) throw Object.assign(new Error(`the place changed while this was being made (${changed}); nothing was put there`), { code: 'ECHANGED' });
   } catch (e) {
-    removeTemp(tmp);
+    if (placeHolds(place, tmp)) removeTemp(tmp); // only from the folder it was made in
     throw e;
   } finally { closeIntent(intent); }
 }
 
 /** Copy a file so that `dst` never shows half of it. */
-export function copyFileSafe(src, dst, { home = homeDir() } = {}) {
-  buildThenRename(dst, (tmp) => { fs.copyFileSync(src, tmp); fault('copied'); }, { home });
+export function copyFileSafe(src, dst, { home = homeDir(), at } = {}) {
+  buildThenRename(dst, (tmp) => { fs.copyFileSync(src, tmp); fault('copied'); }, { home, at });
 }
 
 /**
@@ -568,8 +606,9 @@ function removeTemp(p) {
 }
 
 /** Deal with one record a dead run left. Returns what was found, or null when there was nothing. */
-function settle(rec, file, home, repair) {
+function settle(rec, file, home, repair, at) {
   const show = (p) => displayPath(p, home);
+  const on = (name) => { if (at) at(name); fault(name); };
   // Only ever a temp file of this tool is removed or renamed, whatever a record says, and only
   // where it was made: beside the path it was made for, in the folder recorded for that path.
   // Equal bytes are no proof of a place: a folder that was moved away and replaced by a link to
@@ -617,14 +656,29 @@ function settle(rec, file, home, repair) {
     let waiting = 0;
     let why;
     for (const pr of peers) {
-      if (!beside(pr.tmp, pr.path, pr)) { foreign++; continue; } // another folder now: nothing there is touched
-      let l = null;
-      try { l = fs.lstatSync(pr.path, { bigint: true }); } catch { /* gone */ }
-      if (l && l.isFile() && sameFile(pr.path, rec.target)) { drop(pr.tmp); continue; } // switched already
-      const old = !!l && l.isFile() && (!rec.id || `${l.dev}:${l.ino}` === rec.id) && hashFile(pr.path) === rec.before;
-      const link = lstatSafe(pr.tmp);
-      if (!old || !link || !link.isFile() || !sameFile(pr.tmp, rec.target)) { drop(pr.tmp); left++; continue; }
-      try { renameOver(pr.tmp, pr.path); relinked++; } catch (e) { waiting++; why = scrub(String(e && (e.code || e.message)), home); }
+      // What this name is, asked right before every attempt to switch it (see renameOver): the
+      // name, its folder, or the file itself can change during a wait between two attempts.
+      const state = () => {
+        if (!beside(pr.tmp, pr.path, pr)) return 'foreign'; // another folder now: nothing there is touched
+        let l = null;
+        try { l = fs.lstatSync(pr.path, { bigint: true }); } catch { /* gone */ }
+        if (l && l.isFile() && sameFile(pr.path, rec.target)) return 'switched';
+        const whole = placeHolds(rec, rec.target) && isPlainFile(rec.target) && hashFile(rec.target) === rec.after;
+        const old = !!l && l.isFile() && (!rec.id || `${l.dev}:${l.ino}` === rec.id) && hashFile(pr.path) === rec.before;
+        const link = lstatSafe(pr.tmp);
+        return whole && old && link && link.isFile() && sameFile(pr.tmp, rec.target) ? 'ok' : 'left';
+      };
+      let s = state();
+      if (s === 'ok') {
+        try {
+          const stopped = renameOver(pr.tmp, pr.path, { check: () => { s = state(); return s === 'ok' ? null : s; }, point: 'rename-recovery', on });
+          if (!stopped) s = 'relinked';
+        } catch (e) { s = 'waiting'; why = scrub(String(e && (e.code || e.message)), home); }
+      }
+      if (s === 'foreign') foreign++;
+      else if (s === 'relinked') relinked++;
+      else if (s === 'waiting') waiting++;
+      else { drop(pr.tmp); if (s === 'left') left++; }
     }
     drop(rec.tmp);
     const counts = { ...(relinked ? { relinked } : {}), ...(left ? { left } : {}), ...(foreign ? { foreign } : {}) };
@@ -665,7 +719,7 @@ function settle(rec, file, home, repair) {
  * were left alone, with whatever is there.
  * A temp file of the tool's own bookkeeping is a leftover once it is a minute old. Never throws.
  */
-export function recoverWrites({ home = homeDir(), repair = true } = {}) {
+export function recoverWrites({ home = homeDir(), repair = true, at } = {}) {
   const out = [];
   const show = (p) => displayPath(p, home);
   try {
@@ -679,7 +733,7 @@ export function recoverWrites({ home = homeDir(), repair = true } = {}) {
       const rec = j.ok && j.value && typeof j.value === 'object' && j.value.version === INTENT_VERSION ? j.value : null;
       let entry;
       if (rec) {
-        try { entry = settle(rec, file, home, repair); } catch (e) { entry = { file: show(file), outcome: 'waiting', note: scrub(String(e && (e.code || e.message)), home) }; }
+        try { entry = settle(rec, file, home, repair, at); } catch (e) { entry = { file: show(file), outcome: 'waiting', note: scrub(String(e && (e.code || e.message)), home) }; }
       } else {
         if (repair) try { fs.unlinkSync(file); } catch { /* tried again by the next run */ }
         entry = { file: show(file), outcome: repair ? 'removed' : 'pending', note: 'a record that cannot be read' };
@@ -926,14 +980,26 @@ export function removeLink(p) {
 }
 
 /** Replace the file at linkPath with a link to targetPath without a window where it is missing. */
-export function relinkFile(targetPath, linkPath, home = homeDir()) {
+export function relinkFile(targetPath, linkPath, home = homeDir(), expect = null) {
+  // `expect`: { hash, place } of the file as it was when it was judged safe to replace (a copy
+  // nobody edited). It is looked at again before every attempt of the rename: one that changed
+  // since is not replaced, and the call throws with code `ECHANGED`.
   const tmp = tempName(linkPath);
-  const intent = openIntent(home, { cleanup: [{ path: tmp, ...placeOf(tmp) }] });
+  const place = placeOf(tmp);
+  const intent = openIntent(home, { cleanup: [{ path: tmp, ...place }] });
   try {
     const kind = createLink(targetPath, tmp, false);
-    try { fault('linked'); renameOver(tmp, linkPath); } catch (e) {
+    let changed;
+    try {
+      fault('linked');
+      changed = renameOver(tmp, linkPath, { check: expect ? () => changedSince(linkPath, expect.place || place, expect.hash, false) : null, point: 'rename-link' });
+    } catch (e) {
       try { fs.unlinkSync(tmp); } catch { /* best effort */ }
       throw e;
+    }
+    if (changed) {
+      if (placeHolds(place, tmp)) try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+      throw Object.assign(new Error(`the file changed while it was being linked again (${changed}); it was left as it is`), { code: 'ECHANGED' });
     }
     return kind;
   } finally { closeIntent(intent); }
@@ -1732,7 +1798,11 @@ function checkLink(el, repair, home) {
   const unedited = here !== null && !!el.contentHash && here === el.contentHash;
   if (!identical && !unedited) return { state: 'drift', note: 'edited by hand; not overwritten', both: true };
   if (!repair) return { state: 'broken', note: identical ? 'the link became a separate identical copy' : 'the link broke and the primary changed since' };
-  el.kind = relinkFile(el.target, el.path, home);
+  try { el.kind = relinkFile(el.target, el.path, home, { hash: here, place: el.place }); } catch (e) {
+    // Judged a moment ago to be a copy nobody edited; somebody did, before it could be replaced.
+    if (e && e.code === 'ECHANGED') return { state: 'drift', note: 'edited while it was being linked again; not overwritten', both: true };
+    throw e;
+  }
   return { state: 'broken', note: 'the link had become a separate copy', repaired: true };
 }
 
@@ -1766,7 +1836,7 @@ function checkGenerated(el, repair, home, acct) {
   if (problem) return { state, note: `${problem}; not rewritten`, both: true };
   if (there && here === null) return { state, note: 'it cannot be read; not rewritten' };
   if (!repair) return { state, note };
-  try { writeKeepingLinks(el.path, want, { home }); } catch (e) {
+  try { writeKeepingLinks(el.path, want, { home, expect: here }); } catch (e) {
     return { state, note: `${note}; could not be rewritten (${scrub(String(e && (e.code || e.message)), home)}), so it is as it was` };
   }
   el.contentHash = wantHash;
@@ -1828,7 +1898,8 @@ function checkServers(acct, results, repair, home) {
   }
   try {
     const next = rewriteCodexServers(tgt.text, { remove, write });
-    writeKeepingLinks(m.path, next, { home });
+    // `expect`: the bytes `next` was worked out from. A file the app saved in between is not written.
+    writeKeepingLinks(m.path, next, { home, expect: tgt.exists ? sha256(Buffer.from(tgt.text, 'utf8')) : null });
     m.identity = destIdentity(m.path, { ids: false });
     const after = scanCodexServers(next).servers;
     for (const p of pending) {
@@ -1913,6 +1984,7 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
   const counts = { ok: 0, drift: 0, broken: 0, repaired: 0 };
   const interrupted = recoverWrites({ home, repair });
   const recovered = interrupted.length ? { recovered: interrupted } : {};
+  const manifestWas = hashFile(mf);
   const manifest = readManifest(mf);
   if (!manifest) return { status: 'none', primary: null, accounts: [], counts, ...recovered };
   const results = [];
@@ -1969,7 +2041,9 @@ export function runCheck({ repair = false, file, home = homeDir() } = {}) {
     }
     try { if (checkAdditions(acct, results, repair, home)) dirty = true; } catch { /* additions are best effort */ }
   }
-  if (repair && dirty) {
+  if (repair && dirty && hashFile(mf) === manifestWas) {
+    // Only while the manifest is still the one that was read: another run (an apply) may have
+    // written it in the meantime, and what this run noted is noted again by the next one.
     try { writeManifest(manifest, mf); } catch { /* the next run records it */ }
   }
   const accounts = manifest.accounts.map((acct) => {
