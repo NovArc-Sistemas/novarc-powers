@@ -1,14 +1,14 @@
 // The board page as a whole: board.html is parsed and its inline script runs against a small
 // stand-in for the DOM, so these tests cover what the pure-logic tests cannot: that the page boots
-// in both shells (standalone document, Artifact fragment), where it opens, what each channel
-// sends when a button is pressed, and how a value that was not measured is drawn.
+// in both shells (standalone document, Artifact fragment), where it opens, that it only shows (no
+// channel sends anything), and how a value that was not measured is drawn.
 // The stand-in implements only what the client calls. It is not a browser: layout is all zeros.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FIXTURES } from './helpers.mjs';
-import { renderHtml, SCHEMA_PATH } from '../scripts/render-board.mjs';
+import { renderHtml, SCHEMA_PATH, HOOK_EVENTS } from '../scripts/render-board.mjs';
 import { applyScores } from '../scripts/lib/scoring.mjs';
 import { STRINGS } from '../scripts/lib/i18n.mjs';
 
@@ -116,6 +116,8 @@ class FakeNode {
   getBoundingClientRect() { return { top: 0, left: 0, bottom: 0, right: 0, width: 0, height: 0 }; }
 
   matches(selector) {
+    // A selector list: any of its selectors.
+    if (selector.includes(',') && !/[[^]]*,/.test(selector)) return selector.split(',').some((one) => this.matches(one.trim()));
     const parts = parseSelector(selector);
     if (!parts[parts.length - 1](this)) return false;
     let k = parts.length - 2;
@@ -215,7 +217,8 @@ function load(html, env = {}) {
     scrollTo() {}, scrollBy() {},
     setTimeout(fn) { window.timers.push(fn); return window.timers.length; },
     clearTimeout() {},
-    setInterval() { return 0; },
+    intervals: [],
+    setInterval(fn) { window.intervals.push(fn); return window.intervals.length; },
   };
   Object.defineProperty(window, 'localStorage', {
     get() { if (mode === 'throws') throw new Error('SecurityError'); return mode === 'missing' ? undefined : storage; },
@@ -235,11 +238,12 @@ function load(html, env = {}) {
     texts: (selector) => root.querySelectorAll(selector).map((n) => n.textContent),
     /** The message the page shows when its script failed, or null. */
     fatal: () => { const f = root.querySelector('main .fatal'); return f ? f.textContent : null; },
-    current: () => root.querySelectorAll('.nav [aria-current="page"]').map((n) => n.textContent).join(' | '),
+    /** The entry of the side index marked as the page shown: `overview`, `pending` or `h:<harnessId>`. */
+    current: () => root.querySelectorAll('.side [aria-current="page"]').map((n) => n.getAttribute('data-fk').replace(/^ix:/, '')).join(' | '),
     go(hash) { window.location.hash = hash; for (const fn of window.listeners.hashchange || []) fn(); },
     press(fk) {
       const b = root.querySelector(`[data-fk="${fk}"]`);
-      assert.ok(b, `a control with data-fk="${fk}" (have: ${root.querySelectorAll('[data-fk]').map((n) => n.getAttribute('data-fk')).filter((x) => /^(dec|primary|chg)/.test(x)).join(', ')})`);
+      assert.ok(b, `a control with data-fk="${fk}"`);
       b.click();
     },
     settle: () => new Promise((resolve) => setImmediate(resolve)),
@@ -290,20 +294,20 @@ test('where each part sits: in the head of a document, in the body of a publishe
   const frag = load(board(fixture(), { offline: false, channel: 'artifact' }));
   const tags = (p, where) => p.root.querySelector(where).children.map((n) => n.tagName.toLowerCase()).join(' ');
   assert.equal(tags(doc, 'head'), 'meta meta title style link');
-  assert.equal(tags(doc, 'body'), 'a nav div div script script');
+  assert.equal(tags(doc, 'body'), 'a nav div script script');
   // The publisher's head stays its own; everything the fragment brings lands in the body.
   assert.equal(tags(frag, 'head'), 'meta meta');
-  assert.equal(tags(frag, 'body'), 'title style link a nav div div script script');
+  assert.equal(tags(frag, 'body'), 'title style link a nav div script script');
   for (const p of [doc, frag]) {
     assert.equal(p.root.querySelectorAll('title').length, 1);
     assert.equal(p.root.querySelector('link').getAttribute('rel'), 'stylesheet');
-    for (const id of ['skip', 'nav', 'view', 'foot', 'tray', 'board-data']) assert.ok(p.document.getElementById(id), id);
+    for (const id of ['skip', 'nav', 'side', 'view', 'foot', 'board-data']) assert.ok(p.document.getElementById(id), id);
   }
 });
 
 test('every route of the example draws, in the fragment as in the document', () => {
   const state = example();
-  const routes = ['#/overview', '#/decide', '#/decide/summary', '#/decide/G-1', '#/decide/U1-101', '#/h/ghost', '#/nowhere'];
+  const routes = ['#/overview', '#/pending', '#/decide', '#/decide/G-1', '#/h/ghost', '#/nowhere'];
   for (const h of state.harnesses) {
     routes.push(`#/h/${h.id}`, `#/h/${h.id}/diagnosis`, `#/h/${h.id}/impact`, `#/h/${h.id}/file/missing`, `#/h/${h.id}/view/nothing`);
     for (const name of ['permissions', 'hooks', 'skills', 'agents', 'mcp', 'plugins', 'clis', 'docs']) routes.push(`#/h/${h.id}/view/${name}`);
@@ -343,9 +347,11 @@ test('a reload with no hash reopens the remembered route; a hash in the URL wins
   assert.equal(again.window.location.hash, '', 'the URL is left alone');
 
   // A link that names a route is obeyed, and becomes the remembered one.
-  const linked = load(html, { hash: '#/decide', stored: Object.fromEntries(first.stored) });
-  assert.equal(linked.current().includes('decide'), true);
-  assert.equal(linked.stored.get(key), '#/decide');
+  const linked = load(html, { hash: '#/pending', stored: Object.fromEntries(first.stored) });
+  assert.equal(linked.current(), 'pending');
+  assert.equal(linked.stored.get(key), '#/pending');
+  // A link from a board that still had a Decide tab opens the Pending view.
+  assert.equal(load(html, { hash: '#/decide/G-1' }).current(), 'pending');
 
   // Another run does not see this one's route.
   const other = decidable();
@@ -357,15 +363,15 @@ test('a remembered route that no longer exists in the state is ignored', () => {
   const state = decidable();
   const key = `novarc-harness-doctor:${state.run.id}:route`;
   const open = (stored) => load(board(state), { stored: { [key]: stored } }).current();
-  assert.match(open('#/h/u1/file/fu1-1'), /Claude Code account 1/);
-  for (const gone of ['#/h/removed-project', '#/h/u1/file/fshop-1', '#/h/u1/file/f-gone', '#/h/u1/view/secrets', '#/decide/U1-102', 'javascript:alert(1)', '', `#/h/u1/${'x'.repeat(700)}`]) {
+  assert.equal(open('#/h/u1/file/fu1-1'), 'h:u1');
+  for (const gone of ['#/h/removed-project', '#/h/u1/file/fshop-1', '#/h/u1/file/f-gone', '#/h/u1/view/secrets', 'javascript:alert(1)', '', `#/h/u1/${'x'.repeat(700)}`]) {
     assert.equal(open(gone), 'overview', gone);
   }
-  assert.equal(open('#/decide/summary').includes('decide'), true);
-  assert.equal(open('#/decide/G-1').includes('decide'), true);
+  assert.equal(open('#/pending'), 'pending');
+  assert.equal(open('#/decide/summary'), 'pending');
 });
 
-test('the page draws the same when browser storage is missing, throws or forgets', async () => {
+test('the page draws the same when browser storage is missing, throws or forgets', () => {
   const state = decidable();
   const html = board(state);
   const base = load(html).view.textContent;
@@ -374,106 +380,114 @@ test('the page draws the same when browser storage is missing, throws or forgets
     assert.equal(page.view.textContent, base, storage);
     page.go(CASE);
     assert.equal(page.fatal(), null, storage);
-    // Deciding still works: the decision is held in the page and shown as a line to paste.
-    page.press('dec:U1-101:approve');
-    await page.settle();
+    page.go('#/h/u1/file/fu1-1?c=U1-101.0');
     assert.equal(page.fatal(), null, storage);
-    assert.deepEqual(page.texts('.paste code'), [`run.mjs decide --run ${state.run.id} --target U1-101 --action approve --rev ${REV_A}`], storage);
   }
 });
 
 // ---------------------------------------------------------------------------------------------
-// Decisions carry the revision, through every channel
+// The board only shows: decisions are taken in the chat
 // ---------------------------------------------------------------------------------------------
 
-/** A stand-in for the Artifact `db` namespace: it records what the page writes. */
-function fakeDb() {
-  const writes = [];
-  const db = {
-    collection: (name) => ({
-      onSnapshot() {},
-      doc: (id) => ({ set(data) { writes.push({ collection: name, id, data }); return Promise.resolve(); } }),
-    }),
-  };
-  return { writes, claude: { use: (name) => Promise.resolve(name === 'db' ? db : null) } };
-}
+/** Every label a decision control had, in both languages: none may be on the page any more. */
+const CONTROL_WORDS = ['Approve', 'Decline', 'Send question', 'Decide the next', 'Aprovar', 'Recusar', 'Enviar pergunta', 'Decidir as próximas', 'Make primary', 'Tornar principal', 'leave out', 'deixar de fora'];
 
-test('artifact channel: each decision is written to its document with the rev of what it answers', async () => {
+test('no channel can decide: no decision control, no database, no POST, no command to paste', async () => {
   const state = decidable();
-  const { writes, claude } = fakeDb();
-  const page = load(board(state, { channel: 'artifact' }), { claude, hash: '#/h/u1/diagnosis' });
-  await page.settle();
-  page.press('dec:U1-101:approve');
-  page.go('#/overview');
-  page.press('dec:G-1:decline');
-  page.press('primary:claude-1');
-  await page.settle();
-  assert.deepEqual(writes.map((w) => [w.collection, w.id, w.data.target, w.data.action, w.data.rev]), [
-    ['decisions', 'U1-101', 'U1-101', 'approve', REV_A],
-    ['decisions', 'G-1', 'G-1', 'decline', REV_G],
-    ['decisions', 'accounts.primary', 'accounts.primary', 'approve', undefined],
-  ]);
-  assert.ok(!('rev' in writes[2].data), 'the primary account has no revision');
-  assert.equal(writes[2].data.note, 'claude-1');
-  for (const w of writes) {
-    assert.deepEqual(Object.keys(w.data).filter((k) => !['id', 'at', 'runId', 'target', 'action', 'note', 'exclude', 'rev', 'via'].includes(k)), [], 'only contract fields');
-    assert.equal(w.data.runId, state.run.id);
-    assert.equal(w.data.via, 'board');
+  for (const lang of ['en', 'pt']) {
+    for (const channel of ['artifact', 'server', 'file']) {
+      const html = board(state, { lang, channel });
+      const script = html.slice(html.lastIndexOf('<script>'));
+      for (const needle of ['claude.use', 'collection(', "method: 'POST'", 'method:"POST"', '/api/decisions', 'run.mjs decide', 'localStorage.setItem(storageKey']) {
+        assert.ok(!script.includes(needle), `${lang} ${channel}: ${needle}`);
+      }
+      // Whatever the database would give, the page never asks for it.
+      let asked = 0;
+      const claude = { use: () => { asked++; return Promise.resolve(null); } };
+      const page = load(html, { claude, hash: CASE });
+      await page.settle();
+      assert.equal(asked, 0, 'the db capability is never requested');
+      const routes = ['#/overview', '#/pending', CASE, '#/h/u1/file/fu1-1', '#/h/fixture-shop/diagnosis'];
+      for (const r of routes) {
+        page.go(r);
+        assert.equal(page.root.querySelectorAll('textarea').length, 0, `${r}: no note or question box`);
+        assert.equal(page.root.querySelectorAll('[data-act]').length, 0, `${r}: no decision button`);
+        assert.equal(page.root.querySelectorAll('input').length, 0, `${r}: no checkbox`);
+        const buttons = page.root.querySelectorAll('button').map((b) => b.textContent);
+        for (const word of CONTROL_WORDS) assert.ok(!buttons.some((b) => b.includes(word)), `${lang} ${channel} ${r}: ${word}`);
+      }
+      assert.equal(page.document.getElementById('tray'), null, 'no decision tray');
+    }
   }
-  assert.equal(page.fatal(), null);
 });
 
-test('server channel: the posted decision carries the rev', async () => {
+test('the local page still reloads when the run is rebuilt; elsewhere the page asks for nothing', async () => {
   const state = decidable();
-  const page = load(board(state, { channel: 'server' }), { protocol: 'http:', hostname: '127.0.0.1', search: '?t=tok', hash: '#/h/fixture-shop/diagnosis' });
+  let version = 1;
+  const fetchState = (url) => Promise.resolve({ ok: true, json: () => Promise.resolve({ version, changed: false }) });
+  const page = load(board(state, { channel: 'server' }), { protocol: 'http:', hostname: '127.0.0.1', search: '?t=tok', fetch: fetchState });
   await page.settle();
-  page.press('dec:SHOP-501:defer');
+  assert.deepEqual(page.requests.map((r) => [r.url, r.opts.method || 'GET']), [['/api/state?t=tok&v=', 'GET']]);
+  assert.equal(page.window.reloads, 0);
+  // The interval is not run by the stand-in: the next poll is called by hand, after a rebuild.
+  version = 2;
+  const tick = page.window.intervals[0];
+  tick();
   await page.settle();
-  const posts = page.requests.filter((r) => r.opts.method === 'POST');
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].url, '/api/decisions?t=tok');
-  const sent = JSON.parse(posts[0].opts.body);
-  assert.deepEqual([sent.target, sent.action, sent.rev, sent.runId, sent.via], ['SHOP-501', 'defer', REV_B, state.run.id, 'board']);
+  assert.equal(page.requests[1].url, '/api/state?t=tok&v=1');
+  assert.equal(page.window.reloads, 1, 'a rebuilt board reloads the page');
+  // Opened from disk or published, nothing is fetched at all.
+  for (const env of [{}, { claude: { use: () => Promise.resolve(null) } }]) {
+    const quiet = load(board(state, { channel: 'artifact' }), env);
+    await quiet.settle();
+    assert.deepEqual(quiet.requests, []);
+  }
 });
 
-test('file channel: the line to paste carries the rev, and so does what the page remembers', async () => {
+test('Pending: exactly the open findings, by harness, each with its id to copy, and the decided ones folded', async () => {
   const state = decidable();
-  const line = `run.mjs decide --run ${state.run.id} --target U1-101 --action approve --rev ${REV_A}`;
-  const page = load(board(state, { channel: 'file' }), { hash: CASE });
-  await page.settle();
-  page.press('dec:U1-101:approve');
-  await page.settle();
-  assert.deepEqual(page.texts('.paste code'), [line]);
-  const kept = JSON.parse(page.stored.get(`novarc-harness-doctor:${state.run.id}`));
-  assert.deepEqual(kept.map((d) => [d.target, d.rev]), [['U1-101', REV_A]]);
-
-  // Reopened from disk, the decision is restored with its rev and still offered for pasting.
-  const again = load(board(state, { channel: 'file' }), { stored: Object.fromEntries(page.stored), hash: CASE });
-  await again.settle();
-  assert.deepEqual(again.texts('.paste code'), [line]);
-  assert.equal(again.root.querySelector('[data-fk="dec:U1-101:approve"]'), null, 'shown as decided');
-
-  // After a rebuild that changed the proposal, the remembered decision no longer holds.
-  const changed = decidable();
-  changed.items.find((i) => i.id === 'U1-101').rev = 'cccccccccccc';
-  const stale = load(board(changed, { channel: 'file' }), { stored: Object.fromEntries(page.stored), hash: CASE });
-  await stale.settle();
-  assert.deepEqual(stale.texts('.paste code'), []);
-  assert.ok(stale.root.querySelector('[data-fk="dec:U1-101:approve"]'), 'the item is open for a decision again');
-});
-
-test('a state without revisions sends decisions without one', async () => {
-  const state = fixture();
-  const { writes, claude } = fakeDb();
-  const page = load(board(state, { channel: 'artifact' }), { claude, hash: '#/h/u1/diagnosis' });
-  await page.settle();
-  page.press('dec:U1-101:approve');
-  await page.settle();
-  assert.equal(writes.length, 1);
-  assert.ok(!('rev' in writes[0].data));
+  for (const lang of ['en', 'pt']) {
+    const page = load(board(state, { lang }), { hash: '#/pending' });
+    const T = STRINGS[lang];
+    assert.equal(page.view.querySelector('.chat-line').textContent, T.pend.line);
+    // Groups first, then each harness with its open items, most serious first.
+    const listed = page.view.querySelectorAll('[data-item]').map((n) => n.getAttribute('data-item'));
+    assert.deepEqual(listed, ['G-1', 'U1-101', 'U1-401', 'SHOP-501']);
+    const open = state.items.filter((i) => i.status === 'open').map((i) => i.id).sort();
+    assert.deepEqual(page.view.querySelectorAll('.prow').map((r) => r.getAttribute('data-item')).sort(), open);
+    // Each row: the id as a button that copies it, the severity in words, the title as a link to the case.
+    const row = page.view.querySelector('[data-item="U1-101"]');
+    const copy = row.querySelector('button.copy');
+    assert.equal(copy.textContent, 'U1-101');
+    assert.equal(row.querySelector('.sevw').textContent, T.severity.critical);
+    assert.equal(row.querySelector('.pt a').getAttribute('href'), '#/h/u1/diagnosis?item=U1-101');
+    // The harnesses carry their kind marker.
+    assert.deepEqual(page.view.querySelectorAll('.psec .ph .kind').map((k) => k.getAttribute('class')), ['kind user', 'kind project']);
+    // What was decided is listed, closed until asked for.
+    const decided = page.view.querySelector('#p-decided details');
+    assert.equal(decided.open, false);
+    assert.deepEqual(decided.querySelectorAll('tbody tr').map((tr) => tr.children[0].textContent).sort(),
+      state.items.filter((i) => ['approved', 'in-progress', 'fixed', 'failed', 'declined', 'deferred'].includes(i.status)).map((i) => i.id).sort());
+  }
+  // Clicking the id copies the id and nothing else (the stand-in has no clipboard: the page falls back to a text field).
+  const copied = [];
+  const page = load(board(state), { hash: '#/pending' });
+  page.document.execCommand = () => { copied.push(page.document.body.children.find((n) => n.tagName === 'TEXTAREA').value); return true; };
+  const btn = page.view.querySelector('[data-item="U1-401"] button.copy');
+  assert.equal(btn.getAttribute('title'), 'Copy U1-401');
+  btn.click();
+  assert.deepEqual(copied, ['U1-401']);
+  assert.equal(btn.textContent, 'Copied');
+  // Nothing open: the view says so.
+  const none = decidable();
+  for (const i of none.items) if (i.status === 'open') i.status = 'approved';
+  const empty = load(board(none), { hash: '#/pending' });
+  assert.equal(empty.view.querySelector('.empty').textContent, STRINGS.en.pend.none);
+  assert.equal(empty.view.querySelectorAll('.prow').length, 0);
 });
 
 // ---------------------------------------------------------------------------------------------
+// Unknown is drawn as unknown// ---------------------------------------------------------------------------------------------
 // Unknown is drawn as unknown
 // ---------------------------------------------------------------------------------------------
 
@@ -527,12 +541,13 @@ function withUnknowns(lang) {
 }
 
 test('a hook that could not be told is "could not tell", never "does not block"', () => {
+  const blocks = (page) => page.root.querySelectorAll('.pane li.hk').map((li) => [li.closest('.slot').getAttribute('data-event'), li.querySelector('.hk-h .tag').textContent]);
   const en = load(board(withUnknowns()), { hash: '#/h/u1/view/hooks' });
-  assert.deepEqual(rowsOf(en).map((r) => [r[1], r[3]]), [
-    ['PreToolUse', 'blocks'], ['Stop', 'does not block'], ['SessionStart', 'could not tell'], ['push', 'could not tell'],
+  assert.deepEqual(blocks(en), [
+    ['SessionStart', 'could not tell'], ['PreToolUse', 'blocks'], ['Stop', 'does not block'], ['push', 'could not tell'],
   ]);
   const pt = load(board(withUnknowns('pt'), { lang: 'pt' }), { hash: '#/h/u1/view/hooks' });
-  assert.deepEqual(rowsOf(pt).map((r) => r[3]), ['bloqueia', 'não bloqueia', 'não deu para saber', 'não deu para saber']);
+  assert.deepEqual(blocks(pt).map((r) => r[1]), ['não deu para saber', 'bloqueia', 'não bloqueia', 'não deu para saber']);
 });
 
 test('a call count that was not measured says so, and a real zero stays a zero', () => {
@@ -698,7 +713,7 @@ test('impact tab: "Since the last review" comes first, with the metric table, th
   const page = pageOf('en', '#/h/u1/impact');
   const sections = page.view.querySelectorAll('section');
   const since = sections[0];
-  assert.deepEqual(sections.map((s) => [s.getAttribute('id'), s.getAttribute('class')]).slice(0, 2), [['since', 'sec first fu'], [null, 'sec']], 'first in the tab; the measurement of this run follows');
+  assert.deepEqual(sections.map((s) => [s.getAttribute('id'), s.getAttribute('class')]).slice(0, 2), [['since', 'sec first fu'], ['imp-main', 'sec']], 'first in the tab; the measurement of this run follows');
   assert.deepEqual([since.querySelector('.sec-k').textContent, since.querySelector('h2').textContent], ['Follow-up', 'Since the last review']);
   assert.equal(since.querySelector('.sub').textContent, `The review of ${day(PREV.reviewedAt)}, 40 days ago, against what was measured since. 120 sessions since then.`);
   assert.equal(since.querySelector('.fu-lead').textContent, '1 of 2 expected effects confirmed.');
@@ -743,7 +758,7 @@ test('impact tab: "Since the last review" comes first, with the metric table, th
   assert.deepEqual(fixed.querySelectorAll('a').map((a) => [a.textContent, a.getAttribute('href')]), [['U1-202', '#/h/u1/diagnosis?item=U1-202']]);
 
   // What it left undone is there, closed until asked for.
-  const box = since.querySelector('details');
+  const box = since.querySelector('details.foldbox');
   assert.deepEqual([box.getAttribute('class'), box.open, box.querySelector('summary').textContent], ['foldbox', false, '2 items that review left undone']);
   assert.deepEqual(carried.querySelectorAll('th').map((th) => th.textContent), ['Item', 'Title', 'Left as', 'In this review']);
   assert.deepEqual(cellsOf(carried), [[['U1-101'], ['Token inline in helper script'], ['declined'], ['U1-101']], [['U1-777'], ['Left for later, and not found again'], ['later'], ['']]]);
@@ -776,7 +791,7 @@ test('impact tab: "Since the last review" comes first, with the metric table, th
   ]);
   assert.deepEqual(tagsOf(ptFixed).map((t) => t[0]), ['continua no lugar', 'desfeito', 'reescrito depois', 'o arquivo sumiu', 'não conferido']);
   assert.deepEqual(tagsOf(ptSince.querySelector('.legend-line')).map((t) => t[0]), ['1 correção que continua no lugar', '1 correção desfeita', '1 correção que voltou como achado']);
-  assert.equal(ptSince.querySelector('summary').textContent, '2 itens que aquela revisão deixou por fazer');
+  assert.equal(ptSince.querySelector('details.foldbox summary').textContent, '2 itens que aquela revisão deixou por fazer');
   assert.deepEqual(tagsOf(ptCarried).map((t) => t[0]), ['recusado', 'adiado']);
   assert.equal(ptSince.querySelector('.note-line').textContent, STRINGS.pt.fu.note);
   for (const text of [since.textContent, ptSince.textContent]) assert.ok(!/[–—]|\p{Extended_Pictographic}/u.test(text), 'no dash or emoji');
@@ -798,7 +813,7 @@ test('impact tab: with too little data the section says so, and no verdict is sh
   assert.ok(!metrics.textContent.includes('confirmed'));
   // The check on disk does not depend on the sample: it is shown either way.
   assert.deepEqual(cellsOf(fixed), [[['SHOP-402'], ['./.githooks/pre-commit'], ['-'], ['still in place'], ['']]]);
-  assert.equal(since.querySelector('details'), null, 'nothing was left undone, so nothing to unfold');
+  assert.equal(since.querySelector('details.foldbox'), null, 'nothing was left undone, so nothing to unfold');
   assert.equal(since.querySelector('.note-line').textContent, STRINGS.en.fu.note);
   // This harness has no measurement of its own: that section follows, as before.
   assert.equal(page.view.querySelectorAll('section')[1].querySelector('h2').textContent, 'No measurement for this harness');
@@ -868,7 +883,7 @@ test('harness header: the earlier reviews, oldest first, ending in the score it 
     [day('2025-06-15T12:00:00Z'), 'not scored'], [day('2025-07-15T12:00:00Z'), 'B', '75'], ['now', 'B', '79.5']]);
 });
 
-test('item: one line of history in the diagnosis and on the decide screen; a previous link alone shows nothing', () => {
+test('item: one line of history in the diagnosis; a previous link alone shows nothing', () => {
   const line = `First seen on ${day('2025-11-01T12:00:00Z')} · seen in 2 earlier reviews · declined on ${day('2025-12-01T12:30:00Z')}: The script is going away.`;
   const diagnosis = pageOf('en', '#/h/u1/diagnosis');
   assert.deepEqual(diagnosis.texts('#case-U1-101 .chist'), [line]);
@@ -880,15 +895,9 @@ test('item: one line of history in the diagnosis and on the decide screen; a pre
   // The expected saving says in which measurement the next review will look for it.
   assert.ok(card.textContent.includes('the next review checks it in: context at the start of a session'));
 
-  const decide = pageOf('en', '#/decide/U1-101');
-  assert.deepEqual(decide.texts('.case .chist'), [line]);
-  assert.deepEqual(pageOf('en', '#/decide/U1-401').texts('.chist'), []);
-  const pt = pageOf('pt', '#/decide/U1-101');
-  assert.deepEqual(pt.texts('.chist'), [`Visto pela primeira vez em ${day('2025-11-01T12:00:00Z', 'pt')} · apareceu em 2 revisões anteriores · recusado em ${day('2025-12-01T12:30:00Z', 'pt')}: The script is going away.`]);
+  const pt = pageOf('pt', '#/h/u1/diagnosis?item=U1-101');
+  assert.deepEqual(pt.texts('#case-U1-101 .chist'), [`Visto pela primeira vez em ${day('2025-11-01T12:00:00Z', 'pt')} · apareceu em 2 revisões anteriores · recusado em ${day('2025-12-01T12:30:00Z', 'pt')}: The script is going away.`]);
   assert.ok(pt.view.textContent.includes('a próxima revisão confere em: contexto no início da sessão'));
-  // A member of a group shows it too, inside its case.
-  const grouped = pageOf('en', '#/decide/G-1', (u, s, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 1, items: ['U1-101', 'U1-401'] }]; });
-  assert.deepEqual(grouped.texts('.chist'), [line]);
 });
 
 test('a state without any of the new fields renders exactly the sections it rendered before', () => {
@@ -897,9 +906,9 @@ test('a state without any of the new fields renders exactly the sections it rend
   for (const [state, lang] of [[fixture(), 'en'], [withUnknowns('pt'), 'pt']]) {
     applyScores(state);
     const page = load(board(state, { lang }));
-    const routes = ['#/overview', '#/decide', '#/decide/summary'];
+    const routes = ['#/overview', '#/pending'];
     for (const h of state.harnesses) routes.push(`#/h/${h.id}`, `#/h/${h.id}/diagnosis`, `#/h/${h.id}/impact`);
-    for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`, `#/decide/${i.id}`);
+    for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`);
     for (const r of routes) {
       page.go(r);
       for (const sel of NEW) assert.equal(page.root.querySelectorAll(sel).length, 0, `${lang} ${r} ${sel}`);
@@ -909,13 +918,15 @@ test('a state without any of the new fields renders exactly the sections it rend
   }
   // The sections of each screen, by their headings, for the fixture: the list they had before.
   const page = load(board(fixture()));
-  assert.deepEqual(headings(page), ['The harnesses of Fixture', 'Each harness, before and after', 'Unconfirmed leads', 'Log']);
+  assert.deepEqual(headings(page), ['The harnesses of Fixture', 'Each harness, before and after', 'Unconfirmed leads', 'Log', 'Accounts1', 'Projects1']);
   page.go('#/h/u1/impact');
   assert.deepEqual(headings(page), ['Claude Code account 1', 'No measurement for this harness', 'What enters every session']);
   assert.deepEqual(page.view.querySelectorAll('section').map((s) => s.getAttribute('class')), ['sec first']);
   page.go('#/h/u1/diagnosis');
   const titles = fixture().items.map((i) => i.title);
-  assert.deepEqual(headings(page).filter((h) => !titles.includes(h)), ['Claude Code account 1', 'What is wrong, why, and how it looks after', 'Recognized defenses', 'Review progress', 'Inventory', 'Unconfirmed leads', 'Log']);
+  const rounds = page.texts('.rhead');
+  assert.deepEqual(rounds, ['1Security and permissions', '4Gates and automation']);
+  assert.deepEqual(headings(page).filter((h) => !titles.includes(h) && !rounds.includes(h)), ['Claude Code account 1', 'What is wrong, why, and how it looks after', 'Recognized defenses', 'Review progress', 'Inventory', 'Unconfirmed leads', 'Log']);
   assert.deepEqual(page.view.querySelectorAll('.case').map((c) => c.children.slice(0, 3).map((x) => x.getAttribute('class'))), [['chead', 'ctitle', 'cfind'], ['chead', 'ctitle', 'cfind']]);
   // With a measurement, the Impact tab opens on it, as before.
   const measured = load(board(withUnknowns()), { hash: '#/h/u1/impact' });
@@ -945,7 +956,7 @@ function keptPage(lang, hash, mutate) {
 /** The chips in the header of a case: severity, round, class, then the status and what goes beside it. */
 const headOf = (page, id) => tagsOf(page.view.querySelector(`#case-${id} .chead`));
 
-test('a decline kept from an earlier review says so with the earlier note, and can still be changed', async () => {
+test('a decline kept from an earlier review says so with the earlier note', () => {
   const sentence = `Decline kept from the review of ${day('2025-12-01T12:20:00Z')}: the same proposal came back. Your note then: ${KEPT_NOTE}`;
   const seen = `First seen on ${day('2025-11-01T12:00:00Z')} · seen in 2 earlier reviews`;
   const page = keptPage('en', '#/h/u1/diagnosis?item=U1-201');
@@ -960,23 +971,13 @@ test('a decline kept from an earlier review says so with the earlier note, and c
   const margin = page.view.querySelectorAll('.ann').find((a) => a.querySelector('.cid').textContent === 'U1-201');
   assert.deepEqual(tagsOf(margin).map((t) => t[0]), ['declined', 'decline kept']);
   const grouped = keptPage('en', '#/overview', (kept, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 2, items: ['U1-201', 'U1-401'] }]; });
-  assert.deepEqual(tagsOf(grouped.view.querySelector('.mlist')).map((t) => t[0]), ['declined', 'decline kept']);
+  // Every member shows its status now that the board only shows: U1-401 is still open.
+  assert.deepEqual(tagsOf(grouped.view.querySelector('.mlist')).map((t) => t[0]), ['declined', 'decline kept', 'open']);
 
-  // It was not asked again: it is not in the decide queue.
-  const queue = keptPage('en', '#/decide/U1-201');
-  assert.equal(queue.view.querySelector('#case-U1-201'), null);
-  assert.equal(queue.view.querySelector('.dc-prog').textContent, '1 of 3');
-
-  // It stays decidable like any declined item: "change" opens the buttons again.
-  page.go('#/h/u1/diagnosis?item=U1-201');
-  assert.equal(page.view.querySelector('#case-U1-201 [data-fk="dec:U1-201:approve"]'), null);
-  page.press('chg:U1-201');
-  page.press('dec:U1-201:approve');
-  await page.settle();
-  assert.deepEqual(page.texts('.paste code'), ['run.mjs decide --run 20260110-ab12 --target U1-201 --action approve']);
-  // Decided otherwise now: the sentence and its chip go, and the history says what the last review left.
-  assert.deepEqual(lines(page), [[`${seen} · declined on ${day('2025-12-01T12:20:00Z')}: ${KEPT_NOTE}`, 'chist']]);
-  assert.deepEqual(headOf(page, 'U1-201').slice(-1), [['approved', 'tag st info']]);
+  // It was not asked again: it is not pending, it is among what was decided, with its chip.
+  const pending = keptPage('en', '#/pending');
+  assert.equal(pending.view.querySelector('[data-item="U1-201"]'), null);
+  assert.deepEqual(tagsOf(pending.view.querySelector('#p-decided')).filter((t) => t[0] === 'decline kept').length, 1);
 
   const pt = keptPage('pt', '#/h/u1/diagnosis?item=U1-201');
   assert.deepEqual(lines(pt).map((l) => l[0]), [
@@ -994,7 +995,7 @@ test('a decline kept from an earlier review says so with the earlier note, and c
   assert.deepEqual(headOf(plain, 'U1-201').slice(-1), [['declined', 'tag st ']]);
 });
 
-test('an open finding that was declined before is marked, and asked after the others', async () => {
+test('an open finding that was declined before is marked, and listed after the others', () => {
   // In reviewedBefore, U1-101 (critical) was declined in the last review and is open again.
   const chips = [['open', 'tag st warn'], ['declined before', 'tag dashed']];
   const page = pageOf('en', '#/h/u1/diagnosis?item=U1-101');
@@ -1002,46 +1003,24 @@ test('an open finding that was declined before is marked, and asked after the ot
   assert.deepEqual(headOf(page, 'U1-401').slice(-2), [['gate', 'tag'], ['open', 'tag st warn']], 'a finding the records do not know has no chip');
   assert.equal(page.texts('#case-U1-101 .chist').length, 1, 'the history line already says when and with what note');
 
-  // The queue: the findings never declined first, most severe first; the critical one waits at the end.
-  const progress = (p) => p.view.querySelector('.dc-prog').textContent;
-  const decide = pageOf('en', '#/decide');
-  assert.ok(decide.view.querySelector('#case-U1-401') && !decide.view.querySelector('#case-U1-101'));
-  assert.equal(progress(decide), '1 of 3');
-  decide.go('#/decide/SHOP-501');
-  assert.equal(progress(decide), '2 of 3');
-  decide.go('#/decide/U1-101');
-  assert.equal(progress(decide), '3 of 3');
-  assert.deepEqual(headOf(decide, 'U1-101').slice(-2), chips);
-  // "Decide the next N" opens the same first one, and deciding walks the queue in that order.
-  decide.go('#/overview');
-  const next = decide.root.querySelector('[data-fk="tray:go"]');
-  assert.deepEqual([next.textContent, next.getAttribute('href')], ['Decide the next 3', '#/decide']);
-  decide.go('#/decide');
-  decide.press('dec:U1-401:approve');
-  assert.ok(decide.view.querySelector('#case-SHOP-501'), 'then the medium one');
-  decide.press('dec:SHOP-501:defer');
-  assert.ok(decide.view.querySelector('#case-U1-101'), 'then the one declined before');
-  decide.press('dec:U1-101:approve');
-  await decide.settle();
-  assert.equal(decide.view.querySelector('.dc-prog'), null, 'nothing left: the summary');
-  // Once decided here it is no longer open, so the chip goes.
-  decide.go('#/h/u1/diagnosis?item=U1-101');
-  assert.deepEqual(headOf(decide, 'U1-101').slice(-1), [['approved', 'tag st info']]);
+  // Pending: the findings never declined first, most severe first; the critical one waits at the end of its harness.
+  const order = (p) => p.view.querySelectorAll('.prow').map((r) => r.getAttribute('data-item'));
+  const pending = pageOf('en', '#/pending');
+  assert.deepEqual(order(pending), ['U1-401', 'U1-101', 'SHOP-501']);
+  assert.deepEqual(tagsOf(pending.view.querySelector('[data-item="U1-101"]')).map((t) => t[0]), ['declined before']);
 
-  const pt = pageOf('pt', '#/decide/U1-101');
+  const pt = pageOf('pt', '#/h/u1/diagnosis?item=U1-101');
   assert.deepEqual(headOf(pt, 'U1-101').slice(-2).map((t) => t[0]), ['aberto', 'recusado antes']);
-  assert.equal(pt.root.querySelector('[data-fk="tray:go"]').textContent, 'Decidir as próximas 3');
 
   // A group still comes first and covers its members, declined before or not.
-  const grouped = pageOf('en', '#/decide', (u, s, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 1, items: ['U1-101', 'U1-401'] }]; });
-  assert.equal(progress(grouped), '1 of 2');
-  assert.equal(grouped.view.querySelector('.case .cid').textContent, 'G-1');
+  const grouped = pageOf('en', '#/pending', (u, s, st) => { st.groups = [{ id: 'G-1', title: 'Same finding twice', round: 1, items: ['U1-101', 'U1-401'] }]; });
+  assert.equal(grouped.view.querySelector('[data-item]').getAttribute('data-item'), 'G-1');
 
-  // Left for later last time, not declined: its usual place at the head of the queue, and no chip.
-  const usual = pageOf('en', '#/decide', (u, s, st) => { st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred'; });
-  assert.ok(usual.view.querySelector('#case-U1-101'));
-  assert.equal(progress(usual), '1 of 3');
-  assert.deepEqual(headOf(usual, 'U1-101').slice(-2), [['secret', 'tag'], ['open', 'tag st warn']]);
+  // Left for later last time, not declined: its usual place at the head of its harness, and no chip.
+  const usual = pageOf('en', '#/pending', (u, s, st) => { st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred'; });
+  assert.deepEqual(order(usual), ['U1-101', 'U1-401', 'SHOP-501']);
+  const plain = pageOf('en', '#/h/u1/diagnosis?item=U1-101', (u, s, st) => { st.items.find((i) => i.id === 'U1-101').history.lastStatus = 'deferred'; });
+  assert.deepEqual(headOf(plain, 'U1-101').slice(-2), [['secret', 'tag'], ['open', 'tag st warn']]);
 });
 
 test('follow-up rows: the base of the wasted share, and why two numbers are not compared', () => {
@@ -1089,9 +1068,9 @@ test('a state without carriedFrom, a declined-before finding, base or reason ren
   for (const [lang, state] of states) {
     applyScores(state);
     const page = load(board(state, { lang }));
-    const routes = ['#/overview', '#/decide', '#/decide/summary'];
+    const routes = ['#/overview', '#/pending'];
     for (const h of state.harnesses) routes.push(`#/h/${h.id}`, `#/h/${h.id}/diagnosis`, `#/h/${h.id}/impact`);
-    for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`, `#/decide/${i.id}`);
+    for (const i of state.items) routes.push(`#/h/${i.harness}/diagnosis?item=${i.id}`);
     for (const f of state.files) routes.push(`#/h/${f.harness}/file/${f.id}`);
     for (const r of routes) {
       page.go(r);
@@ -1099,10 +1078,9 @@ test('a state without carriedFrom, a declined-before finding, base or reason ren
       for (const word of NEW_WORDS(STRINGS[lang])) assert.ok(!page.view.textContent.includes(word), `${lang} ${r}: ${word}`);
     }
   }
-  // And the queue is in the order it always had: most severe first.
-  const page = load(board(states[2][1]), { hash: '#/decide' });
-  assert.ok(page.view.querySelector('#case-U1-101'));
-  assert.equal(page.view.querySelector('.dc-prog').textContent, '1 of 3');
+  // And Pending is in the order it always had: most severe first.
+  const page = load(board(states[2][1]), { hash: '#/pending' });
+  assert.deepEqual(page.view.querySelectorAll('.prow').map((r) => r.getAttribute('data-item')), ['U1-101', 'U1-401', 'SHOP-501']);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1142,4 +1120,289 @@ test('a published board draws no e-mail address, and the change that quotes one 
   assert.ok(local.view.textContent.includes(`Backup contact: ${BACKUP}`));
   assert.equal(lines(local).length, lines(published).length);
   assert.equal(local.view.querySelectorAll('.ln').length, published.view.querySelectorAll('.ln').length, 'line for line the same file');
+});
+
+// ---------------------------------------------------------------------------------------------
+// One change in focus in the file viewer
+// ---------------------------------------------------------------------------------------------
+
+/** Runs the page's own document-level listeners (the stand-in does not bubble). */
+const fireDoc = (page, type, event) => { for (const fn of page.document.listeners[type] || []) fn({ button: 0, preventDefault() {}, ...event }); };
+const FILE_U1 = '#/h/u1/file/fu1-1';
+
+test('focus: a card puts only its change in focus, the route keeps it, and Escape, a second click or empty space clear it', () => {
+  for (const lang of ['en', 'pt']) {
+    const page = load(board(example(), { lang }), { hash: FILE_U1 });
+    const T = STRINGS[lang];
+    const keys = page.view.querySelectorAll('.fv-code.hunk').map((h) => h.getAttribute('data-key'));
+    assert.ok(keys.length >= 3, 'the file has several changes');
+    assert.equal(page.view.querySelectorAll('.focus').length, 0, 'nothing in focus at first');
+    assert.equal(page.view.querySelector('.fv-focus').textContent, T.focus.hint);
+    const card = (key) => page.view.querySelector(`.fv-note[data-key="${key}"] .ann`);
+
+    // A click on a card: its hunk and its card, and nothing else, are in focus; the rest is dimmed.
+    const key = keys[1];
+    card(key).click();
+    assert.equal(page.window.location.hash, `${FILE_U1}?c=${encodeURIComponent(key)}`);
+    assert.deepEqual(page.view.querySelectorAll('.fv-code.focus').map((h) => h.getAttribute('data-key')), [key]);
+    assert.deepEqual(page.view.querySelectorAll('.fv-note.focus').map((n) => n.getAttribute('data-key')), [key]);
+    assert.ok(page.view.querySelector('.fv-wrap.notes').classList.contains('focusing'), 'the rest is dimmed, not hidden');
+    assert.equal(page.view.querySelectorAll('.fv-code.hunk').length, keys.length, 'every change is still drawn');
+    assert.equal(card(key).getAttribute('aria-current'), 'true');
+    assert.equal(card(key).querySelector('.ann-on').textContent, T.focus.on);
+    assert.equal(page.view.querySelector('.fv-focus.on [data-fk="focus:clear"]').textContent, T.focus.clear);
+    // A reload or a shared link keeps it: the route is remembered with the focus.
+    assert.equal(page.stored.get(`novarc-harness-doctor:${example().run.id}:route`), `${FILE_U1}?c=${encodeURIComponent(key)}`);
+    const again = load(board(example(), { lang }), { stored: Object.fromEntries(page.stored) });
+    assert.deepEqual(again.view.querySelectorAll('.fv-code.focus').map((h) => h.getAttribute('data-key')), [key]);
+
+    // The same card again clears it.
+    card(key).click();
+    assert.equal(page.window.location.hash, FILE_U1);
+    assert.equal(page.view.querySelectorAll('.focus').length, 0);
+
+    // A click on a change in the file selects its card.
+    page.view.querySelector(`.fv-code.hunk[data-key="${keys[0]}"]`).click();
+    assert.equal(card(keys[0]).getAttribute('aria-current'), 'true');
+    // Escape clears it.
+    fireDoc(page, 'keydown', { key: 'Escape' });
+    assert.equal(page.window.location.hash, FILE_U1);
+    assert.equal(page.view.querySelectorAll('.focus').length, 0);
+
+    // The keyboard: a card is focusable, and Enter or Space toggles it.
+    assert.equal(card(keys[2]).getAttribute('tabindex'), '0');
+    card(keys[2]).fire('keydown', { key: 'Enter', target: card(keys[2]) });
+    assert.equal(card(keys[2]).getAttribute('aria-current'), 'true');
+    card(keys[2]).fire('keydown', { key: ' ', target: card(keys[2]) });
+    assert.equal(page.view.querySelectorAll('.focus').length, 0);
+
+    // A click on empty space clears it; a click on the card's own link does not toggle anything.
+    card(keys[0]).click();
+    fireDoc(page, 'click', { target: page.view.querySelector('.fv-path') });
+    assert.equal(page.window.location.hash, FILE_U1, 'a click on empty space');
+    const link = card(keys[0]).querySelector('a.cid');
+    card(keys[0]).fire('click', { target: link });
+    assert.equal(page.window.location.hash, FILE_U1, 'the id link is left to the router');
+
+    // Hovering a card previews the same highlight, and leaving it takes it away.
+    const note = page.view.querySelector(`.fv-note[data-key="${keys[1]}"]`);
+    card(keys[1]).fire('mouseenter');
+    assert.ok(page.view.querySelector('.fv-wrap.notes').classList.contains('peeking'));
+    assert.ok(note.classList.contains('peek') && page.view.querySelector(`.fv-code[data-key="${keys[1]}"]`).classList.contains('peek'));
+    card(keys[1]).fire('mouseleave');
+    assert.equal(page.view.querySelectorAll('.peek').length, 0);
+  }
+  // A link from the diagnosis ("see in the file") opens the file with that change in focus; the older ?at= does too.
+  const page = load(board(example()), { hash: '#/h/u1/diagnosis?item=U1-201' });
+  const see = page.view.querySelectorAll('#case-U1-201 .dhead a')[0];
+  assert.match(see.getAttribute('href'), /\?c=U1-201\.0$/);
+  const old = load(board(example()), { hash: `${FILE_U1}?at=U1-201.0` });
+  assert.deepEqual(old.view.querySelectorAll('.fv-code.focus').map((h) => h.getAttribute('data-key')), ['U1-201.0']);
+  // A focus on a change this file does not have is ignored.
+  assert.equal(load(board(example()), { hash: `${FILE_U1}?c=NOPE-1.0` }).view.querySelectorAll('.focus').length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Accounts and projects never look alike; the side index
+// ---------------------------------------------------------------------------------------------
+
+test('kind markers: an account and a project are marked apart wherever a harness appears', () => {
+  for (const lang of ['en', 'pt']) {
+    const T = STRINGS[lang];
+    const state = example();
+    const kindOf = (id) => state.harnesses.find((h) => h.id === id).kind;
+    const page = load(board(state, { lang }), { hash: '#/overview' });
+    // The side index (what the tab bar was): accounts first, then projects, each under its own heading.
+    const groups = page.root.querySelectorAll('.side .ix-group');
+    assert.deepEqual(groups.map((g) => g.getAttribute('data-kind')), ['user', 'project']);
+    assert.deepEqual(groups.map((g) => g.querySelector('.ix-gh').textContent), [T.kindGroup.user, T.kindGroup.project]);
+    for (const g of groups) {
+      for (const a of g.querySelectorAll('.ix-hl')) {
+        assert.equal(kindOf(a.getAttribute('data-harness')), g.getAttribute('data-kind'));
+        assert.equal(a.querySelector('.kind').getAttribute('aria-label'), T.kind[g.getAttribute('data-kind')], 'the glyph has its word for a screen reader');
+      }
+    }
+    // Overview rows: under a heading per kind, each with the glyph of its kind.
+    assert.deepEqual(page.view.querySelectorAll('.fleet-h').map((h) => h.querySelector('.kind').getAttribute('class')), ['kind user bare', 'kind project bare']);
+    assert.deepEqual(page.view.querySelectorAll('.hrow').map((r) => r.querySelector('.kind').getAttribute('class')),
+      state.harnesses.filter((h) => h.kind === 'user').concat(state.harnesses.filter((h) => h.kind !== 'user')).map((h) => `kind ${h.kind} bare`));
+    // The header of a harness says its kind in words.
+    for (const h of state.harnesses) {
+      page.go(`#/h/${h.id}`);
+      assert.equal(page.view.querySelector('.hero .kicker .kind').textContent, T.kind[h.kind], h.id);
+    }
+    // The file viewer names the harness with its marker.
+    page.go('#/h/loja-web/file/floja-1');
+    assert.equal(page.view.querySelector('.fv-who .kind').getAttribute('class'), 'kind project bare');
+    page.go(FILE_U1);
+    assert.equal(page.view.querySelector('.fv-who .kind').getAttribute('class'), 'kind user bare');
+    // Pending: each harness group with the marker in words.
+    page.go('#/pending');
+    assert.deepEqual(page.view.querySelectorAll('.psec .ph .kind').map((k) => k.textContent),
+      ['u1', 'u2', 'u3', 'loja-web', 'api-pedidos'].filter((id) => state.items.some((i) => i.harness === id && i.status === 'open')).map((id) => T.kind[kindOf(id)]));
+  }
+});
+
+test('side index: every entry is a route, the page shown is marked, its sections are listed, and on a phone it is a drawer', () => {
+  const state = example();
+  const page = load(board(state, { lang: 'pt' }), { hash: '#/overview' });
+  const side = page.root.querySelector('#side');
+  const hrefs = side.querySelectorAll('a').map((a) => a.getAttribute('href'));
+  assert.ok(hrefs.every((h) => /^#\//.test(h)), 'only hash routes: the same in the three channels');
+  assert.deepEqual(side.querySelectorAll('.ix-hl').map((a) => a.getAttribute('href')), state.harnesses.filter((h) => h.kind === 'user').concat(state.harnesses.filter((h) => h.kind !== 'user')).map((h) => `#/h/${h.id}`));
+  assert.equal(page.current(), 'overview');
+  // Each harness with its grade and how many decisions wait for it.
+  const u1 = side.querySelector('[data-harness="u1"]');
+  assert.equal(u1.querySelector('.gr').textContent, state.harnesses[0].scores.grade);
+  assert.equal(u1.querySelector('.n').textContent, String(state.items.filter((i) => i.harness === 'u1' && i.status === 'open').length));
+  // The sections of the overview, as links to the overview route that scroll instead of navigating.
+  const secs = side.querySelectorAll('a[data-sec]');
+  assert.deepEqual(secs.map((a) => a.getAttribute('data-sec')), page.view.querySelectorAll('[data-toc]').map((n) => n.getAttribute('id')));
+  assert.ok(secs.every((a) => a.getAttribute('href') === '#/overview'));
+  assert.equal(side.querySelectorAll('a[aria-current="location"]').length, 1, 'the section being read is marked');
+  fireDoc(page, 'click', { target: secs[1] });
+  assert.equal(page.current(), 'overview', 'a section link does not leave the page');
+
+  // A harness: its three views under it, and the current one with its parts.
+  page.go('#/h/u1/diagnosis');
+  assert.equal(page.current(), 'h:u1');
+  const sub = page.root.querySelectorAll('.side .ix-sub a');
+  assert.deepEqual(sub.map((a) => [a.getAttribute('href'), a.getAttribute('aria-current')]), [['#/h/u1', null], ['#/h/u1/diagnosis', 'true'], ['#/h/u1/impact', null]]);
+  const labels = page.root.querySelectorAll('.side a[data-sec]').map((a) => a.textContent);
+  // The rounds of the findings shown (the diagnosis opens on what is still open).
+  for (const r of [...new Set(state.items.filter((i) => i.harness === 'u1' && (i.status === 'open' || i.status === 'failed')).map((i) => i.round))]) assert.ok(labels.includes(`${r} · ${STRINGS.pt.rounds[r]}`), `round ${r}`);
+  for (const h of ['Defesas reconhecidas', 'Registro']) assert.ok(labels.some((l) => l.startsWith(h.slice(0, 6))), h);
+  page.go('#/h/u1/impact');
+  assert.ok(page.root.querySelectorAll('.side a[data-sec]').map((a) => a.getAttribute('data-sec')).includes('since'), 'Desde a última revisão');
+  // The Explorer: the file tree and the views, hooks and permissions among them.
+  page.go('#/h/u1/view/hooks');
+  const tree = page.root.querySelector('.side .tree');
+  assert.ok(tree.querySelector('[data-fk="ix:view:hooks"][aria-current="true"]'));
+  assert.ok(tree.querySelector('[data-fk="ix:view:permissions"]'));
+  assert.ok(tree.querySelector('[data-fk="ix:file:fu1-1"]'));
+  // Pending is an entry too.
+  page.go('#/pending');
+  assert.equal(page.current(), 'pending');
+
+  // On a phone the index is a drawer behind a button in the bar.
+  const btn = page.root.querySelector('#ix-btn');
+  assert.equal(btn.getAttribute('aria-controls'), 'side');
+  assert.equal(btn.getAttribute('aria-expanded'), 'false');
+  btn.click();
+  assert.equal(btn.getAttribute('aria-expanded'), 'true');
+  assert.ok(page.document.body.classList.contains('ix-open'));
+  // A link inside closes it, and so does Escape.
+  fireDoc(page, 'click', { target: page.root.querySelector('.side [data-harness="loja-web"]') });
+  assert.equal(page.current(), 'h:loja-web');
+  assert.ok(!page.document.body.classList.contains('ix-open'));
+  page.root.querySelector('#ix-btn').click();
+  fireDoc(page, 'keydown', { key: 'Escape' });
+  assert.ok(!page.document.body.classList.contains('ix-open'));
+  assert.equal(page.root.querySelector('#ix-btn').getAttribute('aria-expanded'), 'false');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Hooks as lifecycle slots, permissions as lanes
+// ---------------------------------------------------------------------------------------------
+
+test('hooks: one slot per moment of the lifecycle, in order, with what is registered there and the git and CI group apart', () => {
+  for (const lang of ['en', 'pt']) {
+    const T = STRINGS[lang];
+    const page = load(board(example(), { lang }), { hash: '#/h/u1/view/hooks' });
+    const slots = page.view.querySelectorAll('.life .slot');
+    assert.deepEqual(slots.map((s) => s.getAttribute('data-event')), HOOK_EVENTS.map((e) => e.event), 'every event once, in lifecycle order');
+    const slot = (event) => page.view.querySelector(`.life .slot[data-event="${event}"]`);
+    // A registered hook sits in its slot with what it matches, whether it blocks, where it comes from.
+    const pre = slot('PreToolUse');
+    assert.ok(pre.classList.contains('filled'));
+    assert.equal(pre.querySelector('.slot-h .tag').textContent, T.hk.canBlock);
+    assert.deepEqual(pre.querySelectorAll('.hk').map((h) => [h.querySelector('.hk-m').textContent, h.querySelector('.hk-h .tag').textContent, h.querySelectorAll('.hk-h .tag')[1].textContent]),
+      [['Read|Edit|Write', T.blocking.yes, T.hookSource.agent]]);
+    assert.equal(slot('PostToolUse').querySelector('.slot-h .tag').textContent, T.hk.onlyReports);
+    assert.equal(slot('PostToolUse').querySelector('.hk .hk-h .tag').textContent, T.blocking.no);
+    // A plugin hook whose code could not be read: "could not tell", with its plugin and finding.
+    const start = slot('SessionStart').querySelector('.hk');
+    assert.deepEqual([start.querySelector('.hk-h .tag').textContent, start.querySelectorAll('.hk-h .tag')[1].textContent, start.querySelector('.cid').textContent],
+      [T.blocking.unknown, T.v.pluginOf.replace('{name}', 'exemplo-tools'), 'U1-802']);
+    // The script a hook runs links to the file in the explorer.
+    assert.equal(slot('Stop').querySelector('.hk-f a').getAttribute('href'), '#/h/u1/file/fu1-3');
+    assert.equal(slot('Stop').querySelector('.keeps').textContent, T.hk.keeps);
+    // An empty slot is drawn empty, with what people usually put there.
+    const empty = slot('UserPromptSubmit');
+    assert.ok(empty.classList.contains('empty'));
+    assert.equal(empty.querySelector('.slot-w').textContent, T.hk.ev.UserPromptSubmit.what);
+    assert.ok(empty.querySelector('.slot-e').textContent.includes(T.hk.ev.UserPromptSubmit.idea));
+    // A moment few people use is drawn small, its explanation one click away.
+    assert.ok(slot('Setup').classList.contains('mini'));
+    assert.equal(slot('Setup').querySelector('.slot-w').textContent, T.hk.ev.Setup.what);
+    // Git and CI come after the lifecycle, in their own group.
+    page.go('#/h/loja-web/view/hooks');
+    const outside = page.view.querySelector('.outside-g');
+    assert.equal(outside.querySelector('h4').textContent, T.hk.outside);
+    assert.deepEqual(outside.querySelectorAll('.slot').map((s) => [s.getAttribute('data-event'), s.querySelector('.hk-h .tag').textContent]),
+      [['pre-commit', T.blocking.no], ['push, pull_request', T.blocking.yes]]);
+    assert.equal(page.view.querySelectorAll('.life .slot.filled').length, 0, 'no agent hook in this project: every slot is empty');
+    assert.equal(page.view.querySelectorAll('.life .slot').length, HOOK_EVENTS.length);
+  }
+});
+
+test('hooks and permissions with nothing registered, for another agent, and for a linked account', () => {
+  const state = example();
+  // A project with files and no hook or rule: the empty lifecycle and the empty lanes still teach.
+  const bare = state.harnesses.find((h) => h.id === 'loja-web');
+  bare.elements.hooks = [];
+  bare.elements.permissions = [];
+  const page = load(board(state, { lang: 'pt' }), { hash: '#/h/loja-web/view/hooks' });
+  assert.equal(page.view.querySelectorAll('.life .slot').length, HOOK_EVENTS.length);
+  assert.ok(page.view.querySelector('.outside-g .slot-e').textContent.includes(STRINGS.pt.hk.outsideIdea));
+  page.go('#/h/loja-web/view/permissions');
+  assert.deepEqual(page.view.querySelectorAll('.lane .lane-e').map((p) => p.textContent), ['deny', 'ask', 'allow'].map((k) => STRINGS.pt.perm.laneEmpty[k]));
+  assert.equal(page.view.querySelector('.pmode .muted').textContent, STRINGS.pt.perm.modeNone);
+  // Another agent: only the moments its own hooks name, with no "can block" this board cannot back.
+  const codex = example();
+  const u3 = codex.harnesses.find((h) => h.id === 'u3');
+  u3.elements = { hooks: [{ id: 'cx-1', source: 'agent', event: 'stop', command: 'notify-send done', blocking: null }], permissions: [{ layer: 'user', kind: 'mode', rule: 'approval_policy = on-request' }] };
+  const cx = load(board(codex, { lang: 'en' }), { hash: '#/h/u3/view/hooks' });
+  assert.deepEqual(cx.view.querySelectorAll('.life .slot').map((s) => s.getAttribute('data-event')), ['stop']);
+  assert.equal(cx.view.querySelector('.life .slot .slot-h .tag').textContent, STRINGS.en.hk.unverified);
+  cx.go('#/h/u3/view/permissions');
+  assert.equal(cx.view.querySelectorAll('.lane').length, 0, 'Codex has no allow, ask and deny lists');
+  assert.equal(cx.view.querySelector('.pmode code').textContent, 'approval_policy = on-request');
+  // A linked account says where the rest comes from.
+  const linked = example();
+  const u2 = linked.harnesses.find((h) => h.id === 'u2');
+  u2.elements = { hooks: [] };
+  const ln = load(board(linked, { lang: 'pt' }), { hash: '#/h/u2/view/hooks' });
+  const note = ln.view.querySelector('.pane .note-line');
+  assert.ok(note.textContent.startsWith('Herda de Claude Code'));
+  assert.equal(note.querySelector('a').getAttribute('href'), '#/h/u1/view/hooks');
+});
+
+test('permissions: three lanes in the order they decide, each rule under its tool with the file it comes from', () => {
+  for (const lang of ['en', 'pt']) {
+    const T = STRINGS[lang];
+    const state = example();
+    const page = load(board(state, { lang }), { hash: '#/h/u1/view/permissions' });
+    assert.deepEqual(page.view.querySelectorAll('.lane').map((l) => [l.getAttribute('data-lane'), l.querySelector('h4').textContent]),
+      [['deny', T.perm.lane.deny], ['ask', T.perm.lane.ask], ['allow', T.perm.lane.allow]]);
+    assert.ok(page.view.querySelector('.porder').textContent.endsWith(T.perm.order));
+    // The default mode, from the file that sets it.
+    assert.deepEqual([page.view.querySelector('.pmode code').textContent, page.view.querySelector('.pmode .tag').textContent], ['acceptEdits', T.perm.layer.user]);
+    // Every rule of the state in its lane, under its tool, pattern as code, source as a tag that opens the file.
+    const rules = state.harnesses[0].elements.permissions.filter((p) => p.kind !== 'mode');
+    for (const p of rules) {
+      const li = page.view.querySelector(`.lane[data-lane="${p.kind}"] li.rule[data-rule="${p.rule}"]`);
+      assert.ok(li, `${p.kind} ${p.rule}`);
+      assert.equal(li.closest('.tgroup').querySelector('b').textContent, p.rule.split('(')[0]);
+      assert.equal(li.querySelector('code').textContent, /\((.*)\)$/.exec(p.rule)[1]);
+      assert.deepEqual([li.querySelector('.tag.src').textContent, li.querySelector('.tag.src').getAttribute('href')], [T.perm.layer[p.layer], '#/h/u1/file/fu1-2']);
+      if (p.item) assert.equal(li.querySelector('.cid').textContent, p.item, 'the finding that points at the rule');
+    }
+    assert.equal(page.view.querySelectorAll('li.rule').length, rules.length);
+    // An allow a finding flags is highlighted, with no new judgement: the finding says why.
+    page.go('#/h/loja-web/view/permissions');
+    const risky = page.view.querySelectorAll('li.rule.risky');
+    assert.deepEqual(risky.map((r) => [r.getAttribute('data-rule'), r.querySelector('.cid').textContent, r.querySelector('.risk').textContent]), [['Bash(rm -rf *)', 'LOJA-101', T.perm.risky]]);
+    assert.ok(risky.every((r) => r.closest('.lane').getAttribute('data-lane') === 'allow'));
+  }
 });

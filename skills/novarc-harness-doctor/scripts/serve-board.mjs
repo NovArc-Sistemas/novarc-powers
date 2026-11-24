@@ -1,35 +1,27 @@
 #!/usr/bin/env node
 // serve-board.mjs [--run <id>] [--port 0]
 //
-// Serves one run's board on 127.0.0.1 so the board can send decisions back to the session
-// (channel `server`, references/contracts.md). Prints { "url": "http://127.0.0.1:<port>/?t=<token>" }
-// on stdout once it listens.
+// Serves one run's board on 127.0.0.1 so the user can read it in a browser while the session
+// works (channel `server`, references/contracts.md). The board only shows: decisions are taken in
+// the chat (`run.mjs decide`), so nothing is ever sent back here. Prints
+// { "url": "http://127.0.0.1:<port>/?t=<token>" } on stdout once it listens.
 //
-//   GET  /?t=                     board.html
-//   GET  /api/state?t=&v=<ver>    { version, changed }: the board reloads when it changed
-//   GET  /api/decisions?t=        { decisions: [...] } recorded so far
-//   POST /api/decisions?t=        validates one decision and appends it to decisions.jsonl
+//   GET /?t=                     board.html
+//   GET /api/state?t=&v=<ver>    { version, changed }: the board reloads when it changed
 //
-// A decision carries `rev`, the revision of the item or group the board showed; one that comes
-// without it is bound, on arrival, to the revision in the last built state.json. A note that
-// holds a credential is refused. `--help` prints the usage.
+// Any other method is 405. `--help` prints the usage.
 //
 // Every route needs the token (random per start, compared in constant time). It serves no other
-// file and no directory, sets no CORS header, rejects bodies over 16 KB, answers only requests
+// file and no directory, sets no CORS header, accepts no request body, answers only requests
 // addressed to this machine, and exits after 12 hours or when run.json says the run is closed.
 import fs from 'node:fs';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { parseArgs, isMain, warn } from './lib/common.mjs';
 import { runPaths, latestRunId, RUN_ID_RE } from './lib/run/paths.mjs';
-import { RunError, readJson, readJsonl, appendJsonLine, withLock, sha256, nowIso } from './lib/run/store.mjs';
-import { normalizeDecision, PRIMARY_TARGET } from './lib/run/decisions.mjs';
-import { builtRevs } from './lib/run/rev.mjs';
-import { maskDeep } from './lib/run/secrets.mjs';
+import { readJson, sha256 } from './lib/run/store.mjs';
 
-export const MAX_BODY_BYTES = 16 * 1024;
 export const MAX_AGE_MS = 12 * 60 * 60 * 1000;
-const DRAIN_LIMIT = 1024 * 1024;
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 // The board is one self-contained file: inline script and style, web fonts from Google Fonts,
@@ -66,30 +58,6 @@ function send(res, code, body, headers = {}) {
   res.end(payload);
 }
 
-/**
- * Collect a request body up to `limit` bytes: { body } or { tooLarge: true }.
- * An oversized body is read to its end and thrown away before answering: closing the socket on
- * unread data would reset the connection and the client would never see the 413. Past
- * DRAIN_LIMIT that courtesy ends (`abort: true`: answer, then drop the connection).
- */
-function readBody(req, limit) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
-    const declared = Number(req.headers['content-length']);
-    if (Number.isFinite(declared) && declared > DRAIN_LIMIT) { done({ tooLarge: true, abort: true }); return; }
-    const chunks = [];
-    let size = 0;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > DRAIN_LIMIT) { done({ tooLarge: true, abort: true }); return; }
-      if (size > limit) chunks.length = 0; else chunks.push(c);
-    });
-    req.on('end', () => done(size > limit ? { tooLarge: true } : { body: Buffer.concat(chunks).toString('utf8') }));
-    req.on('error', () => done({ body: '' }));
-  });
-}
-
 function hostAllowed(header) {
   if (typeof header !== 'string') return false;
   const host = header.trim().toLowerCase().replace(/:\d+$/, '');
@@ -120,45 +88,6 @@ export function createBoardServer(paths, token) {
         send(res, 200, { version, changed: !!seen && seen !== version });
       },
     },
-    '/api/decisions': {
-      GET: (req, res) => {
-        // What POST stores holds no credential; a line somebody wrote into the file by hand may.
-        send(res, 200, { decisions: readJsonl(paths.decisions).filter((l) => l.value && typeof l.value === 'object').map((l) => maskDeep(l.value)) });
-      },
-      POST: async (req, res) => {
-        const got = await readBody(req, MAX_BODY_BYTES);
-        if (got.tooLarge) {
-          if (got.abort) res.on('finish', () => req.destroy());
-          send(res, 413, { ok: false, error: 'body larger than 16 KB' }, got.abort ? { Connection: 'close' } : {});
-          return;
-        }
-        let raw;
-        try { raw = JSON.parse(got.body); } catch { send(res, 400, { ok: false, error: 'body is not valid JSON' }); return; }
-        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { send(res, 400, { ok: false, error: 'a decision must be a JSON object' }); return; }
-        // One clock for every decision of the run: the time this server received it.
-        const candidate = { ...raw, at: nowIso(), via: 'board' };
-        if (candidate.id === undefined) candidate.id = crypto.randomUUID();
-        const checked = normalizeDecision(candidate, { runId: paths.runId, via: 'board', strict: true });
-        if (!checked.ok) { send(res, 400, { ok: false, error: checked.reason }); return; }
-        let run = null;
-        try { run = readJson(paths.run); } catch { run = null; }
-        if (!run || run.closed === true) { send(res, 409, { ok: false, error: 'the run is closed' }); return; }
-        // A page that sent no rev decided on what the last build showed. Bind the decision to
-        // that revision now: by the time the session takes it in, the board may have been rebuilt.
-        if (!checked.decision.rev && checked.decision.target !== PRIMARY_TARGET) {
-          const built = builtRevs(paths);
-          const rev = built ? (built.items.get(checked.decision.target) || built.groups.get(checked.decision.target)) : null;
-          if (rev) checked.decision.rev = rev;
-        }
-        try {
-          withLock(paths.mutex, () => appendJsonLine(paths.decisions, checked.decision), { timeoutMs: 3000 });
-        } catch (e) {
-          send(res, 503, { ok: false, error: e instanceof RunError ? 'the run directory is busy; try again' : 'could not record the decision' });
-          return;
-        }
-        send(res, 201, { ok: true, decision: checked.decision });
-      },
-    },
   };
 
   return http.createServer((req, res) => {
@@ -167,9 +96,11 @@ export function createBoardServer(paths, token) {
     const route = Object.hasOwn(routes, url.pathname) ? routes[url.pathname] : null;
     if (!route) { send(res, 404, { ok: false, error: 'not found' }); return; }
     if (!hostAllowed(req.headers.host)) { send(res, 403, { ok: false, error: 'this server only answers on 127.0.0.1' }); return; }
-    if (!tokenOk(url.searchParams.get('t'))) { send(res, 401, { ok: false, error: 'missing or wrong token' }); return; }
+    // Nothing is ever written through this server: any method but GET is refused before the token
+    // is even looked at, and its body is read and thrown away.
     const handler = Object.hasOwn(route, req.method) ? route[req.method] : null;
-    if (!handler) { send(res, 405, { ok: false, error: 'method not allowed' }, { Allow: Object.keys(route).join(', ') }); return; }
+    if (!handler) { req.resume(); send(res, 405, { ok: false, error: 'method not allowed' }, { Allow: 'GET', Connection: 'close' }); return; }
+    if (!tokenOk(url.searchParams.get('t'))) { send(res, 401, { ok: false, error: 'missing or wrong token' }); return; }
     Promise.resolve().then(() => handler(req, res, url)).catch(() => { if (!res.headersSent) send(res, 500, { ok: false, error: 'internal error' }); else res.destroy(); });
   });
 }

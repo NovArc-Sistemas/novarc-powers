@@ -5,6 +5,21 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-24
+
+### novarc-harness-doctor
+
+#### Alterado
+
+- **O painel é só para ver.** As decisões passam a ser tomadas na conversa com o agente, que
+  registra cada uma; os botões de aprovar, recusar, adiar e perguntar saíram do painel, e a aba
+  Decidir virou Pendências, com o código de cada item. O artefato no claude.ai não precisa mais
+  de banco de dados, e a página local não aceita mais gravações.
+- **Mais fácil de ler.** Clicar num card do arquivo destaca só a mudança dele no diff; contas e
+  projetos têm marcas próprias; índice lateral; hooks aparecem como os momentos do ciclo do
+  agente, com o que cada um pode fazer; permissões em três faixas (negar, perguntar, permitir)
+  na ordem em que uma vence a outra; menos ruído visual.
+
 ## [0.2.0] - 2026-11-23
 
 ### novarc-harness-doctor

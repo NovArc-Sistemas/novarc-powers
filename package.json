@@ -1,6 +1,6 @@
 {
   "name": "novarc-powers",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Agent skills for Claude Code, Codex and other coding agents, with an installer. Home of novarc-harness-doctor.",
   "type": "module",
   "license": "MIT",

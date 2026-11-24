@@ -20,7 +20,7 @@ export function detectEol(text) {
 export function renderBlockBody(skills, version) {
   // The GitHub form is the fallback for a version that is not on the npm registry.
   const lines = [
-    '## NOVARC Powers (on-demand skills)',
+    '## NovArc Powers (on-demand skills)',
     '',
     'These skills are not installed. Fetch one only when the task calls for it:',
     `\`npx -y novarc-powers@${version} fetch <skill>\` prints the path of its SKILL.md; read that file and follow it.`,

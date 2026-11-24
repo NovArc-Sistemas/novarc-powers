@@ -1,4 +1,4 @@
-// Board client, fragment 6 of 9: one harness tab: header with the score console and the impact
+// Board client, fragment 6 of 10: one harness tab: header with the score console and the impact
 // strip, then three sub-tabs. The Explorer is in the next fragment; the Diagnosis (cases, then
 // defenses, rounds, inventory, leads and log) and the Impact (what the last review expected against
 // what happened since, when there was one, then the full block with the layers) are here.
@@ -28,7 +28,7 @@ function reviewTrailEl(h) {
 
 function harnessHero(h) {
   var account = ACCOUNT_OF[h.id];
-  var kicker = lbl(T.harnessKindLong, h.kind) + (providerOf(h) ? ' · ' + lbl(T.provider, providerOf(h)) : '');
+  var kicker = [kindMark(h.kind), providerOf(h) ? lbl(T.provider, providerOf(h)) : null];
   var by = [];
   var sessions = sessionsOf(h);
   if (account && account.label !== h.name) by.push(['', tx(T.hz.account, { label: account.label })]);
@@ -87,7 +87,6 @@ function scoreConsole(h) {
       el('span', { cls: 'rn', text: String(r.round) }), el('span', { cls: 'nm', text: name }), segs, el('span', { cls: 'rv' + (r.counted ? ' ok' : ''), text: value })));
   });
   return el('div', { cls: 'console on-dark' },
-    el('div', { cls: 'chrome' }, el('span', { cls: 'dotz', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')), el('span', { cls: 'path', text: h.path + ' · harness-doctor' })),
     el('div', { cls: 'cgrid' },
       el('div', { cls: 'cell' }, el('div', { cls: 'dialwrap' }, dial,
         el('div', null, el('div', { cls: 'who', text: T.sc.label }), grade, legend,
@@ -180,7 +179,7 @@ function impactBlock(h, afterFixed) {
   var relative = w.weighted !== null;
   var part = relative ? w.weighted : waste;
   var whole = relative ? I.weightedTotal : I.totalTokens;
-  var s = section(T.imp.kicker, pl(waste ? T.imp.h : T.imp.hNone, days, { tokens: fmtTokens(waste) }), pl(T.imp.sub, I.sessions));
+  var s = section(T.imp.kicker, pl(waste ? T.imp.h : T.imp.hNone, days, { tokens: fmtTokens(waste) }), { why: pl(T.imp.sub, I.sessions) }, { id: 'imp-main', label: T.imp.kicker });
   s.classList.add('first');
   var hero = el('div', { cls: 'ihero' },
     el('div', { cls: 'lbl', text: relative ? T.imp.shareRelative : T.imp.share }),
@@ -233,7 +232,7 @@ function impactBlock(h, afterFixed) {
       kinds.appendChild(el('div', null, el('span', { cls: 'lbl', text: lbl(T.imp.kinds, k) }), el('b', { text: fmtTokens(I.byKind[k]) }), rel === null ? null : el('span', { text: tx(T.imp.relativeTag, { tokens: fmtTokens(rel) }) })));
     });
     if (kinds.firstChild) {
-      s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.imp.kindsH })));
+      s.appendChild(el('div', { cls: 'ih', id: 'imp-kinds', 'data-toc': T.imp.kindsH }, el('h3', { text: T.imp.kindsH })));
       s.appendChild(kinds);
     }
   }
@@ -246,7 +245,7 @@ function impactBlock(h, afterFixed) {
     return list.map(function (x) { var t = lbl(T.waste, x.kind); return t.charAt(0).toLowerCase() + t.slice(1); }).join(', ');
   };
   if (rows.length || byGroup.quiet.length || byGroup.unknown.length) {
-    s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.imp.wasteH })));
+    s.appendChild(el('div', { cls: 'ih', id: 'imp-waste', 'data-toc': T.imp.wasteH }, el('h3', { text: T.imp.wasteH })));
     if (rows.length) {
       var max = rows[0].tokens;
       var list = el('div', { cls: 'ilist' });
@@ -274,7 +273,7 @@ function impactBlock(h, afterFixed) {
       if ((e.items || []).length) desc.push(el('span', null, T.imp.addressedBy + ' ', cids(e.items)));
       elist.appendChild(impactRow(e.label, tag(T.basis.estimated, 'dashed'), e.tokens, emax, desc, e.weighted));
     });
-    s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.imp.estH }), el('p', { text: T.imp.estSub })));
+    s.appendChild(el('div', { cls: 'ih', id: 'imp-est', 'data-toc': T.imp.estH }, el('h3', { text: T.imp.estH }), el('p', { text: T.imp.estSub })));
     s.appendChild(elist);
   }
 
@@ -294,7 +293,7 @@ function impactBlock(h, afterFixed) {
     var unknownOf = function (label, names) {
       return el('div', null, el('b', { text: label }), el('span', { cls: 'muted', text: T.notMeasured }), names.length ? chipsOf(names) : null);
     };
-    s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.imp.unusedH })));
+    s.appendChild(el('div', { cls: 'ih', id: 'imp-unused', 'data-toc': T.imp.unusedH }, el('h3', { text: T.imp.unusedH })));
     s.appendChild(el('div', { cls: 'unused' },
       skills.length ? el('div', null, el('b', { text: pl(T.imp.unusedSkills, skills.length) }), chipsOf(skills)) : null,
       mcp.length ? el('div', null, el('b', { text: pl(T.imp.unusedMcp, mcp.length) }), chipsOf(mcp)) : null,
@@ -359,9 +358,8 @@ function followUpSection(h) {
   var when = fu.of && dateOf(fu.of.reviewedAt) ? fmtDate(fu.of.reviewedAt) : '?';
   var sub = (countOf(fu.days) === null ? tx(T.fu.since, { date: when }) + '.' : pl(T.fu.sub, fu.days, { date: when }))
     + (countOf(sample.sessions) === null ? '' : ' ' + capFirst(pl(T.fu.sessions, sample.sessions)) + '.');
-  var s = section(T.fu.kicker, T.fu.h, sub);
+  var s = section(T.fu.kicker, T.fu.h, sub, { id: 'since', label: T.fu.h });
   s.setAttribute('class', 'sec first fu');
-  s.setAttribute('id', 'since');
 
   // Too little data to compare: say so first, with the day the comparison will be ready.
   if (waiting) {
@@ -378,7 +376,7 @@ function followUpSection(h) {
 
   var metrics = Array.isArray(fu.metrics) ? fu.metrics : [];
   if (metrics.length || !waiting) {
-    s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.fu.metricsH }), el('p', { text: T.fu.metricsSub })));
+    s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.fu.metricsH }), whyNote(T.fu.metricsSub, 'fu-metrics')));
     s.appendChild(metrics.length
       ? tableBox([C.metric, C.before, C.expected, C.now, C.change, C.verdict], metrics.map(function (m) { return metricRow(m, waiting); }), T.fu.metricsH)
       : el('p', { cls: 'empty', text: T.fu.metricsNone }));
@@ -396,7 +394,7 @@ function followUpSection(h) {
     var n = countOf(sm[k[0]]);
     if (n !== null) counts.appendChild(tag(fmtInt(n) + ' ' + pl(k[1], n), n > 0 ? k[2] : ''));
   });
-  s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.fu.fixedH }), el('p', { text: T.fu.fixedSub })));
+  s.appendChild(el('div', { cls: 'ih' }, el('h3', { text: T.fu.fixedH }), whyNote(T.fu.fixedSub, 'fu-fixed')));
   if (counts.firstChild) s.appendChild(counts);
   s.appendChild(items.fixed.length
     ? tableBox([C.item, C.title, C.saving, C.onDisk, C.nowItem], items.fixed.map(function (i) {
@@ -432,7 +430,7 @@ function impactPane(h) {
   var main;
   if (h.impact) main = impactBlock(h, layers);
   else {
-    main = section(T.imp.kicker, T.imp.noneH, null, el('p', { cls: 'note-line' }, el('span', { cls: 'glyph' }), impactAbsent(h)), layers);
+    main = section(T.imp.kicker, T.imp.noneH, null, { id: 'imp-main', label: T.imp.kicker }, el('p', { cls: 'note-line' }, el('span', { cls: 'glyph' }), impactAbsent(h)), layers);
     main.classList.add('first');
   }
   var since = followUpSection(h);
@@ -446,27 +444,31 @@ function impactPane(h) {
 var dgFilter = {};
 
 function filterOf(hid) {
-  if (!dgFilter[hid]) dgFilter[hid] = { show: openItems(hid).length ? 'open' : 'all', round: 0, severity: '' };
+  if (!dgFilter[hid]) dgFilter[hid] = { show: openItems(hid).length ? 'open' : 'all', severity: '' };
   return dgFilter[hid];
 }
 
 function matchesShow(item, show) {
-  var st = eff(item).status;
+  var st = item.status;
   if (show === 'open') return st === 'open' || st === 'failed';
   if (show === 'fixed') return st === 'fixed' || st === 'ok';
   return true;
 }
 
+/**
+ * The findings of one harness, one block per round (the side index lists the rounds), the most
+ * serious first inside each. Two filters: what to show, and a severity.
+ */
 function diagnosisPane(h, route) {
   var f = filterOf(h.id);
   var target = route.q.item && ITEM[route.q.item] && ITEM[route.q.item].harness === h.id ? route.q.item : null;
-  if (target && !(matchesShow(ITEM[target], f.show) && (!f.round || ITEM[target].round === f.round) && (!f.severity || ITEM[target].severity === f.severity))) {
-    f.show = 'all'; f.round = 0; f.severity = '';
+  if (target && !(matchesShow(ITEM[target], f.show) && (!f.severity || ITEM[target].severity === f.severity))) {
+    f.show = 'all'; f.severity = '';
   }
   var all = itemsOf(h.id);
   var pane = el('div');
   pane.appendChild(el('h2', { text: T.dg.h }));
-  pane.appendChild(el('p', { cls: 'sub', text: T.dg.sub }));
+  pane.appendChild(whyNote(T.dg.sub, 'dg'));
 
   var chip = function (label, pressed, count, onClick, fk) {
     var b = el('button', { type: 'button', cls: 'chip', 'aria-pressed': pressed ? 'true' : 'false', 'data-fk': fk }, el('span', { cls: 'slash' }), label, count === null ? null : el('span', { cls: 'c', text: String(count) }));
@@ -479,20 +481,6 @@ function diagnosisPane(h, route) {
     show.appendChild(chip(T.dg.filter[k], f.show === k, all.filter(function (i) { return matchesShow(i, k); }).length, function () { f.show = k; redraw(); }, 'dg:show:' + k));
   });
   filters.appendChild(show);
-  var roundsUsed = [];
-  all.forEach(function (i) { if (roundsUsed.indexOf(i.round) < 0) roundsUsed.push(i.round); });
-  roundsUsed.sort();
-  if (roundsUsed.length > 1) {
-    var rg = el('div', { cls: 'fgroup' }, el('span', { text: T.dg.round }));
-    rg.appendChild(chip(T.dg.any, !f.round, null, function () { f.round = 0; redraw(); }, 'dg:round:0'));
-    roundsUsed.forEach(function (r) {
-      var b = chip(String(r), f.round === r, null, function () { f.round = r; redraw(); }, 'dg:round:' + r);
-      b.setAttribute('title', lbl(T.rounds, r));
-      b.setAttribute('aria-label', r + ' ' + lbl(T.rounds, r));
-      rg.appendChild(b);
-    });
-    filters.appendChild(rg);
-  }
   var sevUsed = SEVERITIES.filter(function (sv) { return all.some(function (i) { return i.severity === sv; }); });
   if (sevUsed.length > 1) {
     var sg = el('div', { cls: 'fgroup' }, el('span', { text: T.dg.severity }));
@@ -502,12 +490,21 @@ function diagnosisPane(h, route) {
   }
   pane.appendChild(filters);
 
-  var list = all.filter(function (i) { return matchesShow(i, f.show) && (!f.round || i.round === f.round) && (!f.severity || i.severity === f.severity); })
+  var list = all.filter(function (i) { return matchesShow(i, f.show) && (!f.severity || i.severity === f.severity); })
     .map(function (i, k) { return { i: i, k: k }; })
-    .sort(function (a, b) { return (SEV_RANK[a.i.severity] - SEV_RANK[b.i.severity]) || (a.i.round - b.i.round) || (a.k - b.k); });
+    .sort(function (a, b) { return (a.i.round - b.i.round) || (SEV_RANK[a.i.severity] - SEV_RANK[b.i.severity]) || (a.k - b.k); });
+  if (!list.length) { pane.appendChild(el('p', { cls: 'empty', text: T.dg.none })); return pane; }
   var cases = el('div', { cls: 'cases' });
-  list.forEach(function (x) { cases.appendChild(caseCard(x.i, { target: x.i.id === target })); });
-  pane.appendChild(list.length ? cases : el('p', { cls: 'empty', text: T.dg.none }));
+  var round = null;
+  list.forEach(function (x) {
+    if (x.i.round !== round) {
+      round = x.i.round;
+      var name = round + ' · ' + lbl(T.rounds, round);
+      cases.appendChild(el('h3', { cls: 'rhead', id: 'dg-r' + round, 'data-toc': name }, el('span', { cls: 'rn', text: String(round) }), lbl(T.rounds, round)));
+    }
+    cases.appendChild(caseCard(x.i, { target: x.i.id === target }));
+  });
+  pane.appendChild(cases);
   return pane;
 }
 
@@ -517,7 +514,7 @@ var LAYER_SHADES = ['#04122e', '#1b3e78', '#0a6cff', '#6ba6ff', '#b9c6da', '#5b7
 
 function defensesSection(h) {
   var list = whereOf(h.id, 'defenses');
-  var s = section(null, T.def.h, T.def.note);
+  var s = section(null, T.def.h, { why: T.def.note }, { id: 'dg-defenses', label: T.def.h });
   if (!list.length) { s.appendChild(el('p', { cls: 'empty', text: T.def.none })); return s; }
   var ul = el('ul', { cls: 'plain' });
   list.forEach(function (d) { ul.appendChild(el('li', null, el('b', { text: d.title }), d.detail ? el('small', { text: d.detail }) : null)); });
@@ -528,7 +525,7 @@ function defensesSection(h) {
 /** What enters every session, in load order: the explanation of the fixed cost. */
 function layersBlock(h) {
   var ls = whereOf(h.id, 'layers');
-  var box = el('div', null, el('div', { cls: 'ih' }, el('h3', { text: T.lay.h }), el('p', { text: T.lay.sub })));
+  var box = el('div', null, el('div', { cls: 'ih', id: 'imp-layers', 'data-toc': T.lay.h }, el('h3', { text: T.lay.h }), whyNote(T.lay.sub, 'layers')));
   if (!ls.length) { box.appendChild(el('p', { cls: 'empty', text: T.lay.none })); return box; }
   // The total adds the layers that have a figure; one without it says "not measured" in its own
   // row, so the sum is never read as if that layer cost nothing.
@@ -551,7 +548,7 @@ function layersBlock(h) {
 }
 
 function roundsSection(h) {
-  var s = section(null, T.rnd.h, T.rnd.sub);
+  var s = section(null, T.rnd.h, { why: T.rnd.sub }, { id: 'dg-rounds', label: T.rnd.h });
   var flow = el('div', { cls: 'flow', tabindex: '0', role: 'list', 'aria-label': T.rnd.h });
   var nowSet = false;
   for (var r = 1; r <= Scoring.ROUNDS_TOTAL; r++) {
@@ -569,7 +566,7 @@ function roundsSection(h) {
 
 function inventorySection(h) {
   var inv = whereOf(h.id, 'inventory');
-  var s = section(null, T.inv.h, T.inv.sub);
+  var s = section(null, T.inv.h, { why: T.inv.sub }, { id: 'dg-inventory', label: T.inv.h });
   if (!inv.length) { s.appendChild(el('p', { cls: 'empty', text: T.inv.empty })); return s; }
   var groups = {};
   var order = [];
@@ -619,8 +616,8 @@ function viewHarness(route) {
     return el('a', { cls: 'chip', href: href, 'aria-current': sub === key ? 'true' : null, 'data-fk': 'sub:' + key }, el('span', { cls: 'slash' }), label, count === null ? null : el('span', { cls: 'c', text: count }));
   };
   out.appendChild(el('div', { cls: 'subtabs', id: 'subtabs', role: 'group', 'aria-label': T.tab.label },
-    tab('explorer', R.harness(h.id), T.tab.explorer, String(filesOf(h.id).length)),
-    tab('diagnosis', R.diagnosis(h.id), T.tab.diagnosis, open ? open + ' / ' + items.length : String(items.length)),
+    tab('explorer', R.harness(h.id), T.tab.explorer, null),
+    tab('diagnosis', R.diagnosis(h.id), T.tab.diagnosis, open ? String(open) : null),
     tab('impact', R.impact(h.id), T.tab.impact, share)));
 
   if (sub === 'explorer') { out.appendChild(explorerPane(h, route)); return out; }
@@ -631,8 +628,8 @@ function viewHarness(route) {
   out.appendChild(roundsSection(h));
   out.appendChild(inventorySection(h));
   var leads = whereOf(h.id, 'leads');
-  out.appendChild(section(null, T.lead.h, T.lead.sub, leads.length ? leadList(leads) : el('p', { cls: 'empty', text: T.lead.none })));
+  out.appendChild(section(null, T.lead.h, { why: T.lead.sub }, { id: 'dg-leads', label: T.lead.h }, leads.length ? leadList(leads) : el('p', { cls: 'empty', text: T.lead.none })));
   var log = whereOf(h.id, 'log');
-  out.appendChild(section(null, T.log.h, null, log.length ? logTable(log, false) : el('p', { cls: 'empty', text: T.log.empty })));
+  out.appendChild(section(null, T.log.h, null, { id: 'dg-log', label: T.log.h }, log.length ? logTable(log, false) : el('p', { cls: 'empty', text: T.log.empty })));
   return out;
 }

@@ -1,6 +1,6 @@
 # novarc-harness-doctor
 
-[Português](README.md) · **English**
+[Português](README.md) · **English** · Part of [NovArc Powers](https://github.com/NovArc-Sistemas/novarc-powers/blob/main/README.en.md)
 
 Finds every agent harness on your machine, measures what it cost over the last 30 days, explains
 what is wrong and fixes what you approve, on an interactive board.
@@ -10,15 +10,40 @@ permissions, hooks, skills, plugins, MCP servers, CLIs, the project's docs, and 
 stop mistakes. You have one user harness **per account** (each Claude Code account, Codex, and
 so on) and one project harness **per repository**.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-overview.png" alt="Board overview: before and after score of each harness and tokens spent on measured inefficiencies" width="820">
+</p>
+
+- **Measured on your data.** It reads the last 30 days of sessions, on your machine only, and
+  counts the tokens that went into commands repeated after failing, work redone after you
+  corrected the agent, blind exploration and context loaded but never used. Measured and
+  estimated numbers are never mixed.
+- **It teaches while it diagnoses.** Every finding comes with the why, the cost, the rule to
+  keep, and the change drawn inside the file itself: what goes in red, what arrives in green.
+- **It is an explorer of your harness.** Each account and each project is a tab: instructions,
+  permissions, hooks, support scripts, gates, skills, MCP servers and CLIs, all browsable.
+- **You decide in conversation, it applies.** The board is for looking; you decide in the
+  conversation with the agent. Every change is backed up and can be undone with one command.
+- **It keeps your accounts in step.** Pick one account as the primary; the others of the same
+  provider link to it, and other providers get the part that can be replicated.
+- **It comes back to check.** Every review is recorded. A month later the same skill measures
+  again, shows what was confirmed, what was undone and what came back, and reviews each
+  harness again.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-explorer.png" alt="Harness explorer: the instruction file with the proposed change in red and green and the explanation beside it" width="820">
+</p>
+
 ## How to use it
 
 Without installing anything, ask your agent:
 
-> Run `npx -y github:NovArc-Sistemas/novarc-powers fetch novarc-harness-doctor`, read the SKILL.md
-> at the path it prints and follow it to review my harnesses.
+> Run `npx -y novarc-powers fetch novarc-harness-doctor`, read the SKILL.md at the path it
+> prints and follow it to review my harnesses.
 
-Or install the pointer with `npx github:NovArc-Sistemas/novarc-powers add novarc-harness-doctor`,
-then just ask "review my harnesses" in any session. It needs Node 20+ and git.
+Or install the pointer with `npx novarc-powers add novarc-harness-doctor`, then just ask
+"review my harnesses" in any session. It needs Node 20+ and git. Nothing leaves your machine
+unless you choose to publish the board as a private page on claude.ai.
 
 ## What happens
 
@@ -55,7 +80,8 @@ then just ask "review my harnesses" in any session. It needs Node 20+ and git.
     Switch between changes, before and after.
   - **Diagnosis:** each finding with why it is a problem, what it costs, how it gets better and
     the rule to keep.
-- **Decide:** one decision at a time, most severe first, with approve, decline, later or ask.
+- **Pending:** what waits for your decision, with each item's id. You decide in the
+  conversation with the agent ("approve ACME-104", "why U1-202?"): the board only shows.
 
 The board opens as a private page on claude.ai (if you use Claude Code and agree) or as a local
 page on `127.0.0.1`. The content is the same.

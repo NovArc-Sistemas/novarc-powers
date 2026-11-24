@@ -155,6 +155,12 @@
           },
           {
             "layer": "user",
+            "kind": "ask",
+            "rule": "Bash(git push *)",
+            "file": "fu1-2"
+          },
+          {
+            "layer": "user",
             "kind": "deny",
             "rule": "Bash(git push --force:*)",
             "file": "fu1-2",
@@ -168,9 +174,35 @@
             "file": "fu1-2",
             "item": "U1-103",
             "note": "Testada nesta revisão."
+          },
+          {
+            "layer": "user",
+            "kind": "mode",
+            "rule": "acceptEdits",
+            "file": "fu1-2"
           }
         ],
         "hooks": [
+          {
+            "id": "u1-pre-1",
+            "source": "agent",
+            "event": "PreToolUse",
+            "matcher": "Read|Edit|Write",
+            "command": "node ~/.claude/hooks/guarda-segredos.js",
+            "file": "fu1-2",
+            "blocking": true,
+            "note": "Recusa ler ou editar arquivos .env e chaves."
+          },
+          {
+            "id": "u1-post-1",
+            "source": "agent",
+            "event": "PostToolUse",
+            "matcher": "Edit|Write",
+            "command": "npx prettier --write src",
+            "file": "fu1-2",
+            "blocking": false,
+            "note": "Formata depois de cada edição."
+          },
           {
             "id": "u1-stop-1",
             "source": "agent",

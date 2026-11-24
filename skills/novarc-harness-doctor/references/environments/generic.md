@@ -19,12 +19,11 @@ secondary account: trust `accounts.mjs list`, not the default path.
 
 `run.mjs build --channel server`, then start `node <skill>/scripts/serve-board.mjs --run <id>`
 as a background process and give the user the URL it prints (it only answers on this machine;
-if the host app has a built-in browser, open it there). Decisions made on the page are read
-with `run.mjs decisions`.
+if the host app has a built-in browser, open it there). The board is view-only: the user
+reads it and decides in the conversation, where you record each decision with `run.mjs decide`.
 
 If a background process is not possible, `run.mjs build --channel file` and give the path of
-`<run>/board.html`. Opened from disk, the board shows for each decision the line to paste in
-chat.
+`<run>/board.html` to open from disk.
 
 ## Without Node
 

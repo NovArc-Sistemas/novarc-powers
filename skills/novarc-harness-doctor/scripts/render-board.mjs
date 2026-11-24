@@ -51,8 +51,32 @@ export const FILE_MODES = ['all', 'changed'];
 /** Where the footer's "made with" link goes. */
 export const HOMEPAGE_URL = 'https://github.com/NovArc-Sistemas/novarc-powers';
 /** Client fragments, in the order they are concatenated into one function scope. */
-export const CLIENT_PARTS = ['logic.js', 'channel.js', 'core.js', 'parts.js', 'overview.js', 'harness.js', 'explorer.js', 'decide.js', 'board.js'];
+export const CLIENT_PARTS = ['logic.js', 'refresh.js', 'core.js', 'parts.js', 'overview.js', 'harness.js', 'explorer.js', 'pending.js', 'index.js', 'board.js'];
 export const FONTS_URL = 'https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=JetBrains+Mono:wght@400;500;700&display=swap';
+/**
+ * The hook events of Claude Code, in the order of the agent's lifecycle, as the Hooks view draws
+ * them (one slot each). `canBlock` is what the snapshot's verified table says
+ * (`hookBlocking` in lib/snapshot/elements.mjs, after the Claude Code hooks reference, read on
+ * 2026-11-23; see references/checks.md): true where a hook can stop its action, false where it
+ * only runs and reports. `keeps`: a block there makes the agent keep working instead of
+ * stopping. `core`: the moments drawn in full even when empty; the others are drawn small until
+ * something is registered there. tests/board-hooks.test.mjs checks this list against that table,
+ * both ways, so the two cannot drift apart.
+ */
+export const HOOK_EVENTS = [
+  ['SessionStart', 'start', true, false], ['Setup', 'start', false, false], ['InstructionsLoaded', 'start', false, false],
+  ['UserPromptSubmit', 'prompt', true, true], ['UserPromptExpansion', 'prompt', false, true],
+  ['PreToolUse', 'tool', true, true], ['PermissionRequest', 'tool', true, true], ['PermissionDenied', 'tool', false, false],
+  ['PostToolUse', 'tool', true, false], ['PostToolUseFailure', 'tool', true, false], ['PostToolBatch', 'tool', false, true],
+  ['Elicitation', 'tool', false, true], ['ElicitationResult', 'tool', false, true],
+  ['SubagentStart', 'agents', false, false], ['SubagentStop', 'agents', true, true, true], ['TaskCreated', 'agents', false, true],
+  ['TaskCompleted', 'agents', false, true, true], ['TeammateIdle', 'agents', false, true, true],
+  ['Notification', 'env', true, false], ['MessageDisplay', 'env', false, false], ['ConfigChange', 'env', false, true],
+  ['CwdChanged', 'env', false, false], ['DirectoryAdded', 'env', false, false], ['FileChanged', 'env', false, false],
+  ['PreModelSwitch', 'env', false, true], ['PostModelSwitch', 'env', false, false], ['WorktreeCreate', 'env', false, true], ['WorktreeRemove', 'env', false, true],
+  ['PreCompact', 'context', true, true], ['PostCompact', 'context', false, false],
+  ['Stop', 'end', true, true, true], ['StopFailure', 'end', false, false], ['SessionEnd', 'end', true, false],
+].map(([event, phase, core, canBlock, keeps]) => ({ event, phase, core, canBlock, keeps: keeps === true }));
 /** Above this size the page no longer fits a claude.ai Artifact (16 MB), so the caller is told. */
 const ARTIFACT_WARN_BYTES = 15 * 1024 * 1024;
 
@@ -454,7 +478,7 @@ function buildPage(state, opts = {}) {
   const shown = opts.files === 'changed' ? withChangedFilesOnly(state) : state;
   // Only the artifact channel leaves the machine: there, and only there, addresses are masked.
   const published = channel === 'artifact' ? maskStateEmails(shown) : { state: shown, unplaced: [] };
-  const boot = { lang, locale: LOCALES[lang], channel, home: HOMEPAGE_URL, t: T, state: published.state };
+  const boot = { lang, locale: LOCALES[lang], channel, home: HOMEPAGE_URL, hookEvents: HOOK_EVENTS, t: T, state: published.state };
   const parts = {
     OPEN: shell.open(htmlLang),
     BODY: shell.body,
@@ -464,7 +488,7 @@ function buildPage(state, opts = {}) {
     CSS: a.css,
     SKIP: escHtml(T.skip),
     NAV: escHtml(T.nav.label),
-    TRAY: escHtml(T.tray.label),
+    INDEX: escHtml(T.ix.label),
     NOSCRIPT: escHtml(fallback.noscript),
     DATA: channel === 'artifact' ? embedJsonLines(boot) : embedJson(boot),
     JS: clientScript(a.js, fallback.error, htmlLang),
@@ -513,7 +537,7 @@ const REV_RE = /^[0-9a-f]{12}$/;
 /**
  * The line that records a decision from chat (references/contracts.md, `run.mjs decide`). `rev`
  * is the revision of the item or group as this board shows it: with it, the decision is applied
- * only to that proposal. The page writes the same line (decisionCommand in templates/board/logic.js).
+ * only to that proposal. The page itself has no decision control: decisions are taken in the chat.
  */
 export function decideCommand(runId, target, action, note, rev) {
   const revArg = typeof rev === 'string' && REV_RE.test(rev) ? ` --rev ${rev}` : '';

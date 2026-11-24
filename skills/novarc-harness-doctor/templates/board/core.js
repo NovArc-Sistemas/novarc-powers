@@ -1,5 +1,5 @@
-// Board client, fragment 3 of 9: boot data, DOM helpers, indexes over the state, and the store
-// that overlays the decisions made on this page.
+// Board client, fragment 3 of 10: boot data, DOM helpers, indexes over the state, and what the
+// state says about each item (the board only shows it).
 //
 // Every string that comes from the state is untrusted: it only ever reaches the DOM through
 // textContent (the `el` helper) or an attribute set with setAttribute, never through markup.
@@ -192,33 +192,26 @@ var R = {
   overview: function () { return '#/overview'; },
   harness: function (hid) { return '#/h/' + enc(hid); },
   diagnosis: function (hid, itemId) { return '#/h/' + enc(hid) + '/diagnosis' + (itemId ? '?item=' + enc(itemId) : ''); },
-  file: function (hid, fid, at) { return '#/h/' + enc(hid) + '/file/' + enc(fid) + (at ? '?at=' + enc(at) : ''); },
+  /** `focus` is `<itemId>.<change>`: the change the file viewer highlights (`?c=`). */
+  file: function (hid, fid, focus) { return '#/h/' + enc(hid) + '/file/' + enc(fid) + (focus ? '?c=' + enc(focus) : ''); },
   view: function (hid, name) { return '#/h/' + enc(hid) + '/view/' + enc(name); },
   impact: function (hid) { return '#/h/' + enc(hid) + '/impact'; },
-  decide: function (target) { return '#/decide' + (target ? '/' + enc(target) : ''); },
+  pending: function () { return '#/pending'; },
   item: function (itemId) { var i = ITEM[itemId]; return i ? R.diagnosis(i.harness, i.id) : '#/overview'; },
 };
 
-// --- store: decisions made on this page, laid over the state ------------------------------------
+// --- what the state says --------------------------------------------------------------------
 
-var localDecisions = [];
-var freshIds = {};
-var sendState = {};
-var overlay = overlayFor(ST, [], {});
 var scoreCache = {};
-var QUEUE = decisionQueue(ST);
+var QUEUE = pendingQueue(ST);
 
-function recompute() {
-  overlay = overlayFor(ST, localDecisions, freshIds);
-  scoreCache = {};
-}
+/** The status of an item and the question waiting on it, as the state records them. */
+function eff(item) { return { status: item.status, asked: !!item.question, question: item.question || '' }; }
 
-function eff(item) { return effectiveOf(item, overlay); }
-
-/** Scores of one harness as the page shows them: the state's statuses moved by local decisions. */
+/** Scores of one harness, from the statuses the state records. */
 function scoresOf(hid) {
   if (!scoreCache[hid]) {
-    var s = Scoring.scoreHarness({ rounds: ST.rounds, items: effectiveItems(ST, overlay) }, hid);
+    var s = Scoring.scoreHarness({ rounds: ST.rounds, items: ST.items || [] }, hid);
     var stored = HARNESS[hid].scores || {};
     s.previous = stored.previous === undefined ? null : stored.previous;
     scoreCache[hid] = s;
@@ -226,23 +219,13 @@ function scoresOf(hid) {
   return scoreCache[hid];
 }
 
-function isOpen(item) { return eff(item).status === 'open'; }
+function isOpen(item) { return item.status === 'open'; }
 function openItems(hid) { return (ST.items || []).filter(function (i) { return (!hid || i.harness === hid) && isOpen(i); }); }
-function canDecide(item) { return item.status === 'open' || DECIDABLE[item.status] === true; }
 
 function countBy(items) {
   var c = { open: 0, approved: 0, 'in-progress': 0, fixed: 0, failed: 0, declined: 0, deferred: 0, ok: 0, 'not-applicable': 0 };
-  items.forEach(function (i) { var s = eff(i).status; c[s] = (c[s] || 0) + 1; });
+  items.forEach(function (i) { c[i.status] = (c[i.status] || 0) + 1; });
   return c;
-}
-
-/** Local decisions that are not in the state yet and still hold: what the user has to hand over. */
-function pendingDecisions() { return overlay.held; }
-
-function newId() {
-  var bytes = new Uint8Array(16);
-  try { window.crypto.getRandomValues(bytes); } catch (e) { for (var i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256); }
-  return uuidFromBytes(bytes);
 }
 
 // --- details that remember being open across redraws -----------------------------------------
@@ -261,7 +244,7 @@ function copyText(text, button) {
     if (!button) return;
     var old = button.getAttribute('data-label') || button.textContent;
     button.setAttribute('data-label', old);
-    button.textContent = ok ? T.send.copied : T.send.copyFailed;
+    button.textContent = ok ? T.copy.done : T.copy.failed;
     window.setTimeout(function () { button.textContent = old; }, 1800);
   };
   var legacy = function () {

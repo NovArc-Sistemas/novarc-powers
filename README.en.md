@@ -1,12 +1,14 @@
 <div align="center">
 
-# NOVARC Powers
+# NovArc Powers
 
-**Skills that make your coding agent better at what it already does.**
-For Claude Code, Codex and any agent that reads files and runs commands. macOS, Windows and Linux.
+**On-demand superpowers for your coding agent.**
+Skills for the tasks you do now and then, each with the right install profile.
+Claude Code, Codex and any agent that reads files and runs commands. macOS, Windows and Linux.
 
 [![CI](https://github.com/NovArc-Sistemas/novarc-powers/actions/workflows/validate.yml/badge.svg)](https://github.com/NovArc-Sistemas/novarc-powers/actions/workflows/validate.yml)
-[![MIT License](https://img.shields.io/badge/license-MIT-111)](LICENSE)
+[![npm](https://img.shields.io/npm/v/novarc-powers?color=0a6cff)](https://www.npmjs.com/package/novarc-powers)
+[![MIT license](https://img.shields.io/badge/license-MIT-111)](LICENSE)
 
 **English** · [Português](README.md)
 
@@ -14,129 +16,146 @@ For Claude Code, Codex and any agent that reads files and runs commands. macOS, 
 
 ---
 
-## novarc-harness-doctor
+NovArc Powers is a collection of skills for the moments your agent needs to go beyond the daily
+routine: review its own harness, measure where the tokens went, keep several accounts in step.
+Each skill does one task with a beginning and an end, comes with the install profile we
+recommend, and costs nothing in the sessions where you do not use it.
 
-Your agent loads instructions, permissions, hooks, skills, plugins and MCP servers before you
-type the first word. That is the **harness**, and it decides what every session costs and how
-often the agent gets things wrong. harness-doctor finds every harness on your machine (one per
-account, one per project), measures what they cost over the last 30 days, and shows on a single
-board what is wrong, why, and exactly what changes.
+## Contents
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-overview.png" alt="Board overview: before and after score of each harness, tokens spent on measured inefficiencies and pending decisions" width="820">
-</p>
+- [How it works](#how-it-works)
+- [Installation](#installation)
+- [What's inside](#whats-inside)
+- [Install profiles](#install-profiles)
+- [Philosophy](#philosophy)
+- [Updates](#updates)
+- [Where skills keep their files](#where-skills-keep-their-files)
+- [Contributing](#contributing)
 
-- **Measured on your data.** It reads the last 30 days of sessions, on your machine only, and
-  counts the tokens that went into commands repeated after failing, work redone after you
-  corrected the agent, blind exploration and context loaded but never used. Measured and
-  estimated numbers are never mixed.
-- **It teaches while it diagnoses.** Every finding comes with the why, the cost, the rule to
-  keep, and the change drawn inside the file itself: what goes in red, what arrives in green.
-- **It is an explorer of your harness.** Each account and each project is a tab: instructions,
-  permissions, hooks, support scripts, gates, skills, MCP servers and CLIs, all browsable.
-- **You decide, it applies.** Approve, decline or defer with a click. Every change is backed
-  up and can be undone with one command.
-- **It keeps your accounts in step.** Pick one account as the primary; the others of the same
-  provider link to it, and other providers get the part that can be replicated.
-- **It comes back to check.** Every review is recorded: what was decided, what changed and what
-  each change promised to save. A month later the same skill measures again, shows what was
-  confirmed, what was undone and what came back, and reviews each harness again.
+## How it works
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/NovArc-Sistemas/novarc-powers/main/assets/board-explorer.png" alt="Harness explorer: the instruction file with the proposed change in red and green and the explanation beside it" width="820">
-</p>
+A skill is a set of instructions and scripts the agent follows to do one task well. Most
+collections install everything into the harness, and every skill's description is read in every
+session, whether you use it or not. For a skill you use once a month, that is cost with no
+return.
 
-### Use it now, without installing anything
+NovArc Powers starts from the opposite: the default is **on demand**. The installer writes a
+few lines into your `CLAUDE.md` or `AGENTS.md` saying the skill exists and how to fetch it.
+When you ask ("review my harness"), the agent downloads the pinned version, reads the
+`SKILL.md` and follows it. In every other session the cost is that short block. A skill you use
+every day can go into your user or project harness instead: the installer asks.
 
-Paste this into your agent:
+Every skill here follows the same rules: it measures before it gives an opinion, explains why
+behind each recommendation, asks for your confirmation before any change that matters, keeps
+what it did in one folder, and works the same on macOS, Windows and Linux.
 
-> Run `npx -y github:NovArc-Sistemas/novarc-powers fetch novarc-harness-doctor`, read the SKILL.md
-> at the path it prints and follow it to review my harnesses.
+## Installation
 
-It needs Node 20 or newer and git. Nothing leaves your machine unless you choose to publish the
-board as a private page on claude.ai.
+Needs Node 20 or newer.
 
-Details: [skills/novarc-harness-doctor](skills/novarc-harness-doctor).
+### Any agent, nothing installed
 
-## Installer
+Paste into your agent:
 
-```bash
-npx github:NovArc-Sistemas/novarc-powers
-```
+> Run `npx -y novarc-powers fetch novarc-harness-doctor`, read the SKILL.md at the path it
+> prints and follow it.
 
-The installer detects your agents, groups the skills by the profile we recommend for each, and
-lists every file it will create or change before asking you to confirm.
+Swap the name for the skill you want. It is the quickest way to try one.
+
+### Installer
 
 ```bash
-npx github:NovArc-Sistemas/novarc-powers list          # catalog with recommended profiles
-npx github:NovArc-Sistemas/novarc-powers add <skill>   # one skill, no menu
-npx github:NovArc-Sistemas/novarc-powers status        # what is installed, where, which version
-npx github:NovArc-Sistemas/novarc-powers update        # shows what changes, applies after you confirm
-npx github:NovArc-Sistemas/novarc-powers remove <skill>
+npx novarc-powers
 ```
 
-All accept `--yes`, `--scope user|project|both`, `--skills a,b`, `--dry-run` and `--json`, so
-an agent or a script can run them without a menu.
+It detects your agents (Claude Code, Codex, and the tools that read `AGENTS.md` and `.agents/skills`), shows the skills with the profile
+we recommend for each, and lists every file it will create or change before asking you to
+confirm.
 
-## Catalog
+```bash
+npx novarc-powers list            # catalog with the recommended profile
+npx novarc-powers add <skill>     # one skill, no menu
+npx novarc-powers status          # what is installed, where and which version
+npx novarc-powers update          # shows what changes and applies after you confirm
+npx novarc-powers remove <skill>
+```
 
-| Skill | What it does | Recommended profile | Agents |
-|---|---|---|---|
-| [**novarc-harness-doctor**](skills/novarc-harness-doctor) | Finds, measures, explains and fixes your agents' harnesses: one review for every account and project, on an interactive board. | On-demand | Claude Code · Codex · OpenCode · Cursor |
+All of them take `--yes`, `--scope user|project|both`, `--skills a,b`, `--dry-run` and `--json`,
+to run without a menu, from an agent or a script.
 
-More skills are coming. Follow the [CHANGELOG](CHANGELOG.md).
-
-## Install profiles
-
-Every skill ships with the profile we recommend. You can change it at install time.
-
-| Profile | For | What the installer does | Cost in every session |
-|---|---|---|---|
-| **On-demand** | Rare tasks with a start and an end | Writes a short block in `CLAUDE.md` / `AGENTS.md` telling the agent how to fetch the skill when needed | A few lines |
-| **User harness** | Your habits, in every project | Copies the skill to `~/.claude/skills`, `~/.codex/skills` or `~/.agents/skills` | The skill description |
-| **Project harness** | The team's process, versioned with the code | Copies the skill to the project's `.claude/skills` or `.agents/skills` | The description, in that project only |
-
-Details in [docs/profiles.md](docs/profiles.md).
-
-## Updates
-
-At install time you choose: **notify** (recommended), apply automatically, or off. A skill is
-text your agent obeys with your permissions; reading what changed before applying it costs one
-command.
-
-## Where skills keep their files
-
-Every skill uses a single `.novarc-powers/` folder, in your home or in the project, with one
-subfolder per skill. Removing a skill keeps its data unless you pass `--purge`.
-
-## Guarantees
-
-No skill here does any of the following without your confirmation: install software, delete
-files, change permissions, touch secrets, add a gate, link accounts, commit, push or publish
-anything. Secrets are never printed, and every edit is backed up first.
-
-## Share a single skill
-
-Each folder in [`skills/`](skills) is self-contained with its own README: to share a skill,
-send the folder link. In Claude Code you can also use the plugin marketplace, one skill per
-plugin:
+### Claude Code: plugin marketplace
 
 ```text
 /plugin marketplace add NovArc-Sistemas/novarc-powers
 /plugin install novarc-harness-doctor@novarc-powers
 ```
 
+One skill per plugin: install only the ones you want.
+
+### A fixed version, straight from GitHub
+
+```bash
+npx -y github:NovArc-Sistemas/novarc-powers#v0.2.1 fetch <skill>
+```
+
+## What's inside
+
+### Diagnosis and maintenance
+
+- **[novarc-harness-doctor](skills/novarc-harness-doctor)**: reviews every harness on your
+  machine (each account, each project) in one run. Measures what they cost over the last 30
+  days, explains each problem with the why, shows the change inside the file, applies what you
+  approve, and comes back a month later to check whether the expected effect happened.
+  *Recommended profile: on demand.*
+
+Each skill has its own folder under [`skills/`](skills), with a README, `SKILL.md`, scripts and
+references. More skills are coming: follow the [CHANGELOG](CHANGELOG.md).
+
+## Install profiles
+
+| Profile | For | What the installer does | Cost in every session |
+|---|---|---|---|
+| **On demand** | A rare task with a beginning and an end | Writes only a short block into `CLAUDE.md` / `AGENTS.md` saying how to fetch the skill when needed | A few lines |
+| **User harness** | Your habit, in every project | Copies the skill to `~/.claude/skills`, `~/.codex/skills` or `~/.agents/skills` | The skill's description |
+| **Project harness** | The team's process, versioned with the code | Copies the skill to the project's `.claude/skills` or `.agents/skills` | The description, in that project only |
+
+Each skill comes with the profile we recommend, and you can change it at install time. Details
+in [docs/profiles.md](docs/profiles.md).
+
+## Philosophy
+
+- **On demand first.** What enters every session costs in every session. A skill you rarely use
+  stays out until it is called.
+- **Measure before giving an opinion.** Numbers come from your own data, and what is estimated
+  is shown apart from what was measured.
+- **Teach while doing.** Every recommendation says why it matters, what it costs and the rule
+  worth keeping for next time.
+- **You decide.** No installing software, deleting files, changing permissions, touching
+  secrets, committing or publishing without your confirmation. Every edit has a backup and an
+  undo.
+- **Local first.** Your data stays on your machine unless you choose to publish something.
+
+## Updates
+
+At install time you choose: **notify** (recommended), apply on its own, or off. A skill is text
+your agent obeys with your permissions; reading what changed before applying it costs one
+command (`npx novarc-powers update`).
+
+## Where skills keep their files
+
+Every skill uses one folder, `.novarc-powers/`, in your home or in the project, with one
+subfolder per skill. Removing a skill does not delete its data unless you ask for `--purge`.
+
 ## Contributing
 
-Ideas and fixes are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the pattern for a new
-skill in [docs/authoring.md](docs/authoring.md).
+Ideas, fixes and new skills are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the pattern
+for a new skill in [docs/authoring.md](docs/authoring.md): a self-contained folder, a
+recommended profile, tests, and working on all three operating systems.
 
 ## Credits
 
-harness-doctor's rule engine and its weighted score were inspired by
-[AgentShield](https://github.com/affaan-m/agentshield) (MIT). Tool recommendations cite their
-source in [`references/catalog`](skills/novarc-harness-doctor/references/catalog).
+Each skill credits its own sources in its README.
 
 ## License
 
-[MIT](LICENSE) © NOVARC Sistemas
+[MIT](LICENSE) © NovArc Sistemas
