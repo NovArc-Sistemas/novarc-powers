@@ -25,6 +25,7 @@ import { REV_RE, DECISION_STATUSES, builtRevs } from './rev.mjs';
 import { hasCredential, CREDENTIAL_HINT } from './secrets.mjs';
 import { maskEmails } from './prose.mjs';
 import { refreshRecords } from './history.mjs';
+import { heldItems, dayOf } from './experiments.mjs';
 
 export const ACTIONS = ['approve', 'decline', 'defer', 'ask'];
 export const TARGET_RE = /^[A-Z][A-Z0-9]{0,5}-[0-9]{1,3}$/; // an item id; a group id (G-<n>) has the same form
@@ -186,11 +187,24 @@ export function inboxCount(paths, status, runId) {
   return n;
 }
 
-/** Apply one decision to one item. Returns 'applied', 'superseded' or 'skipped'. */
-function decideItem(item, status, d, report) {
+/**
+ * Apply one decision to one item. Returns 'applied', 'superseded' or 'skipped'. An approval of an
+ * item held for an open experiment (experiments.mjs) is skipped unless the decision overrides the
+ * experiment (`decide --override-experiment`): `s.held` and `s.override` say which.
+ */
+function decideItem(item, status, d, report, s) {
   const o = status.items[item.id] || (status.items[item.id] = {});
   const last = [o.decidedAt, o.askedAt].filter(Boolean).sort().pop();
   if (last && d.at < last) return 'superseded'; // a newer decision on this item was already taken in
+  if (d.action === 'approve' && s.held.has(item.id)) {
+    const e = s.held.get(item.id);
+    if (!s.override) {
+      s.heldOut.push({ target: d.target, item: item.id, harness: item.harness, until: e.until });
+      report.skipped.push({ target: d.target, item: item.id, reason: `held for the experiment open until ${dayOf(e.until)}` });
+      return 'skipped';
+    }
+    s.overridden.push({ item: item.id, harness: item.harness, until: e.until });
+  }
   if (d.action === 'ask') {
     if (DECISION_STATUSES.includes(item.status)) { o.status = 'open'; item.status = 'open'; delete o.rev; }
     o.question = d.note || '?';
@@ -280,13 +294,13 @@ function applyDecision(d, s, report, unbound) {
 
   if (group) {
     const exclude = new Set(d.exclude || []);
-    const results = group.items.filter((id) => !exclude.has(id)).map((id) => decideItem(s.items.get(id), s.status, d, report));
+    const results = group.items.filter((id) => !exclude.has(id)).map((id) => decideItem(s.items.get(id), s.status, d, report, s));
     const count = results.filter((r) => r === 'applied').length;
     if (count) s.log.push({ at: d.at, event: 'decision', target: d.target, action: d.action, via: d.via, count, ...(d.note ? { note: d.note } : {}) });
     if (count) return 'applied';
     return results.includes('superseded') ? 'superseded' : 'skipped';
   }
-  const result = decideItem(item, s.status, d, report);
+  const result = decideItem(item, s.status, d, report, s);
   if (result === 'applied') s.log.push({ at: d.at, event: 'decision', harness: item.harness, item: item.id, action: d.action, via: d.via, ...(d.note ? { note: d.note } : {}) });
   return result;
 }
@@ -347,7 +361,10 @@ export function takeIn(ctx, extra = [], extraVia = 'board', opts = {}) {
     };
 
     fresh.sort((a, b) => a.d.at.localeCompare(b.d.at));
-    const s = { run, status, items: itemMap, groups: groupMap, log: [], runChanged: false };
+    const s = {
+      run, status, items: itemMap, groups: groupMap, log: [], runChanged: false,
+      held: heldItems(run, items), override: opts.overrideExperiment === true, heldOut: [], overridden: [],
+    };
     for (const { d, fromFile } of fresh) {
       let unbound = null;
       if (d.target !== PRIMARY_TARGET && !d.rev) {
@@ -371,7 +388,13 @@ export function takeIn(ctx, extra = [], extraVia = 'board', opts = {}) {
     }
     if (fresh.length || statusChanged) writeJsonAtomic(paths.status, status);
     if (s.runChanged) { writeJsonAtomic(paths.run, run); ctx.run = run; }
+    for (const x of s.overridden) s.log.push({ at: now, event: 'experiment-override', harness: x.harness, item: x.item, until: x.until });
     for (const e of s.log) appendLog(paths, e);
+    if (s.heldOut.length) report.heldForExperiment = s.heldOut;
+    if (s.overridden.length) {
+      report.experimentOverridden = s.overridden;
+      report.warnings = s.overridden.map((x) => `${x.item} was approved while the experiment on ${x.harness} is open (until ${dayOf(x.until)}): the next measurement will mix the two effects`);
+    }
     changed = report.new.some((d) => d.result === 'applied') || report.stale.some((x) => x.reopened);
     return report;
   });
@@ -398,10 +421,39 @@ export function decide(ctx, args) {
     if (typeof args.rev !== 'string') throw new UsageError('--rev takes the revision shown with the item or group');
     raw.rev = args.rev;
   }
+  if (args['override-experiment'] !== undefined && args['override-experiment'] !== true) throw new UsageError('--override-experiment takes no value');
+  const override = args['override-experiment'] === true;
   const res = normalizeDecision(raw, { runId: ctx.paths.runId, via: 'chat', strict: true });
   if (!res.ok) throw new UsageError(res.reason);
   if (res.decision.exclude && !GROUP_RE.test(res.decision.target)) throw new UsageError('--exclude only applies to a group target');
-  return takeIn(ctx, [res.decision], 'chat');
+  if (res.decision.action === 'approve' && !override) refuseHeld(ctx, res.decision);
+  return takeIn(ctx, [res.decision], 'chat', { overrideExperiment: override });
+}
+
+/**
+ * An approval that reaches an item held for an open experiment is refused before anything is
+ * recorded: approving it now would change what loads at the start of every session in the middle
+ * of a measurement. The user may still want it: `--override-experiment` says so.
+ */
+function refuseHeld(ctx, d) {
+  const { paths, run } = ctx;
+  const findings = loadFindings(paths, run);
+  const { items } = loadItems(paths, run, findings);
+  const held = heldItems(run, items);
+  if (!held.size) return;
+  let targets = [d.target];
+  if (GROUP_RE.test(d.target)) {
+    const group = resolveGroups(paths, run, findings, new Set(items.map((i) => i.id))).find((g) => g.id === d.target);
+    const exclude = new Set(d.exclude || []);
+    targets = group ? group.items.filter((id) => !exclude.has(id)) : [];
+  }
+  const hit = targets.filter((id) => held.has(id)).map((id) => {
+    const e = held.get(id);
+    return { item: id, harness: items.find((i) => i.id === id).harness, until: e.until, ...(e.note ? { note: e.note } : {}) };
+  });
+  if (!hit.length) return;
+  const where = [...new Set(hit.map((x) => `${x.harness} until ${dayOf(x.until)}`))].join(', ');
+  throw new RunError(`${hit.map((x) => x.item).join(', ')} ${hit.length > 1 ? 'are' : 'is'} held for the experiment open on ${where}: approving it now changes what loads at the start of every session and would confound the measurement. Nothing was recorded. If the user still wants it now, decide again with --override-experiment`, { heldForExperiment: hit });
 }
 
 /** `decisions [--ingest <file.json|directory>]`. */

@@ -212,7 +212,7 @@ export const STATE_PROSE = [
   '/accounts/list/*/label', '/accounts/list/*/suggestionText', '/accounts/list/*/sync/detail', '/accounts/list/*/sync/elements/*/note',
   '/harnesses/*/name',
   '/harnesses/*/elements/*/*/note', '/harnesses/*/elements/*/*/reason',
-  '/harnesses/*/followUp/items/*/title',
+  '/harnesses/*/followUp/items/*/title', '/harnesses/*/experiment/note',
   '/rounds/*/note',
   '/layers/*/note',
   '/files/*/role',
@@ -233,6 +233,7 @@ export const RECORD_PROSE = [
   '/items/*/title', '/items/*/proposal', '/items/*/verified', '/items/*/notVerified', '/items/*/principle',
   '/items/*/decision/note', '/items/*/saves/how',
   '/outcome/items/*/title',
+  '/experiment/note',
 ];
 
 /**

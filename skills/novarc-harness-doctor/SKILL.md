@@ -61,8 +61,9 @@ identity), the projects with their activity, and which harnesses were reviewed b
 and whether their follow-up is due. A harness with a review record is reviewed **as a
 follow-up**: the run measures what happened since, checks that what was applied is still
 there, and reviews it again (`references/follow-up.md`). To go straight to the harnesses of an
-earlier run: `run.mjs init --follow-up latest`. Then ask only what the request did not already
-answer:
+earlier run: `run.mjs init --follow-up latest`. `history` also lists the experiments open now,
+with their end date: tell the user before proposing anything about those harnesses. Then ask
+only what the request did not already answer:
 
 - **Which harnesses.** Default: every account that is not `empty` plus every `suggested`
   project; with more than about eight projects, propose the most active ones and name the
@@ -71,7 +72,7 @@ answer:
 - **Which account is the primary** when there are two or more. Recommend the one with the most
   activity. Explain in one sentence what it means: the primary's harness becomes the source,
   the other accounts follow it (`references/accounts.md`).
-- **Mode**: guided review (default) or doctor.
+- **Mode**: guided review (default), doctor, or measure only (no review, see Modes).
 
 Read the environment file for where config lives and how to show the board:
 `references/environments/claude-code.md`, `codex.md`, else `generic.md`.
@@ -87,6 +88,12 @@ node <skill>/scripts/run.mjs probe
 `references/checks.md`), measures the last 30 days of sessions (tokens, context at start,
 retries, corrections, exploration, unused context) and snapshots the files the board shows, all
 into `<run>/probes/`. `--lang` is the language you speak with the user.
+
+**Measure only.** `init --mode measure`, `probe`, `build`, then `close`: no review units, no
+subagents, no findings and no score ("não avaliado"); the board shows the measurements, the
+explorer and any follow-up, and the records are the baseline a later review compares with.
+After a measure run, `init --follow-up <runId|latest>` is a guided review unless
+`--mode measure` is given again.
 
 To join a run another session started: `run.mjs status --run <id>`, then claim units as below.
 
@@ -188,12 +195,29 @@ from which a new review can measure the real effect (`followUpAfter`, 30 days by
 only need to ask for the review again. For a project, offer to copy the report into
 `.novarc-powers/novarc-harness-doctor/reports/` in the repo.
 
+If the user is testing something (a change applied in this run, or a measure-only baseline),
+close with `run.mjs close --experiment "<what is being tested>" [--follow-up-days <n>]`. A run
+that applied changes opens an experiment anyway, until `followUpAfter`. `run.mjs experiment
+end --harness <key|path>` ends one early.
+
 ## Modes
 
 - **Guided review**: nothing is applied without the user's decision on that item.
 - **Doctor**: reversible and additive fixes are applied with backup and shown afterwards;
   permissions, secrets, deletions, installs, gates, account sync and translations wait for a
   decision (translations arrive drafted in `<run>/drafts/`).
+- **Measure only**: no review rounds, no subagents, no findings; only the measurements, the
+  explorer and the follow-up. The cheap way to take a baseline before trying something.
+
+## Experiments
+
+While an experiment is open on a harness (its last review applied changes, or was closed with
+`--experiment`, and its follow-up date has not come), do not propose changes to what loads at
+the start of every session (instruction files and their imports, skill and agent descriptions,
+MCP servers, plugins, SessionStart hooks, output styles): they would confound the measurement.
+Reviewers record such findings `open` with `heldForExperiment: true`; the board lists them
+apart, "held until <date>". `decide --action approve` on one is refused; pass
+`--override-experiment` only when the user, told the cost, still wants it now.
 
 ## Concurrency
 

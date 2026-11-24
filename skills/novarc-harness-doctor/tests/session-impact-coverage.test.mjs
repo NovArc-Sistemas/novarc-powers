@@ -230,18 +230,18 @@ test('the Codex call reader: ids, names, outcomes and what it does not recognize
   assert.deepEqual(d.calls, []);
   assert.deepEqual([...d.unrecognized].sort(), [['McpToolCall:no-server', 1], ['event:mcp_resource_read_end', 1], ['item:RemoteToolCall', 2], ['mcp_tool_call_end:no-server', 1]]);
 
-  // Output formats of a command.
-  assert.deepEqual(codexShellOutput(JSON.stringify({ output: 'abc', metadata: { exit_code: 2 } })), { failed: true, text: 'abc' });
-  assert.deepEqual(codexShellOutput(JSON.stringify({ output: 'abc', metadata: { exit_code: 0 } })), { failed: false, text: 'abc' });
-  assert.deepEqual(codexShellOutput('Exit code: 1\nWall time: 0.2 seconds\nOutput:\nline 1\nline 2'), { failed: true, text: 'line 1\nline 2' });
-  assert.deepEqual(codexShellOutput('Chunk ID: a1\nWall time: 0.2 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nok'), { failed: false, text: 'ok' });
-  assert.deepEqual(codexShellOutput('Process exited with code 1\nfailed'), { failed: true, text: 'Process exited with code 1\nfailed' });
-  assert.deepEqual(codexShellOutput([{ type: 'input_text', text: 'Exit code: 0\nOutput:\nfine' }]), { failed: false, text: 'fine' });
+  // Output formats of a command, with the exit status they name (null when none).
+  assert.deepEqual(codexShellOutput(JSON.stringify({ output: 'abc', metadata: { exit_code: 2 } })), { failed: true, code: 2, text: 'abc' });
+  assert.deepEqual(codexShellOutput(JSON.stringify({ output: 'abc', metadata: { exit_code: 0 } })), { failed: false, code: 0, text: 'abc' });
+  assert.deepEqual(codexShellOutput('Exit code: 1\nWall time: 0.2 seconds\nOutput:\nline 1\nline 2'), { failed: true, code: 1, text: 'line 1\nline 2' });
+  assert.deepEqual(codexShellOutput('Chunk ID: a1\nWall time: 0.2 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nok'), { failed: false, code: 0, text: 'ok' });
+  assert.deepEqual(codexShellOutput('Process exited with code 1\nfailed'), { failed: true, code: 1, text: 'Process exited with code 1\nfailed' });
+  assert.deepEqual(codexShellOutput([{ type: 'input_text', text: 'Exit code: 0\nOutput:\nfine' }]), { failed: false, code: 0, text: 'fine' });
   // No exit code named: not a failure. The command's own output is never searched for one.
-  assert.deepEqual(codexShellOutput('just text'), { failed: false, text: 'just text' });
-  assert.deepEqual(codexShellOutput('Output:\nExit code: 1'), { failed: false, text: 'Exit code: 1' });
-  assert.deepEqual(codexShellOutput({ content: 'denied', success: false }), { failed: true, text: 'denied' });
-  assert.deepEqual(codexShellOutput(undefined), { failed: false, text: '' });
+  assert.deepEqual(codexShellOutput('just text'), { failed: false, code: null, text: 'just text' });
+  assert.deepEqual(codexShellOutput('Output:\nExit code: 1'), { failed: false, code: null, text: 'Exit code: 1' });
+  assert.deepEqual(codexShellOutput({ content: 'denied', success: false }), { failed: true, code: null, text: 'denied' });
+  assert.deepEqual(codexShellOutput(undefined), { failed: false, code: null, text: '' });
 
   // The line filter: every call is parsed; an output only while a command waits for it.
   const e = codexCallReader();

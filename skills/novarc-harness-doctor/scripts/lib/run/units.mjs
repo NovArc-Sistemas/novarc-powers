@@ -37,8 +37,12 @@ export function roundApplies(harness, round) {
   return !(harness.kind === 'user' && round === 3);
 }
 
-/** Review units (chunked above CHUNK_SIZE harnesses) and the `accounts` unit, in claim order. */
+/**
+ * Review units (chunked above CHUNK_SIZE harnesses) and the `accounts` unit, in claim order. A
+ * measure-only run (`init --mode measure`) has none: nothing is reviewed, only measured.
+ */
 export function staticUnits(run) {
+  if (run.mode === 'measure') return [];
   const ids = run.harnesses.map((h) => h.id);
   const chunks = [];
   if (ids.length > CHUNK_SIZE) for (let i = 0; i < ids.length; i += CHUNK_SIZE) chunks.push(ids.slice(i, i + CHUNK_SIZE));

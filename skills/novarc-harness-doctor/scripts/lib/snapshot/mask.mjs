@@ -2,7 +2,7 @@
 // Pure string work, no file system access. Every function keeps the line structure of its input,
 // so a line number in the snapshot is the line number on disk.
 //
-// A text goes through three nets, in this order:
+// A text goes through these nets, in this order:
 //   1. by key, with the structure of the file (JSON, TOML, YAML): every string under a key whose
 //      name says "secret" is masked, whatever it looks like and however short it is. That covers
 //      what a line cannot show: a nested object, a string with escaped quotes, a string that
@@ -11,6 +11,10 @@
 //      they are written (a command, a script, a comment, a paragraph), and for a value written
 //      apart from its name (`--api-key VALUE`, `"--api-key", "VALUE"`). It is all that can be
 //      done for a text whose format is unknown, and it never masks what (1) decided to keep.
+//   2b. by noun, in running text: the value a sentence gives a secret noun, in English or
+//      Portuguese (`the password is v`, `a senha é v`, `use secret v`, `chave v`), when it reads
+//      like a value (see maskSentences). It does not ask the format either: a comment, a note and
+//      an instruction file are read alike, and the barrier of a run (no hint) sees what a snapshot does.
 //   3. by shape: the scanner's fixed-prefix tokens, the credential shapes below and private key
 //      blocks, line by line.
 // Two rules hold through all three. A name is judged as it reads, not as it is spelled (an
@@ -21,6 +25,24 @@
 // hint. lib/run/secrets.mjs relies on that to tell masked text from text copied off the disk.
 // So no rule may mask, when the format is not given, what the same rule leaves readable when it
 // is: a hint can only add (the two rules for files of prose are the ones that do).
+//
+// What is still not masked, because no rule here can tell it from a sentence:
+//   - in running text, a value that does not read like one: a word of letters only after any noun
+//     but a password (`the token is swordfish`); after a password noun, the same word joined by
+//     `:`, `=`, a qualifier or nothing (`password: swordfish` is masked only with the markdown or
+//     text hint, and only alone on its line), or one of PROSE_WORDS or with one of PROSE_ENDING
+//     (`the password is protected`); a value of fewer than six characters (`the token is ab12c`);
+//     a number of fewer than six digits (four after the verb of a password; `pin` takes 4 to 12);
+//   - a value that is not the word right after the noun or its verb (`the password, which is v`,
+//     `v is the password`), a value on another line than its noun, a value in a table cell, a pass
+//     phrase without quotes, and a quoted word with no digit right after a noun other than a
+//     password (`the token "abcdefgh"`: there it is as often the name of a field);
+//   - a value shaped like a name: a variable in upper case with an underscore (`ABC_123`), a member
+//     (`a.b`), a path, a file, a version, an amount with its unit, an e-mail address, and the
+//     algorithm and product names of NAMES_SOMETHING (`sha256`, `1password`);
+//   - in running text, a noun spelled with an escape or a lookalike letter (the key nets read
+//     names that way; the sentence net reads nouns as written), and the word `password` given as
+//     its own value.
 import path from 'node:path';
 import { PATTERNS, mask } from '../../secret-scan.mjs';
 import { IS_WIN, home, realpathSafe } from '../common.mjs';
@@ -1589,6 +1611,193 @@ function maskByKey(text, lang) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Net 2b: a value named in a sentence
+// ---------------------------------------------------------------------------------------------
+
+// The nouns a sentence names a secret with, in English and in Portuguese, in three classes. A
+// password (`pass`) is the only kind whose value may be a plain word; a PIN (`pin`) is digits and
+// nothing else; the value of any other kind (`any`) has to read like a value. A noun is a whole
+// word: not part of a name (`max_tokens`, `secret-scan`, `X-Api-Key`, `1Password`), of a path or
+// of a query string, which the other nets read.
+const PASS_NOUN = 'pass[ -]?phrases?|passwords?|passwd|senhas?';
+const ANY_NOUN = [
+  '(?:(?:api|access|auth|bearer|refresh|session|oauth)[ _-]?)?token',
+  'secret(?:[ _-]?key)?', 'api[ _-]?key', 'apikey', 'access[ _-]?key', 'private[ _-]?key', 'credentials?',
+  'chave(?: d[ea] api| secreta| privada| de acesso)?', 'segredo', 'credencia(?:l|is)', 'c(?:o|\\u00f3|o\\u0301)digo de acesso',
+].join('|');
+const SENTENCE_NOUN = new RegExp(
+  `(?<![\\p{L}\\p{N}\\p{M}_$@#%&?=./\\\\-])(?:(?<pass>${PASS_NOUN})|(?<pin>pin)|(?<any>${ANY_NOUN}))(?![\\p{L}\\p{N}\\p{M}_-]|\\.[\\p{L}\\p{N}])`,
+  'giu',
+);
+// What joins the noun to its value: a verb (`is`, `é`, `fica`, `vale`), `:`, `=` or the `to` of
+// `set the token to v`. In front of
+// it the noun may be qualified (`the password for staging is`, `a senha do banco é`) and behind
+// it an article may stand (`o token é o ...`); markdown emphasis around either is skipped.
+const COPULA = '(?:is|was|are|were|s(?:\\u00e3|a\\u0303|a)o|ser(?:\\u00e1|a\\u0301)|era|\\u00e9|e\\u0301|eh|fica|vale)';
+const QUALIFIER = '[ \\t]+(?:for|of|on|in|to|do|da|de|dos|das|para|no|na)(?:[ \\t]+(?:the|a|an|my|your|our|this|that|o|os|as|meu|minha|seu|sua|nosso|nossa))?[ \\t]+[\\p{L}\\p{N}\\p{M}_.-]{1,40}';
+const AFTER_NOUN = new RegExp(
+  `^(?:\\*{1,2}|\`)?(?<qual>${QUALIFIER})?(?<conn>[ \\t]*[:=](?![:=>])[ \\t]*|[ \\t]+(?<verb>${COPULA})(?:[ \\t]*:)?[ \\t]+|[ \\t]+to[ \\t]+)(?:\\*{1,2}[ \\t]*)?(?<art>(?:the|a|an|o|um|uma)[ \\t]+)?`,
+  'iu',
+);
+// What a word that follows such a noun names, when it does not hold a value: a URL (`op://...`
+// included), a path or a dotfile, an e-mail address, a file, a variable in upper case, a member
+// (`cfg.token`), a call, an index or a placeholder, a version, an amount with its unit, and the
+// names of algorithms, encodings and products that are written with digits.
+const NAMES_SOMETHING = [
+  /:\/\//,
+  /^(?:[A-Za-z]:)?[\\/~.]/,
+  /^[\w.+-]+@[\w-]+(?:\.[\w-]+)+$/,
+  /\.(?:json|jsonc|ya?ml|toml|env|md|mdx|txt|js|mjs|cjs|ts|py|sh|ps1|pem|key|pub|crt|cfg|conf|ini|lock|log|html|csv|xml|kdbx)$/i,
+  /^\$?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/,
+  /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+$/,
+  /[([{<]/,
+  /^v?\d+(?:\.\d+)+(?:[-+][\w.]+)?$/i,
+  /^v\d+$/i,
+  /^\d+(?:[.,]\d+)?(?:ms|s|secs?|min|mins|h|hrs?|d|days?|k|kb|kib|mb|mib|gb|gib|tb|px|em|rem|x|st|nd|rd|th|chars?|bytes?|tokens?|bits?|lines?|rpm|tpm)$/i,
+  /^(?:sha-?(?:1|2|224|256|384|512)|md5|base(?:32|64)(?:url)?|utf-?(?:8|16|32)(?:mb4)?|x86(?:[-_]64)?|x64|arm64|aarch64|amd64|aes-?(?:128|192|256)(?:-[a-z]+)?|rsa-?\d{3,4}|ed25519|ed448|curve25519|secp256k1|p-?256|[hrep]s(?:256|384|512)|oauth2|pbkdf2|argon2(?:id|i|d)?|hmac-?sha\d+|ipv[46]|http[23]|2fa|k8s|i18n|l10n|e2e|1password|win(?:32|64)|u?int(?:8|16|32|64)|float(?:32|64)|o200k(?:_base)?|cl100k(?:_base)?|gpt-?\d[\w.-]*)$/i,
+];
+const namesSomething = (v) => NAMES_SOMETHING.some((re) => re.test(v)) || ((v.includes('/') || v.includes('\\')) && !carriesValue(v));
+// A plain word after `the password is` / `a senha é` is its value unless it reads as a word of the
+// sentence: one of these, or a word with the ending of a participle, an adverb or an abstract
+// noun in either language (`stored`, `required`, `guardada`, `obrigatória`, `currently`). Words
+// shorter than six letters are never a value, so only longer ones matter here.
+const PROSE_ENDING = /(?:ed|ing|ly|able|ible|tion|sion|ment|ness|ous|ive|ful|less|ence|ance|ent|ant|ary|ory|ical|ic|al|ity|ize|ise|ure|ward|wise|self|selves|ado|ada|ados|adas|ido|idos|idas|ção|ções|cao|coes|mente|vel|veis|oso|osa|osos|osas|ário|ária|ario|aria|ório|ória|orio|oria|ivo|iva|ivos|ivas|ente|ante|eiro|eira|agem|dade|ência|ância|encia|ancia|ismo|ista)$/u;
+const PROSE_WORDS = new Set([
+  // English
+  'secret', 'secrets', 'password', 'passwords', 'passphrase', 'token', 'tokens', 'credential', 'credentials', 'private', 'public',
+  'strong', 'stronger', 'weaker', 'longer', 'shorter', 'better', 'simple', 'unique', 'random', 'secure', 'unsafe', 'either',
+  'neither', 'within', 'without', 'inside', 'outside', 'before', 'behind', 'beyond', 'always', 'rather', 'enough', 'really',
+  'pretty', 'should', 'would', 'could', 'might', 'become', 'became', 'itself', 'unknown', 'shown', 'hidden', 'written', 'given',
+  'taken', 'broken', 'stolen', 'chosen', 'forgotten', 'gotten', 'cannot', 'nothing', 'something', 'anything', 'everything',
+  'somewhere', 'elsewhere', 'anywhere', 'wherever', 'whatever', 'whichever', 'another', 'others', 'common', 'normal', 'default',
+  'defaults', 'sample', 'example', 'placeholder', 'dummy', 'invalid', 'correct', 'incorrect', 'change', 'changes', 'unset', 'empty',
+  'blank', 'wrong', 'right', 'there', 'where', 'which', 'still', 'already', 'other', 'never', 'often', 'mostly', 'second', 'twelve',
+  'longest', 'shortest', 'strongest', 'weakest', 'yourself', 'myself', 'ourselves', 'theirs', 'yours', 'single', 'double',
+  'remote', 'online', 'offline', 'inline', 'stored', 'saved', 'kept', 'reset', 'rotated', 'changed', 'printed', 'masked',
+  // Portuguese
+  'secreta', 'secreto', 'segredo', 'senhas', 'privada', 'privado', 'pública', 'público', 'publica', 'publico', 'simples',
+  'única', 'único', 'segura', 'seguro', 'sempre', 'também', 'tambem', 'outra', 'outro', 'outras', 'outros', 'mesma',
+  'mesmo', 'padrão', 'padrao', 'vazia', 'vazio', 'certa', 'correta', 'correto', 'incorreta', 'incorreto', 'inválida',
+  'inválido', 'invalida', 'invalido', 'válida', 'válido', 'valida', 'valido', 'opcional', 'nenhuma', 'nenhum',
+  'alguma', 'algum', 'qualquer', 'aquela', 'aquele', 'nossa', 'nosso', 'minha', 'pessoal', 'própria', 'próprio',
+  'propria', 'proprio', 'depois', 'antes', 'então', 'entao', 'assim', 'igual', 'iguais', 'longa', 'longo', 'curta', 'curto',
+  'grande', 'pequena', 'pequeno', 'forte', 'fraca', 'fraco', 'trocar', 'mudar', 'guardar', 'secretas', 'secretos', 'exemplo',
+]);
+/** True when `v`, a word of letters only, is the value a sentence gives a password, and not a word of that sentence. */
+function plainSecretWord(v) {
+  const w = v.normalize('NFC');
+  if (!/^[\p{L}\p{M}]+$/u.test(w) || /\p{Ll}\p{Lu}/u.test(w) || /^\p{Lu}+$/u.test(w)) return false;
+  const lower = w.toLowerCase();
+  return !PROSE_WORDS.has(lower) && !PROSE_ENDING.test(lower);
+}
+
+/**
+ * True when `v`, an unquoted word that follows a secret noun, is that secret. `mode` says how it
+ * follows: `copula` right after a verb (`the password is v`), `named` after a `:`, an `=`, a
+ * qualifier or an article, `next` with nothing between them (`use secret v`).
+ */
+function sentenceWord(v, cls, mode) {
+  if (!v || v.length > 512 || v.includes('…') || /^[-!*&]/.test(v)) return false;
+  if (isReference(v) || PLACEHOLDER.test(v) || plainScalar('', v) || namesSomething(v)) return false;
+  if (/^\d+$/.test(v)) return cls === 'pin' ? v.length >= 4 && v.length <= 12 : v.length >= (cls === 'pass' && mode !== 'next' ? 4 : 6);
+  if (cls === 'pin' || v.length < 6) return false;
+  if (GENERATED.test(v)) return true;
+  return cls === 'pass' && mode === 'copula' && plainSecretWord(v);
+}
+
+/** The same for a value between quotes or backticks, `v` being what is between them. */
+function sentenceQuoted(v, cls, mode, backticks) {
+  if (!v.trim() || v.length > 512 || v.includes('…')) return false;
+  if (isReference(v, backticks) || PLACEHOLDER.test(v) || ANGLE_PLACEHOLDER.test(v) || plainScalar('', v)) return false;
+  // Several words: a pass phrase, when a sentence gives it as the value of a password.
+  if (/\s/.test(v)) return cls === 'pass' && mode !== 'next' && v.trim() === v && !/[([{<]/.test(v);
+  if (namesSomething(v) || /^-/.test(v)) return false;
+  // The name of a key (`access_token`, `password`), not its value.
+  if (/^[A-Za-z][A-Za-z_.-]*$/.test(v) && isSensitiveKey(v)) return false;
+  // Right after the noun a quoted word is as often a name (the token `max_tokens`): only one that
+  // reads like a value is one, or a word given as a password.
+  if (mode === 'next' || cls === 'pin') return sentenceWord(v, cls, 'next') || (cls === 'pass' && v.length >= 4 && plainSecretWord(v));
+  return true;
+}
+
+/**
+ * True when the quote at `p` opens a string: an even number of quotes of its kind stands in
+ * front of it on its line. An apostrophe between two letters (`don't`) is not a quote.
+ */
+function opensString(text, p) {
+  const q = text[p];
+  const start = text.lastIndexOf('\n', p - 1) + 1;
+  if (p - start > 4096) return false;
+  let open = false;
+  for (let i = start; i < p; i++) {
+    if (text[i] !== q || text[i - 1] === '\\') continue;
+    if (q === "'" && /[\p{L}\p{N}]/u.test(text[i - 1] || '') && /\p{L}/u.test(text[i + 1] || '')) continue;
+    open = !open;
+  }
+  return !open;
+}
+
+/**
+ * The value written after a secret noun in running text, in English or Portuguese:
+ *   `the password is v`, `a senha é v`, `o token fica v`, `password: v`, `secret = v`, `set the
+ *   token to v`, with a
+ *   qualifier before the verb (`the password for staging is v`) or an article after it;
+ *   `use secret v`, `a chave v`: the noun and the value with nothing between them;
+ *   any of these with the value in quotes or backticks.
+ * The value is one word, to a space or a closing mark (`.`, `,`, `;`, `:`, a bracket), or what is
+ * between the quotes. It is masked when it is a word no sentence has (letters with digits or with
+ * one of `!@#%^&*+~`, six characters or more), a long number (six digits; four after the verb of
+ * a password; four to twelve after `pin`), a quoted value after a verb, `:` or `=`, or, after the
+ * verb of a password only (`the password is v`), a word of six letters or more that is not one of
+ * PROSE_WORDS and has no PROSE_ENDING. What NAMES_SOMETHING describes, a reference, a placeholder
+ * and a switch word (`true`, `none`) stay. The language of the file is not asked.
+ */
+function maskSentences(text) {
+  const spans = [];
+  SENTENCE_NOUN.lastIndex = 0;
+  let m;
+  while ((m = SENTENCE_NOUN.exec(text)) !== null) {
+    const cls = m.groups.pass !== undefined ? 'pass' : (m.groups.pin !== undefined ? 'pin' : 'any');
+    const e = m.index + m[0].length;
+    const rest = text.slice(e, Math.min(lineEnd(text, e), e + 240));
+    const joined = AFTER_NOUN.exec(rest);
+    let p;
+    let mode;
+    if (joined) {
+      p = e + joined[0].length;
+      mode = joined.groups.verb && !joined.groups.qual && !joined.groups.art ? 'copula' : 'named';
+    } else {
+      const gap = /^(?:\*{1,2}|`)?[ \t]+/.exec(rest);
+      if (!gap) continue;
+      p = e + gap[0].length;
+      mode = 'next';
+    }
+    const q = text[p];
+    let end = -1;
+    if (q === '"' || q === "'" || q === '`') {
+      if (!opensString(text, p)) continue;
+      const [close, after, closed] = stringEnd(text, p, 0);
+      if (closed && sentenceQuoted(text.slice(p + 1, close), cls, mode, q === '`')) {
+        spans.push([p + 1, close, maskValue(text.slice(p + 1, close))]);
+        end = after;
+      }
+    } else if (q !== undefined && q !== '\n' && q !== '\r') {
+      const value = bareValue(text, p);
+      let v = text.slice(p, value.end).replace(/[.,:;)\]}>]+$/, '');
+      // The mark that closes an emphasis opened earlier on the line (`**the secret masked**`) is not part of the word.
+      const mark = /(?:\*{1,2}|_{1,2}|~~)$/.exec(v);
+      if (mark && text.slice(text.lastIndexOf('\n', p - 1) + 1, p).includes(mark[0])) v = v.slice(0, -mark[0].length).replace(/[.,:;)\]}>]+$/, '');
+      if (!value.reference && sentenceWord(v, cls, mode)) {
+        spans.push([p, p + v.length, maskValue(v)]);
+        end = p + v.length;
+      }
+    }
+    if (end > SENTENCE_NOUN.lastIndex) SENTENCE_NOUN.lastIndex = end;
+  }
+  return applySpans(text, spans);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Net 3: by shape
 // ---------------------------------------------------------------------------------------------
 
@@ -1653,7 +1862,7 @@ function shapeLine(line) {
 
 /** Mask every secret on one line (no newline inside): by the name it is assigned to, then by its shape. */
 export function maskLine(line) {
-  return shapeLine(maskByKey(String(line), null));
+  return shapeLine(maskSentences(maskByKey(String(line), null)));
 }
 
 /** A line that can be part of a PEM body: one base64-ish token, a PEM header field, or blank. */
@@ -1719,7 +1928,7 @@ export function maskText(text, { lang = null } = {}) {
     STRUCTURE[structure](cur, st);
     cur = applySpans(cur, st.spans);
   }
-  return maskByShape(maskByKey(cur, structure || lang));
+  return maskByShape(maskSentences(maskByKey(cur, structure || lang)));
 }
 
 const SENSITIVE_NAMES = [

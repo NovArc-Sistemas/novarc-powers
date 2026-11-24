@@ -7,6 +7,7 @@ import { loadFindings, loadItems, loadStatus, loadUnits, inputsFingerprint } fro
 import { claimable, roundApplies, ROUNDS, DEFAULT_TTL_MINUTES } from './units.mjs';
 import { inboxCount, PRIMARY_TARGET } from './decisions.mjs';
 import { SAFE_CLASSES } from './apply.mjs';
+import { heldItems, experimentsOf } from './experiments.mjs';
 
 function gather(ctx, now = nowMs()) {
   const { paths, run } = ctx;
@@ -45,7 +46,9 @@ export function statusReport(ctx) {
       itemsTotal: Object.values(byStatus).reduce((a, b) => a + b, 0),
       roundsDone: applicable.filter((r) => said.get(`${h.id}:${r}`) === 'done').length,
       roundsTotal: applicable.length,
-      probes: probes ? { ok: probeNames.filter((k) => probes[k].ok).length, failed: probeNames.filter((k) => !probes[k].ok) } : null,
+      // A probe left out on purpose (an account measured elsewhere, the rule engine in a
+      // measure-only run) did not fail.
+      probes: probes ? { ok: probeNames.filter((k) => probes[k].ok).length, failed: probeNames.filter((k) => !probes[k].ok && !probes[k].skipped) } : null,
     };
   });
   const decisionTimes = g.status.decisions.map((d) => d.at).filter(Boolean).sort();
@@ -80,7 +83,10 @@ export function next(ctx) {
   for (const i of g.items) if (i.status === 'approved') (approvedWaiting[i.harness] = approvedWaiting[i.harness] || []).push(i.id);
   const questions = g.items.filter((i) => typeof i.question === 'string').map((i) => ({ target: i.id, question: i.question, at: (g.status.items[i.id] || {}).askedAt || i.updatedAt || null }));
   for (const q of g.status.questions) if (q.target === PRIMARY_TARGET) questions.push({ target: q.target, question: q.question, at: q.at });
-  const undecided = g.items.filter((i) => i.status === 'open').length;
+  // An open finding held for an open experiment (experiments.mjs) is not waiting for a decision now.
+  const experiments = experimentsOf(run);
+  const held = heldItems(run, g.items, experiments);
+  const undecided = g.items.filter((i) => i.status === 'open' && !held.has(i.id)).length;
   const failed = g.items.filter((i) => i.status === 'failed').map((i) => i.id);
   const stuck = g.items.filter((i) => {
     if (i.status !== 'in-progress') return false;
@@ -93,7 +99,7 @@ export function next(ctx) {
   const autoApplicable = {};
   if (run.mode === 'doctor' && !reviewOpen) {
     // Not an item the user already decided in another version: that one waits for them.
-    for (const i of g.items) if (i.status === 'open' && SAFE_CLASSES.includes(i.class) && !g.outdated.has(i.id)) (autoApplicable[i.harness] = autoApplicable[i.harness] || []).push(i.id);
+    for (const i of g.items) if (i.status === 'open' && SAFE_CLASSES.includes(i.class) && !g.outdated.has(i.id) && !held.has(i.id)) (autoApplicable[i.harness] = autoApplicable[i.harness] || []).push(i.id);
   }
   // Open again because the proposal changed after the user decided: they decide again.
   const decideAgain = g.items.filter((i) => i.status === 'open' && g.outdated.has(i.id)).map((i) => i.id);
@@ -131,6 +137,8 @@ export function next(ctx) {
     ...(stuck.length ? { stuck } : {}),
     ...(failed.length ? { failed } : {}),
     ...(decideAgain.length ? { decideAgain } : {}),
+    ...(held.size ? { heldForExperiment: [...held.keys()] } : {}),
+    ...(Object.keys(experiments).length ? { experiments } : {}),
     questions,
     inbox: g.inbox,
     boardStale,

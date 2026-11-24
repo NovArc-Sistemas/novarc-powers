@@ -52,7 +52,10 @@ in several harnesses is one group. When the brief names an earlier review record
 read its items first and follow "Reviewing a harness again" in references/follow-up.md: link
 every finding that was seen before with `previous`; for one the user declined, send the same
 proposal copied from the record when nothing changed (the decline is then carried), or say what
-changed. You never set `declined` yourself. Write user-facing text in [language]. When done:
+changed. You never set `declined` yourself. When the brief has `experimentRules`, follow them:
+in that harness propose no change to what loads at the start of every session until the date it
+names; record such a finding with status `open` and `heldForExperiment: true`, and say in the
+lesson that it waits for the experiment. Write user-facing text in [language]. When done:
   node [<skill>]/scripts/run.mjs complete --run [runId] --unit [unitId] --session [label] --findings [file]
 Report: how many items per harness and severity, what you could not check, and anything the
 other rounds should know.

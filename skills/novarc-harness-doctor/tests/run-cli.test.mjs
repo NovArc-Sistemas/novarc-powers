@@ -54,7 +54,7 @@ test('<command> --help and -h print that command and run nothing', (t) => {
     assert.deepEqual([short.code, short.stdout], [0, helpText(name)], `${name} -h`);
     assert.equal(sb.run(['help', name]).stdout, helpText(name));
   }
-  assert.match(helpText('decide'), /--target <itemId\|groupId\|accounts\.primary> --action approve\|decline\|defer\|ask \[--note <t>\] \[--exclude <id,id>\] \[--rev <rev>\]\nrun\.mjs decide \[--run <id>\] --target <itemId\|accounts\.primary> --answered\n/);
+  assert.match(helpText('decide'), /--target <itemId\|groupId\|accounts\.primary> --action approve\|decline\|defer\|ask \[--note <t>\] \[--exclude <id,id>\] \[--rev <rev>\] \[--override-experiment\]\nrun\.mjs decide \[--run <id>\] --target <itemId\|accounts\.primary> --answered\n/);
   assert.match(helpText('decisions'), /\[--ingest <file\.json\|directory>\]/);
   assert.ok(!fs.existsSync(path.join(sb.home, '.novarc-powers')));
 

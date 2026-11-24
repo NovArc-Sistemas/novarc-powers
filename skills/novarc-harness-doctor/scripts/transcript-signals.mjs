@@ -10,6 +10,18 @@
 // agent, so they never count as user messages or corrections. It never prints message text,
 // command lines, tool output or file paths from inside a transcript.
 //
+// The events follow the rules session-impact.mjs prints with its waste kinds (lib/transcripts.mjs):
+//   - a failure is is_error or a non-zero exit, except a search or test finding nothing (rg,
+//     grep, ag, ack, findstr, Select-String, git grep, diff, cmp, test / [ exiting 1);
+//   - `hookBlocks` counts tool calls a hook DENIED before they ran, read from structured fields
+//     (a hook's permissionDecision, a hook_blocking_error whose hookEvent is PreToolUse or
+//     PermissionRequest), never from result text; a Stop hook that makes the agent continue is
+//     not a block;
+//   - `retries` lists, per head, the sessions where the SAME command line failed and was run again
+//     at least 3 more times with no edit in between;
+//   - `userCorrections` counts messages that follow work, are not questions or short answers to
+//     a question the assistant asked, and carry a marker about the work.
+//
 // A Codex tool call is counted once per call id, whichever shapes the rollout wrote it in, under
 // the same names session-impact.mjs uses (`mcp__<server>__<tool>` for an MCP call, `exec_command`
 // for a command known only from its completion). These counts have no window filter, no check for
@@ -20,7 +32,8 @@ import path from 'node:path';
 import { IS_WIN, parseArgs, isMain, printJson, warn, normalizeInputPath, isDir, readdirSafe, realpathSafe } from './lib/common.mjs';
 import { claudeConfigDirs, codexDirs } from './lib/locations.mjs';
 import {
-  SHELL_TOOLS, NOT_FOUND_RE, safeName, resultText, isHumanText, isCorrection, hookBlockText, hookBlockAttachment,
+  SHELL_TOOLS, EDIT_TOOLS, NOT_FOUND_RE, safeName, resultText, isHumanText, isCorrection, asksUser, hookDenialOf, hookOutcomeOf,
+  normalizeCommand, noMatchExit, claudeExitCode, writesFiles, retryRuns,
   commandHead, matchesProjectDir, matchesProjectCwd, eachJsonLine, listClaudeTranscripts, listJsonl, codexCallReader, codexCallName,
 } from './lib/transcripts.mjs';
 
@@ -30,7 +43,12 @@ export { commandHead, codexCommandString, matchesProjectDir, matchesProjectCwd, 
 function bump(obj, key, n = 1) { obj[key] = (obj[key] || 0) + n; }
 
 function newSession(source, id) {
-  return { source, id, failures: 0, failHeads: {}, lastToolError: null, first: null, last: null };
+  return { source, id, failures: 0, failHeads: {}, retryHeads: new Set(), lastToolError: null, first: null, last: null };
+}
+
+/** Record the retry runs of one thread's call sequence (see retryRuns) on its session, by head. */
+function recordRetries(sess, seq) {
+  for (const run of retryRuns(seq)) sess.retryHeads.add(seq[run.first].head || '<unknown>');
 }
 
 function trackTime(sess, ts) {
@@ -55,18 +73,35 @@ function recordFailure(agg, sess, head, text) {
  */
 async function parseClaudeFile(entry, sess, agg) {
   const toolUses = new Map();
+  const seqs = { main: [], side: [] }; // calls in order, per thread, for the retry rule
+  const denied = new Set();
+  let work = false; // a tool call since the last real user message (top-level thread)
+  let asked = false; // the assistant's last text asked something (top-level thread)
+  const deny = (id) => {
+    if (typeof id === 'string') { if (denied.has(id)) return; denied.add(id); }
+    agg.hookBlocks++;
+  };
   await eachJsonLine(entry.file, (o) => {
     trackTime(sess, o.timestamp);
     const side = entry.sidechainFile || o.isSidechain === true;
     const content = o.message && o.message.content;
     if (o.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
+        if (!side && c && c.type === 'text' && typeof c.text === 'string' && c.text.trim()) asked = asksUser(c.text);
         if (!c || c.type !== 'tool_use') continue;
+        if (!side) work = true;
         const name = safeName(c.name) || '<unknown>';
         bump(agg.toolCalls, name);
         const input = c.input && typeof c.input === 'object' ? c.input : {};
-        const info = { name, head: null };
-        if (SHELL_TOOLS.has(c.name) && typeof input.command === 'string') info.head = commandHead(input.command);
+        const info = { name, head: null, command: null, step: null };
+        const step = { shell: false, cmd: null, failed: false, edit: EDIT_TOOLS.has(c.name), head: null };
+        if (SHELL_TOOLS.has(c.name) && typeof input.command === 'string') {
+          info.head = commandHead(input.command);
+          info.command = input.command;
+          Object.assign(step, { shell: true, cmd: normalizeCommand(input.command), head: info.head, edit: writesFiles(input.command) });
+        }
+        info.step = step;
+        seqs[side ? 'side' : 'main'].push(step);
         if (c.name === 'Skill') {
           const sk = safeName(input.skill || input.name || input.command);
           if (sk) bump(agg.skillInvocations, sk);
@@ -75,36 +110,44 @@ async function parseClaudeFile(entry, sess, agg) {
       }
     } else if (o.type === 'user') {
       let sawToolResult = false;
+      const denial = hookDenialOf(o);
       if (Array.isArray(content)) {
         for (const c of content) {
           if (!c || c.type !== 'tool_result') continue;
           sawToolResult = true;
           const text = resultText(c.content);
-          const isErr = c.is_error === true;
-          const info = toolUses.get(c.tool_use_id) || { name: null, head: null };
+          const info = toolUses.get(c.tool_use_id) || { name: null, head: null, command: null, step: null };
+          // A search that found nothing exits 1 and is marked as an error: it is not a failure.
+          const isErr = c.is_error === true && !(info.command !== null && noMatchExit(info.command, claudeExitCode(text)));
+          if (info.step) info.step.failed = isErr;
           if (!side) sess.lastToolError = isErr;
-          if (isErr && hookBlockText(text)) agg.hookBlocks++;
+          if (denial && c.is_error === true) deny(c.tool_use_id);
           if (isErr && info.head !== null) recordFailure(agg, sess, info.head, text);
           else if (isErr && info.name && SHELL_TOOLS.has(info.name)) recordFailure(agg, sess, null, text);
         }
       }
       if (!side && !sawToolResult && o.isMeta !== true && !o.toolUseResult) {
         const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((c) => c && c.type === 'text').map((c) => c.text) : [];
+        const ctx = { work, asked };
+        let human = false;
         for (const t of texts) {
           if (typeof t !== 'string') continue;
           const cmd = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/.exec(t);
           if (cmd) { const n = safeName(cmd[1]); if (n) bump(agg.slashCommands, n); continue; }
           if (!isHumanText(t)) continue;
+          human = true;
           agg.userMessages++;
-          if (isCorrection(t)) agg.userCorrections++;
+          if (isCorrection(t, ctx)) agg.userCorrections++;
         }
+        if (human) { work = false; asked = false; }
       }
-    } else if (o.type === 'attachment' && o.attachment && hookBlockAttachment(o.attachment.type)) {
-      agg.hookBlocks++;
-    } else if (o.type === 'system' && /hook/i.test(String(o.subtype || '')) && o.preventedContinuation === true) {
-      agg.hookBlocks++;
+    } else if (o.type === 'attachment' || o.type === 'system') {
+      const h = hookOutcomeOf(o);
+      if (h && h.outcome === 'denial') deny(h.toolUseId);
     }
   }, { onUnparsable: () => { agg.unparsableLines++; } });
+  recordRetries(sess, seqs.main);
+  recordRetries(sess, seqs.side);
 }
 
 /** Read the first lines of a Codex rollout until its working directory shows up. */
@@ -129,39 +172,51 @@ async function parseCodexSession(file, agg) {
   // an exec_command_end / mcp_tool_call_end event, a completed item (lib/transcripts.mjs).
   const reader = codexCallReader();
   let lastCommand = null; // the command whose outcome was recorded last
+  const order = []; // calls and edits in the order they were first recorded, for the retry rule
+  let asked = false; // the assistant's last message asked something
+  const user = (list, text) => list.push({ text, calls: order.length, asked });
+  const agentText = (text) => { if (typeof text === 'string' && text.trim()) asked = asksUser(text); };
+  const failedCall = (call) => call.shell && call.done && call.failed && !noMatchExit(call.command, call.code);
   await eachJsonLine(file, (o) => {
     trackTime(sess, o.timestamp);
     const p = o.payload && typeof o.payload === 'object' ? o.payload : null;
     if (!p) return;
     const hit = reader.read(o);
     if (hit) {
+      if (hit.created) order.push({ call: hit.call });
       if (hit.completed) lastCommand = hit.call;
       return;
     }
     if (o.type === 'response_item') {
-      if (p.type === 'message' && p.role === 'user' && Array.isArray(p.content)) for (const c of p.content) if (c && typeof c.text === 'string') responseUser.push(c.text);
+      if (p.type === 'message' && p.role === 'user' && Array.isArray(p.content)) for (const c of p.content) if (c && typeof c.text === 'string') user(responseUser, c.text);
     } else if (o.type === 'event_msg') {
-      if (p.type === 'user_message' && typeof p.message === 'string') eventUser.push(p.message);
       const item = p.item && typeof p.item === 'object' ? p.item : null;
+      if (p.type === 'user_message' && typeof p.message === 'string') { user(eventUser, p.message); asked = false; }
       if (p.type === 'item_completed' && item && item.type === 'UserMessage' && Array.isArray(item.content)) {
-        for (const c of item.content) if (c && typeof c.text === 'string') itemUser.push(c.text);
+        for (const c of item.content) if (c && typeof c.text === 'string') user(itemUser, c.text);
+        asked = false;
       }
+      if (p.type === 'agent_message') agentText(p.message);
+      if (p.type === 'item_completed' && item && item.type === 'AgentMessage') agentText(typeof item.text === 'string' ? item.text : Array.isArray(item.content) ? item.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n') : null);
+      if (p.type === 'patch_apply_end' || (p.type === 'item_completed' && item && item.type === 'FileChange')) order.push({ edit: true });
     }
   }, { onUnparsable: () => { agg.unparsableLines++; } });
   for (const call of reader.calls) {
     bump(agg.toolCalls, safeName(codexCallName(call)) || '<unknown>');
-    if (!call.shell || !call.done || !call.failed) continue;
-    recordFailure(agg, sess, commandHead(call.command), call.text);
-    if (hookBlockText(call.text)) agg.hookBlocks++;
+    if (failedCall(call)) recordFailure(agg, sess, commandHead(call.command), call.text);
   }
-  if (lastCommand) sess.lastToolError = lastCommand.failed;
-  // The same user turn can be recorded in several places; count from one source only.
-  const users = itemUser.length ? itemUser : eventUser.length ? eventUser : responseUser;
-  for (const t of users) {
-    if (!isHumanText(t)) continue;
+  recordRetries(sess, order.map((x) => (x.edit ? { shell: false, cmd: null, failed: false, edit: true, head: null } : {
+    shell: x.call.shell, cmd: x.call.shell ? normalizeCommand(x.call.command) : null, failed: failedCall(x.call),
+    edit: x.call.name === 'apply_patch' || (x.call.shell && writesFiles(x.call.command)), head: x.call.shell ? commandHead(x.call.command) : null,
+  })));
+  if (lastCommand) sess.lastToolError = failedCall(lastCommand);
+  // The same user turn can be recorded in several places; count from one source only. A message
+  // corrects work only when a tool call was recorded since the previous one.
+  const users = (itemUser.length ? itemUser : eventUser.length ? eventUser : responseUser).filter((u) => isHumanText(u.text));
+  users.forEach((u, i) => {
     agg.userMessages++;
-    if (isCorrection(t)) agg.userCorrections++;
-  }
+    if (isCorrection(u.text, { work: u.calls > (i ? users[i - 1].calls : 0), asked: u.asked })) agg.userCorrections++;
+  });
   return sess;
 }
 
@@ -217,7 +272,7 @@ export async function collect({ projectRoot, configDirs, days = 60 }) {
   if (unreadable) warn(`${unreadable} transcript file(s) could not be read; skipped`);
 
   const retries = {};
-  for (const s of sessions) for (const [h, n] of Object.entries(s.failHeads)) if (n >= 3) bump(retries, h);
+  for (const s of sessions) for (const h of s.retryHeads) bump(retries, h);
   const firsts = sessions.map((s) => s.first).filter((x) => x !== null);
   const lasts = sessions.map((s) => s.last).filter((x) => x !== null);
   const sortDesc = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));

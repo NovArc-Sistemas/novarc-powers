@@ -55,7 +55,7 @@ test('close writes the record, the .md and the index: exactly what was decided a
   const [f101, f102, f103, f104] = first.findings.items;
   const record = history.record(key, first.runId);
   assert.deepEqual(record, {
-    schema: 1, skillVersion: SKILL_VERSION, harnessKey: key, runId: first.runId, language: 'en',
+    schema: 1, skillVersion: SKILL_VERSION, harnessKey: key, runId: first.runId, language: 'en', mode: 'guided',
     kind: 'project', provider: null, name: 'acme-shop', path: '~/dev/acme-shop',
     startedAt: FIRST.started, reviewedAt: FIRST.closed, changesAppliedAt: FIRST.fixed, followUpAfter: '2026-02-09T12:00:00.000Z',
     // Found: 5 + 2 + 15 + 5 points lost. Left: the fixed one costs nothing, the declined one half.
@@ -280,7 +280,8 @@ test('history: what was reviewed, when, and whether the follow-up is due', (t) =
   // Ten days later the follow-up is not due; it is from the moment followUpAfter passes.
   const early = sb.run(['history'], clock('2026-01-20T12:00:00.000Z'));
   assert.equal(early.code, 0, early.stderr);
-  assert.equal(early.stdout, ['Review history: 1 harness', '', line, review, '  Follow-up from 2026-02-09 (in 20 days).', ''].join('\n'));
+  // It applied a change, so until then an experiment is open on it (the change is what is measured).
+  assert.equal(early.stdout, ['Review history: 1 harness', '', line, review, '  Follow-up from 2026-02-09 (in 20 days).', '  Experiment in progress until 2026-02-09: the changes applied on 2026-01-10.', ''].join('\n'));
   assert.equal(sb.run(['history'], clock('2026-02-09T11:59:59.000Z')).stdout.split('\n')[4], '  Follow-up from 2026-02-09 (in 1 day).');
   const due = sb.run(['history'], clock('2026-02-09T12:00:00.000Z'));
   assert.equal(due.stdout, ['Review history: 1 harness', '', line, review, '  Follow-up due since 2026-02-09.', ''].join('\n'));
@@ -298,10 +299,12 @@ test('history: what was reviewed, when, and whether the follow-up is due', (t) =
     at: '2026-01-20T12:00:00.000Z',
     harnesses: [{
       key: first.key, kind: 'project', provider: null, name: 'acme-shop', path: '~/dev/acme-shop',
-      reviews: [{ runId: first.runId, reviewedAt: FIRST.closed, score: 79, grade: 'B', fixed: 1, expectedTokens: 200000, followUpAfter: '2026-02-09T12:00:00.000Z' }],
+      reviews: [{ runId: first.runId, reviewedAt: FIRST.closed, score: 79, grade: 'B', fixed: 1, expectedTokens: 200000, followUpAfter: '2026-02-09T12:00:00.000Z', mode: 'guided' }],
       followUpAfter: '2026-02-09T12:00:00.000Z', due: false,
+      experiment: { since: '2026-01-10T11:31:00.000Z', until: '2026-02-09T12:00:00.000Z', runId: first.runId },
     }],
     due: [],
+    experiments: [{ harness: first.key, name: 'acme-shop', since: '2026-01-10T11:31:00.000Z', until: '2026-02-09T12:00:00.000Z', runId: first.runId }],
     unrecordedRuns: [],
   });
   const later = json('2026-02-10T00:00:00.000Z');

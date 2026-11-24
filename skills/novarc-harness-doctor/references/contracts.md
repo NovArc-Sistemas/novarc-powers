@@ -214,7 +214,11 @@ the same path across runs. `--lang pt|en` words the layer names and notes and th
 plugins and MCP servers in the run language (machine fields never change); `run.mjs probe` passes
 it. `--clis <probe-clis.json>` fills `elements.clis`; `--name <label>`
 overrides the harness name; `--budget <bytes>` and `--file-cap <bytes>` change the caps (tests).
-The account's `.claude.json` never becomes a file: its MCP servers appear as elements only.
+The account's `.claude.json` never becomes a file: its MCP servers appear as elements only. In running text (en and pt), the word after a secret noun or its
+verb (`password is ...`, `a senha é ...`, `use secret ...`, `chave ...`) is masked when it reads
+like a value: mixed letters and digits or symbols, a long number, or a quoted value; prose,
+references, paths and names stay readable. Known limits are listed in the header of
+`lib/snapshot/mask.mjs`.
 
 ### `session-impact.mjs`, `impact-estimates.mjs`
 
@@ -244,6 +248,16 @@ once per call id.
 | `coverage.<source>.toolCalls` | `complete`, `partial` (some lines unparsable: `null` only for names those lines mention), `unknown` (a file unreadable or a call record in an unread shape: `null` for every name that source could have used), `not-read` |
 | `notes` | Says in words what was not fully read |
 
+**Waste kinds are claims about the user's work, so they are conservative.** `retry` is the same
+whole command failing and run again at least 3 more times with no edit in between; a search
+that finds nothing (`rg`, `grep`, `git diff`... exit 1) is not a failure. `correction` is a
+short user message, after the agent did work, that is not a question nor an answer to one and
+carries a marker about the work ("não era isso", "desfaz", "that's wrong"...). `hook-block` is a
+tool call a hook denied before it ran, read from structured transcript fields, never from text.
+A hook that blocks a Stop to make the agent continue is the hook doing its job: it is counted in
+`hookOutcomes { denials, continues, promptBlocks, stopped, otherBlocking, unknown }`, not as
+waste. The header of `session-impact.mjs` and each output `method` string state every rule.
+
 `impact-estimates.mjs --impact <impact.json> [--clis <clis.json>] [--snapshot <snapshot.json>]
 [--discover <discover.json>]` prints `{ "estimates": [ { "label", "tool", "tokens", "weighted",
 "source" } ], "unmeasured": [...], "unknownUsage": { "skills": [...], "mcpServers": [...] },
@@ -253,7 +267,7 @@ added into measured totals, and an "unused" estimate is built only on a measured
 ### `run.mjs`
 
 ```text
-node run.mjs init    --select <selection.json> | --follow-up <runId|latest>  [--mode guided|doctor] [--days 30] [--lang pt|en] [--title <t>] [--agent <name>]
+node run.mjs init    --select <selection.json> | --follow-up <runId|latest>  [--mode guided|doctor|measure] [--days 30] [--lang pt|en] [--title <t>] [--agent <name>]
 node run.mjs list
 node run.mjs history [--harness <key|path>] [--json] | history --write [--run <id>]
 node run.mjs status  [--run <id>]
@@ -262,13 +276,14 @@ node run.mjs claim   [--run <id>] [--unit <unitId>] --session <label> [--ttl <mi
 node run.mjs release [--run <id>] --unit <unitId> --session <label>
 node run.mjs complete [--run <id>] --unit <unitId> --session <label> --findings <file>
 node run.mjs build   [--run <id>] [--channel artifact|server|file] [--files all|changed] [--no-render] [--agent <name>]
-node run.mjs decide  [--run <id>] --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--rev <rev>] [--answered]
+node run.mjs decide  [--run <id>] --target <itemId|groupId|accounts.primary> --action approve|decline|defer|ask [--note <t>] [--exclude <id,id>] [--rev <rev>] [--answered] [--override-experiment]
 node run.mjs decisions [--run <id>] [--ingest <file.json|directory>]
 node run.mjs mark    [--run <id>] --item <id> --status in-progress|fixed|failed [--rev <rev>] [--verified <t>] [--not-verified <t>] [--auto]
 node run.mjs record  [--run <id>] --item <id> --path <abs> (--backup <abs> [--masked] | --new)
 node run.mjs undo    [--run <id>] (--item <id> | --all) [--dry-run] --yes
 node run.mjs next    [--run <id>]
-node run.mjs close   [--run <id>]
+node run.mjs close   [--run <id>] [--experiment <note> [--follow-up-days <n>]]
+node run.mjs experiment end --harness <key|path>
 node run.mjs --help | <command> --help
 ```
 
@@ -386,6 +401,24 @@ Every route needs the token; any request that is not a `GET` is refused (405), b
 is checked. The server
 serves no other file, sets no CORS headers, refuses a `Host` that is not loopback (403), and
 exits after 12 hours or when the run is closed. Without `--run` it serves the latest run.
+
+**Measure-only runs and experiments** (`references/follow-up.md`):
+
+- `init --mode measure` creates no units; `probe` skips the rule engine (`summary.json` has
+  `checks: { ok: false, skipped: "measure-mode" }`); `build` marks every round `skipped`, so
+  there is no score; `next` suggests `close` right after `build`. With `--follow-up`, the mode
+  is the earlier run's unless it was `measure` (then `guided`).
+- A harness with an open experiment has `experiment { note?, since, until, runId }` in the
+  `init` output, in `run.json`, in the claim brief (with `experimentRules`) and in the state.
+  A finding may set `heldForExperiment: true` only with status `open`. `next` leaves held
+  items out of `undecided` and lists them under `heldForExperiment`. `decide --action approve`
+  on a held item (or a group with one not excluded) is refused with exit 1 and
+  `heldForExperiment: [{ item, harness, until, note? }]`, unless `--override-experiment`; an
+  approval arriving through `--ingest` is skipped.
+- `close --experiment` adds `experiment: { note, until }` to its output and to each record;
+  `experiment end` prints `{ harnessKey, name, path, runId, until, note?, ended, endedAt,
+  already? }` and exits 1 when no experiment is open. `history --json` adds `experiments`,
+  `harnesses[].experiment` and `reviews[].mode`.
 
 ## Findings file
 

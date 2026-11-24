@@ -219,7 +219,24 @@ function scoresOf(hid) {
   return scoreCache[hid];
 }
 
-function isOpen(item) { return item.status === 'open'; }
+/**
+ * An open finding waits for the user's decision, unless the reviewer held it for the experiment
+ * open on its harness (`heldForExperiment`; build keeps the flag only while that experiment is
+ * open): then it waits for the experiment to end, and is listed apart.
+ */
+function isOpen(item) { return item.status === 'open' && !isHeld(item); }
+function isHeld(item) { return item.status === 'open' && item.heldForExperiment === true && !!experimentOf(item.harness); }
+
+/** The experiment open on a harness, or null. */
+function experimentOf(hid) { return HARNESS[hid] && HARNESS[hid].experiment ? HARNESS[hid].experiment : null; }
+
+/** The banner line of an experiment: until when, and what is being tested. */
+function experimentText(e) {
+  return tx(T.xp.banner, { date: fmtDate(e.until), note: e.note || tx(T.xp.applied, { date: fmtDate(e.since) }) });
+}
+
+/** "Not scored", in the words of a measure-only run when it is one. */
+function notScoredText() { return ST.mode === 'measure' ? T.ms.notScored : T.notScored; }
 function openItems(hid) { return (ST.items || []).filter(function (i) { return (!hid || i.harness === hid) && isOpen(i); }); }
 
 function countBy(items) {

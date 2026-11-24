@@ -67,6 +67,20 @@ function viewPending() {
   });
   if (!open.length) out.appendChild(el('p', { cls: 'empty', text: T.pend.none }));
 
+  // Findings held for an experiment, apart from what is decided now: one group per harness, with
+  // the date they wait for.
+  HARNESS_ORDER.forEach(function (h) {
+    var e = experimentOf(h.id);
+    var held = itemsOf(h.id).filter(isHeld);
+    if (!e || !held.length) return;
+    var ul = el('ul', { cls: 'plist held' });
+    held.forEach(function (i) { ul.appendChild(pendingRow(i)); });
+    var title = pl(T.xp.heldH, held.length, { date: fmtDate(e.until) });
+    out.appendChild(el('section', { cls: 'sec psec pheld', id: 'p-held-' + h.id, 'data-toc': title },
+      el('div', { cls: 'ph' }, kindMark(h.kind), el('h2', null, el('a', { href: R.diagnosis(h.id), text: h.name })), el('span', { cls: 'muted', text: title })),
+      el('p', { cls: 'muted', text: T.xp.heldSub }), ul));
+  });
+
   // What was decided already, with the note the decision left: folded, it is history.
   var decided = (ST.items || []).filter(function (i) { return DECIDED[i.status]; });
   if (decided.length) {

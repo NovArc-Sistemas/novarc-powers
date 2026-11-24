@@ -569,12 +569,18 @@ export function makeRecord({ state, run, h, status, ledger, events, stored = new
   const elements = {};
   for (const [name, list] of Object.entries(isObject(hs.elements) ? hs.elements : {})) if (Array.isArray(list)) elements[name] = list.length;
 
+  // `close --experiment` keeps what the user is testing in run.json (`experiment: { note, days }`),
+  // so a record written again later (a decision after the close) still says it. It ends `days`
+  // after this review ended, and that is also when the follow-up is due.
+  const exp = isObject(run.experiment) && Number.isInteger(run.experiment.days) && run.experiment.days > 0 ? run.experiment : null;
+  const followUpAfter = iso(Date.parse(reviewedAt) + (exp ? exp.days : t.followUpAfterDays) * DAY);
   const record = {
     schema: RECORD_SCHEMA,
     skillVersion: clip(str(state.skillVersion), 64),
     harnessKey: harnessKeyOf(h),
     runId: run.runId,
     language: run.language === 'pt' ? 'pt' : 'en',
+    ...(['guided', 'doctor', 'measure'].includes(run.mode) ? { mode: run.mode } : {}),
     kind: h.kind,
     provider: typeof h.provider === 'string' ? clip(h.provider, 64) : null,
     name: clip(str(hs.name), 300),
@@ -582,8 +588,9 @@ export function makeRecord({ state, run, h, status, ledger, events, stored = new
     startedAt: run.createdAt,
     reviewedAt,
     changesAppliedAt: applied.length ? applied.sort((a, b) => Date.parse(a) - Date.parse(b))[applied.length - 1] : null,
-    followUpAfter: iso(Date.parse(reviewedAt) + t.followUpAfterDays * DAY),
+    followUpAfter,
   };
+  if (exp) record.experiment = { ...(typeof exp.note === 'string' && exp.note ? { note: clip(exp.note, 300) } : {}), until: followUpAfter };
   if (isObject(hs.followUp)) record.followUpOf = { runId: hs.followUp.of.runId, reviewedAt: hs.followUp.of.reviewedAt };
   record.scores = {
     baseline: score.baseline, current: score.current, projected: score.projected, grade: score.grade,

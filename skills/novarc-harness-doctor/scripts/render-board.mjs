@@ -555,7 +555,7 @@ const upperFirst = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1)
  * globals), evaluated here so that board.md says about an earlier review exactly what the page says.
  */
 const LOGIC_NAMES = ['metricUnit', 'metricSubLabel', 'notMeasuredReason', 'metricChange', 'followUpSummary', 'followUpLine', 'followUpItems', 'reviewTrail',
-  'itemHistory', 'historyLine', 'carriedDecline', 'carriedLine', 'declinedBefore'];
+  'itemHistory', 'historyLine', 'carriedDecline', 'carriedLine', 'declinedBefore', 'hookNotes'];
 let logicCache = null;
 function boardLogic() {
   if (!logicCache) {
@@ -654,6 +654,13 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
   /** A share as a percentage, floored to one decimal and written the way the language writes numbers. */
   const share = (part, whole) => (whole ? floor1(part / whole * 100) : 0).toLocaleString(LOCALES[lang], { maximumFractionDigits: 1 });
   const title = state.run.title || (state.harnesses.length === 1 ? state.harnesses[0].name : '');
+  // A measure-only run reviews nothing: no score, no rounds, no findings (the page says the same).
+  const measureOnly = state.mode === 'measure';
+  const notScored = measureOnly ? T.ms.notScored : T.notScored;
+  // An open finding held for the experiment open on its harness waits for that experiment to end,
+  // not for a decision now; the flag means nothing without the experiment (templates/board/core.js).
+  const experimentOf = (hid) => (state.harnesses.find((h) => h.id === hid) || {}).experiment || null;
+  const isHeld = (i) => i.status === 'open' && i.heldForExperiment === true && Boolean(experimentOf(i.harness));
   const L = [];
   L.push(`# ${title ? fill(T.md.heading, { name: title }) : T.md.headingPlain}`, '');
   L.push([
@@ -668,14 +675,14 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
 
   // Fleet
   const ordered = [...state.harnesses.filter((h) => h.kind === 'user'), ...state.harnesses.filter((h) => h.kind !== 'user')];
-  const openOf = (hid) => state.items.filter((i) => i.harness === hid && i.status === 'open');
+  const openOf = (hid) => state.items.filter((i) => i.harness === hid && i.status === 'open' && !isHeld(i));
   L.push(`## ${T.md.fleet}`, '');
   L.push(`| ${C.harness} | ${C.kind} | ${C.baseline} | ${C.current} | ${C.projected} | ${C.grade} | ${C.roundsCounted} | ${T.tot.open} |`, '|---|---|---|---|---|---|---|---|');
   for (const h of ordered) {
     const s = h.scores || {};
-    const score = (v) => (v === null || v === undefined ? T.notScored : String(v));
+    const score = (v) => (v === null || v === undefined ? notScored : String(v));
     const grades = s.grade ? (s.projectedGrade && s.projectedGrade !== s.grade ? `${s.grade} → ${s.projectedGrade}` : s.grade) : '-';
-    L.push(`| ${cell(h.name)} | ${label(T.harnessKind, h.kind)} | ${score(s.baseline)} | ${score(s.current)} | ${score(s.projected)} | ${grades} | ${fill(T.md.countOf, { n: s.roundsCounted ?? 0, m: s.roundsTotal ?? ROUNDS_TOTAL })} | ${openOf(h.id).length} |`);
+    L.push(`| ${cell(h.name)} | ${label(T.harnessKind, h.kind)} | ${score(s.baseline)} | ${score(s.current)} | ${score(s.projected)} | ${grades} | ${measureOnly ? '-' : fill(T.md.countOf, { n: s.roundsCounted ?? 0, m: s.roundsTotal ?? ROUNDS_TOTAL })} | ${openOf(h.id).length} |`);
   }
   const avgBase = averageScore(ordered.map((h) => (h.scores || {}).baseline));
   const avgProj = averageScore(ordered.map((h) => (h.scores || {}).projected));
@@ -717,7 +724,7 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
   }
 
   // Pending decisions, each with the exact command for chat
-  const openItems = state.items.filter((i) => i.status === 'open');
+  const openItems = state.items.filter((i) => i.status === 'open' && !isHeld(i));
   const openIds = new Set(openItems.map((i) => i.id));
   const openGroups = groups.filter((g) => g.items.some((id) => openIds.has(id)));
   const needsPrimary = state.accounts && (state.accounts.primary === null || state.accounts.primary === undefined) && state.accounts.list.length > 0;
@@ -744,6 +751,14 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
     }
     L.push('');
   }
+  for (const h of ordered) {
+    const e = experimentOf(h.id);
+    const held = state.items.filter((i) => i.harness === h.id && isHeld(i));
+    if (!e || !held.length) continue;
+    L.push(`### ${cell(h.name)}: ${plural(T.xp.heldH, held.length, { date: isoDate(e.until) })}`, '', T.xp.heldSub, '');
+    for (const i of held) L.push(`- **${i.id}** (${label(T.severity, i.severity)}) ${cell(i.title)}`);
+    L.push('');
+  }
 
   // One section per harness
   for (const h of ordered) {
@@ -754,7 +769,12 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
     head.push(h.path);
     L.push(head.map(cell).join(' · '), '');
     if (h.inherits) L.push(fill(T.hz.inherits, { name: nameOf(h.inherits) }), '');
-    if (s.current === null || s.current === undefined) L.push(`${T.sc.label}: ${T.notScored}`, '');
+    if (h.experiment) {
+      const e = h.experiment;
+      L.push(fill(T.xp.banner, { date: isoDate(e.until), note: e.note ? cell(e.note) : fill(T.xp.applied, { date: isoDate(e.since) }) }), '');
+    }
+    if (measureOnly) L.push(`${T.sc.label}: ${notScored}. ${T.ms.console}`, '');
+    else if (s.current === null || s.current === undefined) L.push(`${T.sc.label}: ${T.notScored}`, '');
     else {
       L.push(`${T.sc.label}: ${C.baseline} ${s.baseline} (${s.baselineGrade}) · ${C.current} ${s.current} (${s.grade}) · ${C.projected} ${s.projected} (${s.projectedGrade})${s.previous === null || s.previous === undefined ? '' : ` · ${C.previous} ${s.previous}`}`, '');
     }
@@ -765,11 +785,13 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       L.push(`${T.fu.trail}: ${[...trail.map((r) => step(isoDate(r.at), r.score, r.grade)), step(T.fu.now, s.current, s.grade)].join(' › ')}`, '');
     }
 
-    L.push(`### ${T.md.scoresByRound}`, '', `| ${C.round} | ${C.weight} | ${C.status} | ${C.score} | ${C.deducted} | ${C.projected} | ${C.items} |`, '|---|---|---|---|---|---|---|');
-    for (const r of roundBreakdown(state, h.id)) {
-      L.push(`| ${r.round} ${T.rounds[r.round]} | ${r.weight} | ${label(T.roundStatus, r.status)} | ${r.counted ? floor1(r.score) : '-'} | ${r.counted ? pointsText(r.deductions) : '-'} | ${r.counted ? floor1(r.projectedScore) : '-'} | ${r.items} |`);
+    if (!measureOnly) {
+      L.push(`### ${T.md.scoresByRound}`, '', `| ${C.round} | ${C.weight} | ${C.status} | ${C.score} | ${C.deducted} | ${C.projected} | ${C.items} |`, '|---|---|---|---|---|---|---|');
+      for (const r of roundBreakdown(state, h.id)) {
+        L.push(`| ${r.round} ${T.rounds[r.round]} | ${r.weight} | ${label(T.roundStatus, r.status)} | ${r.counted ? floor1(r.score) : '-'} | ${r.counted ? pointsText(r.deductions) : '-'} | ${r.counted ? floor1(r.projectedScore) : '-'} | ${r.items} |`);
+      }
+      L.push('');
     }
-    L.push('');
 
     // What the last review expected and what happened since comes before this run's own measurement.
     if (h.followUp) L.push(...followUpMarkdown(h.followUp, T, lang));
@@ -799,6 +821,13 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       if (unknown.length) L.push(`- ${T.notMeasured}: ${namesOf(unknown)}`);
       for (const e of I.estimates || []) L.push(`- ${cell(e.label)} (${T.basis.estimated}): ${tk(e.tokens)}; ${fill(T.imp.source, { source: cell(e.source) })}`);
       L.push('');
+      // What the hooks did that is not waste: a hook doing its job, said apart from the waste.
+      const hookNotes = Logic.hookNotes(I.hookOutcomes);
+      if (hookNotes.length) {
+        for (const n of hookNotes) L.push(n.kind === 'continue' ? plural(T.imp.hookContinues, n.n, { event: cell(n.event) }) : plural(T.imp.hookPromptBlocks, n.n), '');
+        const method = typeof I.hookOutcomes.method === 'string' && I.hookOutcomes.method ? ` ${fill(T.imp.hookMethod, { method: cell(I.hookOutcomes.method) })}` : '';
+        L.push(`${upperFirst(T.why)}: ${T.imp.hookWhy}${method}`, '');
+      }
     } else if (h.impactSkipped) {
       const skip = h.impactSkipped;
       const why = skip.reason === 'shared-sessions' && skip.with ? fill(T.imp.skippedShared, { name: nameOf(skip.with) }) : skip.reason === 'no-transcript-reader' ? T.imp.skippedNoReader : T.imp.none;
@@ -807,7 +836,7 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
 
     const items = state.items.filter((i) => i.harness === h.id);
     L.push(`### ${T.md.itemsByRound}`, '');
-    if (!items.length) L.push(T.md.noItems, '');
+    if (!items.length) L.push(measureOnly ? T.ms.noDiagnosis : T.md.noItems, '');
     const F = T.field;
     for (let r = 1; r <= ROUNDS_TOTAL; r++) {
       const inRound = items.filter((i) => i.round === r);
@@ -816,7 +845,7 @@ export function renderMarkdown(state, lang = resolveLanguage(state.language), wa
       L.push(`| ${C.id} | ${C.severity} | ${C.status} | ${C.class} | ${C.origin} | ${C.title} |`, '|---|---|---|---|---|---|');
       // Beside the status, what an earlier review left on the finding: a decline kept because the
       // same proposal came back, or an open finding that was declined before.
-      const statusOf = (i) => `${label(T.status, i.status)}${Logic.carriedDecline(i) ? ` (${T.hist.keptChip})` : i.status === 'open' && Logic.declinedBefore(i) ? ` (${T.hist.declinedBefore})` : ''}`;
+      const statusOf = (i) => `${label(T.status, i.status)}${Logic.carriedDecline(i) ? ` (${T.hist.keptChip})` : i.status === 'open' && Logic.declinedBefore(i) ? ` (${T.hist.declinedBefore})` : ''}${isHeld(i) ? ` (${fill(T.xp.heldTag, { date: isoDate(experimentOf(i.harness).until) })})` : ''}`;
       for (const i of inRound) L.push(`| ${cell(i.id)} | ${label(T.severity, i.severity)} | ${statusOf(i)} | ${label(T.class, i.class)} | ${label(T.origin, i.origin || 'active')} | ${cell(i.title)} |`);
       L.push('');
       for (const i of inRound) {

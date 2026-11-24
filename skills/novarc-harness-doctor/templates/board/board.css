@@ -317,6 +317,10 @@ a.istrip:hover { box-shadow: var(--shadow-raised); border-color: rgba(4, 18, 46,
 .legend-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--gray-700) }
 .tag.soft { font-weight: 400 }
 .quiet { margin-top: 8px; font: 400 12.5px var(--mono); color: var(--gray-500) }
+/* what the hooks did that is not waste: neutral, never in the waste colours */
+.ihooks { margin-top: 14px; display: grid; gap: 6px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 12px; color: var(--gray-700); font-size: 14px }
+.ihooks > p { margin: 0 }
+.ihooks details.why > p { font-size: 13.5px }
 .subtabs .chip { font-size: 13px; padding: 8px 15px }
 
 /* explorer */
@@ -631,6 +635,9 @@ footer .made { display: inline-flex; align-items: center; gap: 10px }
 .ix-main .n, .ix-hl .n { margin-left: auto; font: 500 11px var(--term); background: var(--warn-50); color: var(--warn); border-radius: 999px; padding: 0 7px; line-height: 18px }
 .ix-hl .nm { flex: 1; min-width: 0; overflow-wrap: anywhere }
 .ix-hl .gr { font: 700 12px var(--term); color: var(--navy-500) }
+.ix-hl .xm { font: 500 10px var(--term); color: var(--signal-600); background: var(--signal-50); border-radius: 999px; padding: 0 6px; line-height: 16px }
+.side a[aria-current="page"] .xm { background: var(--navy-700); color: var(--signal-100) }
+.hname .hn .xm { font-size: 10.5px }
 .ix-hl .n { margin-left: 0 }
 .side a[aria-current="page"] .gr { color: var(--signal-300) }
 .ix-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line) }

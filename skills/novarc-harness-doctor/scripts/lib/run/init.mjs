@@ -17,6 +17,14 @@ import { emptyStatus, appendLog } from './model.mjs';
 import { isDateTime } from './schema.mjs';
 import { hasCredential } from './secrets.mjs';
 import { harnessKeyOf, listRecords, followUpWindow, loadThresholds } from './followup.mjs';
+import { experimentFor } from './experiments.mjs';
+
+/**
+ * guided: nothing is applied without a decision. doctor: the safe classes are applied on their
+ * own. measure: no review units at all; the run measures, renders and closes, and its records are
+ * a baseline a later run compares with.
+ */
+export const MODES = ['guided', 'doctor', 'measure'];
 
 export const PROVIDERS = ['claude-code', 'codex', 'gemini', 'opencode', 'cursor', 'copilot', 'agents', 'other'];
 export const AGENTS = ['claude-code', 'codex', 'opencode', 'cursor', 'gemini', 'other'];
@@ -208,10 +216,12 @@ function followUpBase(value) {
 export function init(args) {
   if (args.select !== undefined && args['follow-up'] !== undefined) throw new UsageError('pass --select <selection.json> or --follow-up <runId|latest>, not both');
   if (args['follow-up'] === undefined && typeof args.select !== 'string') throw new UsageError('init needs --select <selection.json>, or --follow-up <runId|latest>');
-  // The run this one follows up gives the selection, and the mode and language unless a flag says otherwise.
+  // The run this one follows up gives the selection, and the mode and language unless a flag says
+  // otherwise. Measuring is not a way of reviewing that carries over: the run after a measure-only
+  // baseline is a review (guided) unless `--mode measure` asks to measure again.
   const base = args['follow-up'] === undefined ? null : followUpBase(args['follow-up']);
   const mode = args.mode === undefined ? (base && ['guided', 'doctor'].includes(base.run.mode) ? base.run.mode : 'guided') : args.mode;
-  if (!['guided', 'doctor'].includes(mode)) throw new UsageError('--mode must be guided or doctor');
+  if (!MODES.includes(mode)) throw new UsageError('--mode must be guided, doctor or measure');
   const days = args.days === undefined ? 30 : Number(args.days);
   if (!Number.isInteger(days) || days < 1 || days > 365) throw new UsageError('--days must be a whole number from 1 to 365');
   const language = args.lang === undefined ? (base && ['pt', 'en'].includes(base.run.language) ? base.run.language : 'en') : args.lang;
@@ -252,6 +262,13 @@ export function init(args) {
     const ofBase = base ? list.find((e) => e.record.runId === base.runId) : null;
     if (ofBase && (reviewedAt === null || ofBase.record.reviewedAt > reviewedAt)) reviewedAt = ofBase.record.reviewedAt;
   }
+  // An experiment open on a harness (experiments.mjs): judged at the moment this run starts, as
+  // every later command of the run judges it.
+  const createdAt = new Date(now).toISOString();
+  for (const h of harnesses) {
+    const e = experimentFor({ runId: '', createdAt }, h);
+    if (e) h.experiment = e;
+  }
   const previous = previousScores(harnesses);
   if (base && reviewedAt === null) previous.unrecorded.add(base.runId);
   const unrecorded = [...previous.unrecorded].sort();
@@ -269,7 +286,7 @@ export function init(args) {
   const run = {
     version: 1,
     runId: paths.runId,
-    createdAt: new Date(now).toISOString(),
+    createdAt,
     mode,
     language,
     ...(title ? { title } : {}),
@@ -297,6 +314,7 @@ export function init(args) {
     harnesses: harnesses.map((h) => ({
       id: h.id, key: h.key, kind: h.kind, name: h.name, path: h.path, ...(h.inherits ? { inherits: h.inherits } : {}),
       harnessKey: h.harnessKey, ...(followed.has(h.id) ? { followUp: followed.get(h.id) } : {}),
+      ...(h.experiment ? { experiment: h.experiment } : {}),
     })),
     units: staticUnits(run).map((u) => u.id),
     ...(followUpOf ? { followUpOf } : {}),

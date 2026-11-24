@@ -120,7 +120,9 @@ before(() => {
     asst('a11', U100, [bash('b11', 'ls')]), // T11
     result('b11', 'a.txt'), // 5 chars
     asst('a12', U100, [bash('b12', `git push origin ${MARKER}`)]), // T12
-    result('b12', `hook blocked ${MARKER}`, true), // 13 + 11 = 24 chars
+    // A PreToolUse hook denied the push: the record says so in its permissionDecision, the shape
+    // Claude Code writes. The text of the result is never read for this.
+    { ...result('b12', `hook blocked ${MARKER}`, true), toolDenialKind: 'permission-rule', permissionDecision: { decision: 'reject', source: 'hook', reasonType: 'hook', reasonCode: 'hook:PreToolUse' } }, // 13 + 11 = 24 chars
     // T13: one model call written as two entries with the same message id; the second carries a
     // larger output count (40 -> 60), so the turn is 10 + 20 + 30 + 60 = 120 tokens.
     asst('a13', U100, [{ type: 'text', text: MARKER }]),
@@ -861,14 +863,20 @@ test('--sources with --config-dirs or --codex-dirs measures one account at user 
 
 test('correction markers: English', async () => {
   const { isCorrection } = await import('../scripts/lib/transcripts.mjs');
+  // Defaults: the assistant did work and did not ask anything.
   const yes = [
-    'no', 'No.', 'NO!', 'no, use the other file', 'No: the port is 8080', 'no - revert that', 'No\nuse pnpm here',
-    "that's not what I asked for", 'wrong file', 'undo that', 'stop', 'try again',
+    "that's not what I asked for", "no, that's wrong", 'wrong file', 'undo that', 'please revert it', 'roll it back',
+    'I said to use pnpm', 'I asked for the other file', "don't touch the config", 'do not change the tests',
+    'you broke the build', 'you deleted the wrong folder', 'stop.', 'this is wrong, use the old name',
   ];
   const no = [
+    // A bare leading "no" opens answers as often as corrections.
+    'no', 'No.', 'no, use the other file', 'No: the port is 8080', 'No\nuse pnpm here', 'try again',
     'no problem, go ahead', 'no need to run the tests', 'no worries', 'no tests were changed, right?',
     'nobody uses that flag', 'no-op is fine here', 'now run the tests', 'note the version first',
-    'there is no issue with it', 'looks good, ship it',
+    'there is no issue with it', 'looks good, ship it', 'stop the dev server and run the tests',
+    // Questions are not corrections, even with a marker in them.
+    'can you undo that?', 'why did you revert it?', 'is that wrong', 'could we not touch the config',
   ];
   for (const s of yes) assert.equal(isCorrection(s), true, s);
   for (const s of no) assert.equal(isCorrection(s), false, s);
@@ -877,23 +885,50 @@ test('correction markers: English', async () => {
 test('correction markers: Portuguese', async () => {
   const { isCorrection } = await import('../scripts/lib/transcripts.mjs');
   const yes = [
-    'não', 'Não, usa o outro arquivo', 'nao é isso', 'não é isso que eu pedi', 'pare', 'errado, o nome é outro',
-    'desfaz isso', 'desfaça a última mudança', 'faz de novo', 'isso não',
+    'não era isso, desfaz', 'nao é isso', 'não é isso que eu pedi', 'está errado, o nome é outro', 'errado, o nome é outro',
+    'desfaz isso', 'desfaça a última mudança', 'reverte isso', 'volta como estava', 'você apagou o arquivo de testes',
+    'você quebrou o build', 'eu disse para usar o pnpm', 'eu pedi só o README', 'não mexe no config', 'não faça commit',
+    'para de mexer nos testes', 'pare', 'isso não.',
   ];
-  // "no" is em + o here: these open an instruction, not a refusal.
   const no = [
+    // "no" is em + o here: these open an instruction, not a refusal.
     'no arquivo config.json, muda a porta para 8080', 'no projeto, cria a pasta de testes', 'No final do script adiciona um log',
     'no caso de falha, tenta a outra rota', 'no momento só roda os testes', 'nos testes, usa o banco local',
     'nota: o prazo é sexta', 'agora roda os testes', 'pode seguir', 'ficou ótimo',
+    // A bare leading "não" is not a marker: answers and plain instructions.
+    'não', 'Não, usa o outro arquivo', 'não precisa agora', 'não precisa, segue', 'faz de novo', 'roda de novo agora',
+    // Questions, with or without the question mark.
+    'não dá pra usar o X?', 'não dá pra usar o X', 'por que você apagou isso?', 'pode desfazer?', 'está errado?',
+    'será que está errado', 'tem como voltar como estava?',
   ];
   for (const s of yes) assert.equal(isCorrection(s), true, s);
   for (const s of no) assert.equal(isCorrection(s), false, s);
 });
 
+test('corrections need work before them and are not short answers to a question', async () => {
+  const { isCorrection, asksUser, SHORT_ANSWER_WORDS } = await import('../scripts/lib/transcripts.mjs');
+  assert.equal(isCorrection('não era isso, desfaz', { work: true, asked: false }), true);
+  assert.equal(isCorrection('não era isso, desfaz', { work: false, asked: false }), false, 'no tool call since the last message');
+  assert.equal(isCorrection("that's wrong, revert it", { work: false }), false);
+  // A short reply to a question is an answer.
+  assert.equal(isCorrection('não, desfaz', { work: true, asked: true }), false);
+  assert.equal(isCorrection('no, undo it', { work: true, asked: true }), false);
+  // A longer reply with a marker about the work still counts.
+  const long = 'não era isso, você apagou o arquivo de configuração inteiro e eu pedi para mudar só a porta dele';
+  assert.ok(long.split(/\s+/).length > SHORT_ANSWER_WORDS);
+  assert.equal(isCorrection(long, { work: true, asked: true }), true);
+  // What counts as the assistant asking something.
+  assert.equal(asksUser('Feito.\n\nQuer que eu rode os testes agora?'), true);
+  assert.equal(asksUser('Should I keep the old flag?'), true);
+  assert.equal(asksUser('Two ways to do it:\n1. Keep the flag\n2. Remove it\nWhich one do you prefer'), true);
+  assert.equal(asksUser('Done. Summary:\n1. Edited the config\n2. Ran the tests'), false, 'a numbered summary is not a choice');
+  assert.equal(asksUser('Is it right? I checked it.\n\nAll tests pass.'), false, 'only the last paragraph counts');
+});
+
 test('correction markers: only short messages count', async () => {
   const { isCorrection, CORRECTION_MAX_CHARS } = await import('../scripts/lib/transcripts.mjs');
-  assert.equal(isCorrection(`não, ${'x'.repeat(CORRECTION_MAX_CHARS)}`), false);
-  assert.equal(isCorrection(`no, ${'x'.repeat(CORRECTION_MAX_CHARS - 10)}`), true);
+  assert.equal(isCorrection(`desfaz, ${'x'.repeat(CORRECTION_MAX_CHARS)}`), false);
+  assert.equal(isCorrection(`desfaz, ${'x'.repeat(CORRECTION_MAX_CHARS - 10)}`), true);
 });
 
 test('a skill read through a Windows path counts as used', async () => {

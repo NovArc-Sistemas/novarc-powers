@@ -206,6 +206,28 @@ The brief of each unit carries the path of the harness's last record. The review
 `run.mjs build` fills `items[].history` from `previous` and the records (`firstSeenAt`, `times`,
 `lastStatus`, `lastDecisionAt`, `lastNote`). A `previous` that points at nothing is a warning.
 
+## Measure-only records
+
+A run started with `--mode measure` writes records with `"mode": "measure"`, no items and no
+scores. A review that follows it compares the metrics with no expectation, so every verdict is
+a plain change (`improved`, `no-change`, `worse`). It is the cheap way to take a baseline
+before trying something.
+
+## Experiments
+
+An experiment is open on a harness when its latest record has fixed items or an `experiment`
+(`{ note, until }`, set by `close --experiment`), its end (`experiment.until`, else
+`followUpAfter`) is still ahead, and no marker `history/<key>/ended/<runId>.json` exists. A run
+judges this at its own start; `history` and `experiment end` judge it at now. Ending early
+writes the marker; a record is never edited.
+
+While it is open, nothing that loads at the start of every session (instruction files and their
+imports, skill and agent descriptions, MCP servers, plugins, SessionStart hooks, output styles)
+is proposed as an action: reviewers record such findings `open` with `heldForExperiment: true`,
+the board shows a banner and a "held until <date>" group, and approving one needs
+`--override-experiment`. An experiment changes nothing in the comparison itself: it only keeps
+new changes from mixing into what is measured.
+
 ## What the user sees
 
 - **Overview:** per harness, the score then and now, and one line: "N of M expected effects
@@ -226,7 +248,8 @@ The brief of each unit carries the path of the harness's last record. The review
 node run.mjs history [--harness <key|path>] [--json]     what was reviewed, when, and what is due
 node run.mjs history --write [--run <id>]                 write the records of a run without closing it
 node run.mjs init --follow-up <runId|latest> [...]        a new run over the harnesses of that run (not with --select)
-node run.mjs close [--run <id>]                           writes the records, then closes
+node run.mjs close [--run <id>] [--experiment "<note>" [--follow-up-days <n>]]   writes the records, then closes
+node run.mjs experiment end --harness <key|path>         ends an open experiment early
 ```
 
 `history` prints, per harness: each review (date, score, fixed items, expected saving) and

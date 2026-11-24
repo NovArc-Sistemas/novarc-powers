@@ -574,7 +574,7 @@ test('yes, no and unknown in the plugin and CLI views', () => {
 
 test('impact: a kind that was not measured is not "no occurrences", and a null list is not "none unused"', () => {
   const page = load(board(withUnknowns()), { hash: '#/h/u1/impact' });
-  assert.deepEqual(page.texts('.quiet'), ['no occurrences: identical calls repeated in a row', 'not measured: calls blocked by a hook, commands that do not exist here']);
+  assert.deepEqual(page.texts('.quiet'), ['no occurrences: identical calls repeated in a row', 'not measured: tool calls a hook denied, commands that do not exist here']);
   assert.deepEqual(page.texts('.ilist .iname'), ['Retries of a command that keeps failing']);
   const unused = (p) => p.root.querySelector('.unused').children.map((box) => box.children.map((n) => n.textContent));
   assert.deepEqual(unused(page), [['1 skill never invoked in the window', 'idle-skill'], ['Skills', 'not measured', 'null-skillno-skill'], ['MCP servers', 'not measured']]);
@@ -583,8 +583,66 @@ test('impact: a kind that was not measured is not "no occurrences", and a null l
   assert.deepEqual(page.texts('.pathline').filter((t) => t.includes('per session')), ['about 400 tokens per session']);
 
   const pt = load(board(withUnknowns('pt'), { lang: 'pt' }), { hash: '#/h/u1/impact' });
-  assert.equal(pt.texts('.quiet')[1], 'sem medição: chamadas bloqueadas por um hook, comandos que não existem aqui');
+  assert.equal(pt.texts('.quiet')[1], 'sem medição: chamadas negadas por um hook, comandos que não existem aqui');
   assert.deepEqual(unused(pt).slice(1), [['Skills', 'sem medição', 'null-skillno-skill'], ['Servidores MCP', 'sem medição']]);
+});
+
+/** u1 with a measured impact whose only waste is two denied calls, and `hookOutcomes` when given. */
+function withHookOutcomes(lang, outcomes) {
+  const st = fixture();
+  st.language = lang;
+  st.harnesses.find((h) => h.id === 'u1').impact = {
+    windowDays: 30, sessions: 10, totalTokens: 1000,
+    waste: [{ kind: 'hook-block', episodes: 2, tokens: 50 }, { kind: 'retry', episodes: 0, tokens: 0 }],
+    ...(outcomes ? { hookOutcomes: outcomes } : {}),
+  };
+  applyScores(st);
+  return st;
+}
+const HOOK_OUTCOMES = {
+  denials: { PreToolUse: 2 }, continues: { SubagentStop: 1, Stop: 42 }, promptBlocks: 3, stopped: 1, otherBlocking: { Notification: 1 }, unknown: 4,
+  method: 'Hook outcomes read from structured transcript fields.',
+};
+
+test('impact: what a hook did that is not waste is one neutral line per event, apart from the waste, with why folded', () => {
+  const lines = (page) => page.view.querySelector('.ihooks').children.filter((n) => n.tagName === 'P').map((n) => n.textContent);
+  const en = load(board(withHookOutcomes('en', HOOK_OUTCOMES)), { hash: '#/h/u1/impact' });
+  assert.deepEqual(lines(en), [
+    'Your Stop hook made the agent keep going 42 times: that is the hook doing its job, not waste.',
+    'Your SubagentStop hook made the agent keep going once: that is the hook doing its job, not waste.',
+    'Your UserPromptSubmit hook blocked 3 prompts: that is the hook doing its job, not waste.',
+  ]);
+  assert.deepEqual(en.texts('.ihooks .why p'), [STRINGS.en.imp.hookWhy, 'How it is counted: Hook outcomes read from structured transcript fields.']);
+  assert.equal(en.texts('.ihooks .why summary').join(), STRINGS.en.why);
+  // The denied calls are the waste row, under its new name; the note is not part of the waste list.
+  assert.deepEqual(en.texts('.ilist .iname'), ['Tool calls a hook denied']);
+  assert.equal(en.view.querySelectorAll('.ilist .ihooks').length, 0);
+
+  const pt = load(board(withHookOutcomes('pt', { ...HOOK_OUTCOMES, promptBlocks: 1 }), { lang: 'pt' }), { hash: '#/h/u1/impact' });
+  assert.deepEqual(lines(pt), [
+    'Seu hook de Stop fez o agente continuar 42 vezes: é o hook fazendo o trabalho dele, não desperdício.',
+    'Seu hook de SubagentStop fez o agente continuar 1 vez: é o hook fazendo o trabalho dele, não desperdício.',
+    'Seu hook de UserPromptSubmit bloqueou 1 prompt: é o hook fazendo o trabalho dele, não desperdício.',
+  ]);
+  assert.equal(pt.texts('.ihooks .why summary').join(), 'por que isso importa');
+  assert.deepEqual(pt.texts('.ilist .iname'), ['Chamadas negadas por um hook']);
+});
+
+test('impact: without hookOutcomes, or with nothing in it that is not waste, the tab is as before', () => {
+  const plain = load(board(withHookOutcomes('en', null)), { hash: '#/h/u1/impact' });
+  assert.equal(plain.view.querySelectorAll('.ihooks').length, 0);
+  for (const outcomes of [
+    { denials: { PreToolUse: 2 }, continues: {}, promptBlocks: 0, stopped: 3, otherBlocking: { Notification: 1 }, unknown: 1 },
+    // Counts that are not positive whole numbers say nothing.
+    { continues: { Stop: 0, SubagentStop: -1, Odd: 1.5, Text: '3' }, promptBlocks: null },
+  ]) {
+    const page = load(board(withHookOutcomes('en', outcomes)), { hash: '#/h/u1/impact' });
+    assert.equal(page.view.querySelectorAll('.ihooks').length, 0, JSON.stringify(outcomes));
+    assert.deepEqual(page.texts('.ilist .iname'), plain.texts('.ilist .iname'));
+  }
+  // No method: the fold carries only why.
+  const bare = load(board(withHookOutcomes('en', { continues: { Stop: 2 } })), { hash: '#/h/u1/impact' });
+  assert.deepEqual(bare.texts('.ihooks .why p'), [STRINGS.en.imp.hookWhy]);
 });
 
 // ---------------------------------------------------------------------------------------------

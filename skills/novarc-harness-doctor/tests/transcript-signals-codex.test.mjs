@@ -55,7 +55,8 @@ test('transcript-signals reads Codex calls in every record shape, once per call 
   assert.deepEqual(j.toolCalls, { shell: 3, exec_command: 2, mcp__my_server__ping: 2, exec: 1 });
   assert.deepEqual(j.shellFailures, { 'npm test': 3, 'foo-cli': 1 });
   assert.deepEqual(j.commandNotFound, { 'foo-cli': 1 });
-  assert.deepEqual(j.retries, [{ head: 'npm test', sessions: 1 }]);
+  // Three failures are a first failure and two reruns: a retry needs three reruns.
+  assert.deepEqual(j.retries, []);
   assert.equal(j.sessionsEndingOnError, 1);
   assert.deepEqual(j.topFailureSessions, [{ source: 'codex', id: SID, failures: 4 }]);
 });

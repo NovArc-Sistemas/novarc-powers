@@ -18,6 +18,7 @@ import { loadItems, loadStatus, appendLog, harnessById } from './model.mjs';
 import { REV_RE } from './rev.mjs';
 import { hasCredential, CREDENTIAL_HINT } from './secrets.mjs';
 import { refreshRecords } from './history.mjs';
+import { experimentFor } from './experiments.mjs';
 
 
 /** Classes doctor mode may apply without a decision (references/doctor-policy.md). */
@@ -70,6 +71,7 @@ export function mark(ctx, args) {
         if (args.auto !== true) refuse(was ? `it is open again: the user ${was.status} another version of this proposal, and has to decide on the current one` : 'it is open; the user has not approved it');
         if (ctx.run.mode !== 'doctor') refuse('--auto is only for doctor mode; this run is guided');
         if (!SAFE_CLASSES.includes(item.class)) refuse(`class ${item.class} always waits for the user's decision`);
+        if (item.heldForExperiment === true && experimentFor(ctx.run, ctx.run.harnesses.find((h) => h.id === item.harness))) refuse('it is held until the experiment open on its harness ends');
         // The user had an opinion on this item; another version of it is theirs to judge.
         if (was) refuse(`the user ${was.status} another version of this proposal; the current one waits for their decision`);
         auto = true;

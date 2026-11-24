@@ -39,7 +39,7 @@ function totalsBand() {
   };
 
   if (base === null) {
-    tot(el('div', { cls: 'v none', text: T.notScored }), single ? T.tot.gradeOne : T.tot.gradeFleet, T.sc.ariaNone);
+    tot(el('div', { cls: 'v none', text: notScoredText() }), single ? T.tot.gradeOne : T.tot.gradeFleet, ST.mode === 'measure' ? T.ms.console : T.sc.ariaNone);
   } else {
     var gb = Scoring.gradeFor(base);
     var gp = Scoring.gradeFor(proj);
@@ -150,7 +150,7 @@ function accountsPanel() {
 // --- fleet ----------------------------------------------------------------------------------
 
 function scoreBar(sc) {
-  if (sc.baseline === null) return el('div', { cls: 'muted mono', text: T.notScored });
+  if (sc.baseline === null) return el('div', { cls: 'muted mono', text: notScoredText() });
   var b = Math.max(0, Math.min(100, sc.baseline));
   var p = Math.max(0, Math.min(100, sc.projected));
   var grade = function (g, n, cls, word) {
@@ -214,7 +214,10 @@ function followUpRow(h) {
 function fleetRow(h) {
   var pw = providerWord(h);
   // Under its group heading the row needs only the glyph of its kind, not the word again.
-  var name = el('div', { cls: 'hname' }, el('b', { cls: 'hn' }, kindMark(h.kind, { word: false }), el('span', { text: h.name })), el('span', { cls: 'p', text: (pw ? pw + ' · ' : '') + h.path }));
+  var xp = experimentOf(h.id);
+  var name = el('div', { cls: 'hname' }, el('b', { cls: 'hn' }, kindMark(h.kind, { word: false }), el('span', { text: h.name }),
+    xp ? el('span', { cls: 'tag info xm', title: tx(T.xp.markTitle, { date: fmtDate(xp.until) }), text: T.xp.mark }) : null),
+    el('span', { cls: 'p', text: (pw ? pw + ' · ' : '') + h.path }));
   var since = followUpRow(h);
   var label = tx(T.fleet.open, { name: h.name }) + (since ? '. ' + since.say : '');
   if (isEmptyHarness(h)) return el('a', { cls: 'hrow', href: R.harness(h.id), 'aria-label': label }, name, el('span', { cls: 'hempty', text: emptyText(h) }), since ? since.node : null);

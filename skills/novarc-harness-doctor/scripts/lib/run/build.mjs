@@ -29,6 +29,7 @@ import { ELEMENT_RULES } from './findings.mjs';
 import { AGENTS, CHANNELS } from './init.mjs';
 import { logText } from './text.mjs';
 import { harnessKeyOf, earlierRecords, lastRecordOf, ignoredRecords, itemHistory, harnessHistory, followUpFor } from './followup.mjs';
+import { experimentsOf } from './experiments.mjs';
 import { scoreHarness } from '../scoring.mjs';
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -282,12 +283,14 @@ export function assembleState(ctx, root, groups) {
   inventory.sort(byHarnessOrder);
   defenses.sort(byHarnessOrder);
 
-  // Rounds: pending unless a reviewer said otherwise; round 3 does not apply to a user harness.
+  // Rounds: pending unless a reviewer said otherwise; round 3 does not apply to a user harness. A
+  // measure-only run reviews nothing: every round that applies is skipped, so no score is made.
   const rounds = [];
+  const unreviewed = run.mode === 'measure' ? 'skipped' : 'pending';
   for (const h of run.harnesses) {
     for (const round of ROUNDS) {
       const said = roundStatus.get(`${h.id}:${round}`);
-      const entry = { harness: h.id, round, status: roundApplies(h, round) ? 'pending' : 'not-applicable' };
+      const entry = { harness: h.id, round, status: roundApplies(h, round) ? unreviewed : 'not-applicable' };
       if (said && roundApplies(h, round)) { entry.status = said.status; if (typeof said.note === 'string' && said.note) entry.note = said.note; }
       rounds.push(entry);
     }
@@ -341,6 +344,15 @@ export function assembleState(ctx, root, groups) {
     });
     harnesses[n] = { ...rest, history: harnessHistory(earlier), followUp, ...(scores !== undefined ? { scores } : {}) };
   });
+  // An experiment open on a harness (experiments.mjs), judged when the run started: the board
+  // shows it, and a finding the reviewer held for it waits only while it is open.
+  const experiments = experimentsOf(run);
+  run.harnesses.forEach((h, n) => {
+    if (!experiments[h.id]) return;
+    const { scores, ...rest } = harnesses[n];
+    harnesses[n] = { ...rest, experiment: experiments[h.id], ...(scores !== undefined ? { scores } : {}) };
+  });
+  for (const item of items) if (item.heldForExperiment !== true || !experiments[item.harness]) delete item.heldForExperiment;
 
   const decisionSchema = def(root, 'decision');
   const decisions = status.decisions

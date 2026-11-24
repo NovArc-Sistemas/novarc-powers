@@ -10,7 +10,7 @@
     "schemaVersion": { "const": 2 },
     "skillVersion": { "type": "string" },
     "language": { "enum": ["en", "pt"], "description": "Language of the board chrome; item texts are written by the agent in the user's language." },
-    "mode": { "enum": ["guided", "doctor"] },
+    "mode": { "enum": ["guided", "doctor", "measure"], "description": "guided: nothing is applied without a decision. doctor: safe classes are applied on their own. measure: no review rounds and no findings, only the measurements (run.mjs init --mode measure)." },
     "run": {
       "type": "object",
       "required": ["id", "startedAt"],
@@ -162,6 +162,18 @@
             }
           },
           "followUp": { "$ref": "#/$defs/followUp" },
+          "experiment": {
+            "type": "object",
+            "description": "An experiment is open on this harness: its last review applied changes, or was marked as an experiment (run.mjs close --experiment), and its follow-up date has not come yet. While it is open, changes to what loads at the start of every session wait, so they do not confound the measurement. Written by run.mjs build. See references/follow-up.md.",
+            "required": ["since", "until", "runId"],
+            "additionalProperties": false,
+            "properties": {
+              "note": { "type": "string", "description": "What the user is testing, in their words. Absent when the experiment is the changes the last review applied." },
+              "since": { "type": "string", "format": "date-time", "description": "When it started: the last applied change, else the end of that review." },
+              "until": { "type": "string", "format": "date-time", "description": "When it ends: the follow-up date of that review." },
+              "runId": { "type": "string", "description": "The run whose review record started it." }
+            }
+          },
           "scores": { "$ref": "#/$defs/score" }
         }
       }
@@ -271,6 +283,7 @@
           "status": { "$ref": "#/$defs/itemStatus" },
           "decision": { "type": "string", "description": "What the user decided, in their words or a short paraphrase." },
           "question": { "type": "string", "description": "A question the user asked about this item from the board, waiting for an answer in chat." },
+          "heldForExperiment": { "type": "boolean", "description": "Set by the reviewer on an open finding about what loads at the start of every session (instruction files and their imports, skill and agent descriptions, MCP servers, plugins, SessionStart hooks, output styles) while an experiment is open on its harness: it waits until the experiment ends and is not listed with what to decide now. Kept by run.mjs build only while that experiment is open." },
           "verified": { "type": "string", "description": "What was checked after the change." },
           "notVerified": { "type": "string", "description": "What could not be checked." },
           "backup": { "type": "string" },
@@ -617,6 +630,20 @@
               "topHeads": { "type": "array", "items": { "type": "string" } },
               "items": { "type": "array", "items": { "type": "string" }, "description": "Item ids that address this kind of waste." }
             }
+          }
+        },
+        "hookOutcomes": {
+          "type": "object",
+          "description": "What the hooks did in the window, read from structured transcript fields by session-impact.mjs (its METHODS.hookOutcomes). Only `denials` is waste (the hook-block kind); continues and prompt blocks are hooks doing their job, shown apart and never added to the waste.",
+          "additionalProperties": false,
+          "properties": {
+            "denials": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "Tool calls a hook denied before they ran, by hook event." },
+            "continues": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "Times a Stop or SubagentStop hook blocked the end of a response, so the agent kept working, by hook event." },
+            "promptBlocks": { "type": "integer", "minimum": 0, "description": "Prompts a UserPromptSubmit hook blocked." },
+            "stopped": { "type": "integer", "minimum": 0, "description": "Times a hook stopped the agent (continue: false)." },
+            "otherBlocking": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "Blocking outcomes of other events, by hook event." },
+            "unknown": { "type": "integer", "minimum": 0, "description": "Blocking outcomes that name no event." },
+            "method": { "type": "string", "description": "How the counts were read, as session-impact.mjs prints it." }
           }
         },
         "estimates": {
